@@ -31,7 +31,8 @@ Start here:
 |---|---|
 | [docs/plan-of-attack.md](docs/plan-of-attack.md) | **The main document.** Assessment & feedback, ESXi→Proxmox translation table, architecture spine, phased plan, proposed repo layout, and the consolidated `[lab-verify]` / `[decision-needed]` list (§6). |
 | [docs/decision-log.md](docs/decision-log.md) | Running log of decisions made and still open. |
-| [docs/se350-verification-checklist.md](docs/se350-verification-checklist.md) | Actionable Phase 0 lab checklist for the SE350 platform, including the XCC Enterprise FoD (virtual media) license test. |
+| [docs/site-reference-architecture.md](docs/site-reference-architecture.md) | The café-model site standard the automation reproduces: VLAN plan, switching/wiring, DIA model, the static→LACP port-channel flip, ESXi host-tweak translation, sizing policy. |
+| [docs/se350-verification-checklist.md](docs/se350-verification-checklist.md) | Actionable Phase 0 lab checklist for the SE350 platform (Redfish vmedia functional check, BIOS dump, M.2/AHCI, wiring/EtherChannel capture). |
 
 Reference research (dense, per-dimension findings backing the plan):
 
@@ -55,7 +56,12 @@ Reference research (dense, per-dimension findings backing the plan):
 - **PA-VM management: standalone or SCM, no Panorama** (decided).
 - **SE350 fleet is the Security Pack variant** — ThinkShield claim/motion-detection steps
   are mandatory in the ship and RMA runbooks (confirmed).
-- **XCC Enterprise FoD license presence: unconfirmed** — this gates the no-USB bare-metal
-  track; test procedure in the [verification checklist](docs/se350-verification-checklist.md).
+- **XCC licenses are Enterprise fleet-wide** — the no-USB bare-metal track is unblocked
+  (confirmed; functional check at fleet firmware level remains in the
+  [checklist](docs/se350-verification-checklist.md)).
+- **Server-facing port-channels flip static→LACP at Proxmox conversion**, same
+  maintenance window — both mismatch directions black-hole (proposed; see the
+  [site reference architecture](docs/site-reference-architecture.md)).
+- **Image repo = the existing nautobot-composer server** (decided).
 
 See the [decision log](docs/decision-log.md) for the full list with status.

@@ -7,14 +7,12 @@ machine serial (they feed Nautobot device records and the platform-profile YAML)
 Replace `XCC_IP`, `XCC_USER:XCC_PASS` as appropriate. All curl examples are plain GETs
 and safe against in-service units.
 
-## 1. XCC Enterprise FoD license (gates Redfish virtual media — the no-USB install path)
+## 1. XCC virtual media functional check (license question answered)
 
-License tiers on first-gen XCC: Standard (base) → Advanced (adds remote KVM only) →
-**Enterprise (adds virtual-media mounting — the one we need)**. ESXi-era remote-console
-use only proves Advanced.
-
-**UI check:** XCC web UI → license/Features-on-Demand page → must show *XClarity
-Controller Enterprise*.
+**Answered 2026-08-06: fleet licenses are XCC Enterprise**, so virtual media is
+license-entitled everywhere. What remains is the functional check — confirm the EXT
+members actually appear at the fleet's XCC firmware level (and PATCH-insert works),
+since firmware minimums for reliable Redfish vmedia exist per XCC1 model.
 
 **Functional check** — list the VirtualMedia collection members:
 
@@ -23,10 +21,9 @@ curl -sk -u 'XCC_USER:XCC_PASS' https://XCC_IP/redfish/v1/Managers/1/VirtualMedi
 ```
 
 - `EXT1`–`EXT4` present (a licensed XCC1 shows ~10 members incl. `RDOC*`/`Remote*`) →
-  **Enterprise active; automation path works.**
-- Only `RDOC*`/`Remote*` → no Enterprise license, *or* firmware too old. Cross-check the
-  UI license page: page says Enterprise but no EXT members → firmware update needed, not
-  a license purchase.
+  **automation path works.**
+- Only `RDOC*`/`Remote*` → firmware too old (license is known-good) → XCC firmware
+  update, then re-test.
 - `/Managers/1` 404s → list `/redfish/v1/Managers` and substitute the member ID.
 
 Notes: only `EXT{N}` members are Redfish-insertable, via **PATCH** on the member (not
@@ -109,7 +106,18 @@ Record current state. Plan default: **disable** Secure Boot for the auto-install
 (PVE's signed-shim path exists but complicates unattended installs), TPM 2.0 left
 enabled. Confirm the auto-install ISO boots with Secure Boot disabled.
 
-## 10. Proxmox VE 9 manual install + burn-in
+## 10. Switch-side EtherChannel capture (per site type, feeds the conversion runbook)
+
+On a representative 9300 stack: `show etherchannel load-balance` (default is `src-mac`,
+which polarizes NFV traffic onto one member — the runbook standardizes an IP-based hash,
+e.g. `src-dst-ip`, paired with Linux `layer2+3`) and `show run` of the server-facing
+port-channels (expect `channel-group mode on` today). Confirm the port-role wiring
+against the reference architecture: p1 = XCC, p3/p4 = 1G copper, f1/f2 = 10G fiber,
+cross-connected to both stack members — and decide the Proxmox port-role map
+(decision log #20). After any test conversion: `show etherchannel summary` must show
+flags `P` (bundled) and `/proc/net/bonding/bond0` a non-zero partner MAC.
+
+## 11. Proxmox VE 9 manual install + burn-in
 
 Manually install PVE 9.x (pin the current point release) on one unit and burn in:
 Xeon D-2100 + kernel 6.14-era stability, i40e (X722) and igb (I350) behavior under
@@ -120,7 +128,7 @@ VLAN-aware bridge trunk. This is the host used to develop Phases 1–2 jobs agai
 
 ### Results capture
 
-For each unit: serial, machine type (7Z46/7D1X/7D27), CPU SKU (D-2123IT…D-2183IT — also
-matters for PA-VM licensing: the VM-Series serial derives from UUID **and CPUID**, so RMA
-spares should be same-SKU), RAM, XCC/UEFI/X722 firmware, FoD tier, EXT-members
+For each unit: serial, machine type (7Z46/7D1X/7D27), CPU SKU (fleet is documented as
+uniform 16-core D-2183IT — flag any deviation, since the PA-VM serial derives from UUID
+**and CPUID**, making same-SKU spares matter), RAM, XCC/UEFI/X722 firmware, EXT-members
 yes/no, M.2 layout, ThinkShield state, Secure Boot state.

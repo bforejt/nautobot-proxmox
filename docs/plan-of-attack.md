@@ -82,9 +82,11 @@ code path entered at different layers.
    the 3.x-sensitive surface small: approval gating isolated in one place, job libraries
    as pure Python with thin Nautobot wrappers.
 5. **Image distribution without shared storage is a solved, pure-API problem** — if
-   designed in from day one: internal HTTPS image repo with immutable versioned filenames
-   + SHA256 sidecars → `POST /nodes/{node}/storage/{storage}/download-url`
-   (content=`import`, checksum verified) → VM create with `import-from=<volume ID>`.
+   designed in from day one: the existing **nautobot-composer firmware server** acts as
+   the image repo (immutable versioned qcow2/ISO filenames + SHA256 sidecars; HTTPS for
+   node `download-url` pulls, plus a plain-HTTP vhost for XCC1 install-ISO mounts) →
+   `POST /nodes/{node}/storage/{storage}/download-url` (content=`import`, checksum
+   verified) → VM create with `import-from=<volume ID>`.
    Critically, `import-from` with an absolute filesystem path fails for **all** API tokens
    (including root@pam's) — the volume-ID path is not an optimization, it is the only
    token-compatible mechanism.
@@ -119,12 +121,14 @@ code path entered at different layers.
 | Interactive robot Q&A (site code, subnets, server 1/2) | Nautobot design job inputs; intent stored in SoT | `SiteNfvDesignJob` |
 | Fresh ESXi install (manual/kickstart) | Automated-installer ISO + `answer.toml` | Redfish vmedia mount + one-time CD boot; `proxmox-auto-install-assistant` |
 | Host power policy = High Performance | Two layers: firmware `OperatingModes_ChooseOperatingMode = MaximumPerformance` (Redfish BIOS) + kernel `intel_idle.max_cstate=1 processor.max_cstate=1` (governor already defaults to `performance` with intel_pstate) | `bmc/` BIOS policy + firstboot hook |
-| vSwitch + LAG (dot1q trunk) | `bond0`: bond-mode `802.3ad`, xmit-hash `layer3+4`, miimon 100 | `POST /nodes/{n}/network` (staged) + `PUT /nodes/{n}/network` (apply, ifupdown2, live) |
+| vSwitch + LAG (dot1q trunk; today `channel-group mode on` — static, a vSS limitation) | `bond0`: bond-mode `802.3ad`, xmit-hash `layer2+3` (pair with Cisco `src-dst-ip`; 9300 default is `src-mac` — change it), miimon 100. **Switch ports flip `mode on`→`mode active` in the same window** — both mismatch directions black-hole (see site-reference-architecture.md) | `POST /nodes/{n}/network` (staged) + `PUT /nodes/{n}/network` (apply, ifupdown2, live) |
 | Port groups (one per VLAN) | ONE VLAN-aware bridge `vmbr0` (`bridge_vlan_aware=1`, `bridge_vids` = site VLAN list from IPAM; note VLAN 1 is excluded by default) | Same network API |
 | VM vNIC on access port group | `net0: virtio,bridge=vmbr0,tag=<vid>[,queues=<vCPUs>]` | VM config API |
 | VLAN 4095 / VGT trunk (PA-VM, C8000v self-tagging) | vNIC with no `tag` (full trunk) or `trunks=<vid;vid;…>` (filtered — preferred, generated from IPAM) | VM config API |
 | Port-group "forged transmits / promiscuous" | Not needed — Linux bridge does no MAC anti-spoofing; keep `firewall=0` on VNF dataplane NICs so floating MACs (VRRP, PA HA) are never filtered | VM config |
-| NIC tuning (offloads, rings) | `ethtool -K … gro/lro/tso off` on the bridged data path (Palo Alto's official KVM host guidance) + X722 `disable-fw-lldp on`; persist via systemd oneshot unit (no API exists for this) | firstboot hook |
+| NIC tuning (offloads, rings) | `ethtool -K … gro/lro/tso off` on the bridged data path (standard NFV/PA KVM guidance; LRO is kernel-auto-disabled on bridged ports anyway) + X722 `disable-fw-lldp on`; persist via systemd oneshot unit (no API exists for this). Keep GRO on the mgmt path | firstboot hook |
+| "Enable TCPIP LRO" robot step | Asserts an ESXi *default* (vmkernel-stack LRO for host-terminated TCP) — no Proxmox action needed; Linux GRO on the mgmt path is the default-on analog | — |
+| "Enable Network Queue Pairing" robot step | Also an ESXi default (NetQueue RX/TX thread pairing); functional analog is virtio-net multiqueue `queues=<vCPUs>` on dataplane vNICs | VM config API |
 | Golden VMDK deploy | qcow2 in `import`-typed storage; VM create with `import-from=<volume ID>` | `download-url` + VM create APIs |
 | Guest customization (Ubuntu) | Native cloud-init (`ide2=<store>:cloudinit`, `--ciuser --sshkeys --ipconfig0`); avoid `cicustom` snippets (no upload API) | Pure API |
 | VNF day-0 (PA bootstrap, IOS-XE config) | Generated CD-ROM ISO: PA = `/config/init-cfg.txt` (+ empty `/license /software /content`); C8000v & 9800-CL = `iosxe_config.txt` at ISO root; SD-WAN = unmodified Manager-generated `ciscosdwan_cloud_init.cfg` | Jinja2 → ISO build → storage `upload` API (content=iso) → attach `media=cdrom` |
@@ -205,10 +209,14 @@ until the OpenGear serial path to that node is proven.**
   qemu-guest-agent ping where available, plus a VNF-level probe (PA-VM HA/API state,
   C8000v control connections, at minimum mgmt reachability). The pre-flight must fail
   closed during exactly the partial outages when field redeploys actually happen.
-- Oversubscription guardrail (a headline constraint): `SiteNfvDesignJob` validates
-  sum(vCPU) and sum(RAM) of intended VMs against host cores/RAM minus the ZFS `arc-max`
-  reservation at intent time; `DeployVmJob` re-checks at deploy time. Budget `queues=`
-  too — multiqueue adds host CPU load.
+- Oversubscription guardrail (a headline constraint, and written policy: *used CPU/RAM
+  must not exceed actuals; storage may be thin-provisioned*): `SiteNfvDesignJob`
+  validates sum(vCPU) and sum(RAM) of intended VMs against host actuals at intent time;
+  `DeployVmJob` re-checks at deploy time. "Actuals" counts **physical cores, not SMT
+  threads** (fleet: 16-core/32-thread D-2183IT, 256 GB): budget = 16 cores minus 2–4
+  reserved for host/housekeeping (vhost threads, bridge, mgmt) ≈ 12–14 VNF vCPUs; RAM =
+  256 GB minus host overhead and the pinned ZFS `arc-max`. Budget `queues=` too —
+  multiqueue adds host CPU load.
 - Replaced VM disks are renamed, not deleted, until post-deploy checks pass.
 
 ---
@@ -218,6 +226,16 @@ until the OpenGear serial path to that node is proven.**
 Two tracks converge: **Track A** (Nautobot + Proxmox jobs — new work) and **Track B**
 (bare-metal — extend the colleague's repo). Read-only precedes write; each phase ships
 visible value.
+
+The team's two target processes map directly onto these tracks: **Process 1** ("deploy
+images onto an initially provisioned Proxmox server" — pull qcow2/ISO images from the
+nautobot-composer server, deploy VMs with cloud-init-style day-0 injection, configure
+the virtual network infrastructure, tune the host for realtime network workloads) is
+Track A = Phases 1–2 plus the L1/L2 host jobs. **Process 2** ("initially deploy the
+server itself") is Track B = Phase 3. The plan keeps Process 1's steps as separately
+runnable jobs (image ingest / VM deploy / host network / host baseline) rather than one
+monolithic robot — a thin wrapper can still present them as a single operator action,
+but field one-off redeploys and partial re-runs need the per-layer entry points.
 
 ### Phase 0 — Platform decisions + lab bring-up
 
@@ -336,7 +354,9 @@ separate line items gated on the licensing/BOM decisions in §6.
 - Replace free-form BMC-IP job input with `ObjectVar(Device)` + ExternalIntegration; write
   state back to the Device (the current job writes nothing back).
 - **Lab install infrastructure as a named deliverable with an owner and bring-up order:**
-  plain-HTTP ISO server (XCC1 constraint), HTTPS answer service, HTTPS image repo.
+  plain-HTTP ISO vhost (XCC1 constraint), HTTPS answer service, HTTPS image repo — the
+  first and third are roles of the existing nautobot-composer server; the answer service
+  is the new component.
 
 Exit: blank SE350 → racked in lab → one Nautobot job → fully tuned PVE node with
 bond/bridge up and `provisioning_state=fabric_done`, no human between.
@@ -444,8 +464,9 @@ nautobot-proxmox/
 ## 6. Key Risks & Open Questions
 
 **Bare-metal / SE350 platform**
-1. `[lab-verify]` XCC Enterprise FoD presence across the actual fleet; whether final SE350
-   XCC firmware also accepts POST InsertMedia; minimum firmware for reliable vmedia.
+1. Answered: XCC licenses are **Enterprise fleet-wide** — the Redfish vmedia bare-metal
+   track is unblocked. Remaining `[lab-verify]`: EXT members visible and PATCH-insert
+   works at the fleet's actual XCC firmware level.
 2. Answered: fleet is Security Pack (ThinkShield activation already required today).
    ThinkShield claim is step 1 of the scenario-3 runbook; pre-ship procedure handles
    motion detection (scenario 1). `[lab-verify]` current motion/tamper settings on
@@ -517,5 +538,23 @@ nautobot-proxmox/
 27. `[decision-needed]` Field bare-metal reinstall over WAN: recommend **never** (ship a
     lab-rebuilt unit); reversing this materially changes the answer-service/webhook
     connectivity and TLS design.
-28. `[lab-verify]` Enumerate exactly which ethtool/ring/interrupt tunings the current
-    ESXi robot applies before writing the Linux equivalents — don't cargo-cult.
+28. Partially answered: the robot's documented host tweaks are power policy, VM
+    autostart, SSH/serial shells, plus "Enable TCPIP LRO" and "Enable Network Queue
+    Pairing" — the latter two assert ESXi *defaults* and need no Proxmox port (see
+    site-reference-architecture.md). `[lab-verify]` only that no additional undocumented
+    ethtool/ring tweaks exist in the robot code.
+
+**Site architecture (added Aug 2026)**
+29. Recommended, `[decision-needed]` to ratify: server-facing EtherChannels flip
+    `channel-group mode on` → `mode active` (LACP) in the same maintenance window as
+    each server's Proxmox conversion — both mismatch directions black-hole (802.3ad
+    into mode-on = partial hash-dependent loss; balance-xor into mode-active = members
+    suspended). Post-flip verification: `show etherchannel summary` flags `P`,
+    `/proc/net/bonding/bond0` partner MAC non-zero. Capture per-site
+    `show etherchannel load-balance` (9300 default `src-mac` polarizes NFV traffic) and
+    standardize an IP-based hash both sides (`src-dst-ip` ↔ Linux `layer2+3`).
+30. `[lab-verify]` SE350 port-role map under Proxmox: today p1 = XCC, p3/p4 = 1G copper
+    ("esx"), f1/f2 = 10G MMF to both stack members. Decide and encode in the network
+    profile whether Proxmox uses a single 10G data bond with mgmt on copper, or mirrors
+    some other role split — the plan's single-bond assumption needs this confirmed
+    against real cabling before the firstboot network template is written.
