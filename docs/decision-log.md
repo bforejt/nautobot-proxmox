@@ -1,0 +1,23 @@
+# Decision Log
+
+Running log of architectural and process decisions. Status values: **Decided** (confirmed
+by the team), **Confirmed** (fact established about our environment), **Proposed**
+(recommended in the plan, awaiting sign-off), **Open** (needs an answer; see
+[plan-of-attack.md §6](plan-of-attack.md) for the full tagged list).
+
+| # | Date | Decision | Status | Notes |
+|---|------|----------|--------|-------|
+| 1 | 2026-08-05 | Nautobot platform: build on existing **2.4 LTM**; upgrade to 3.x as its own effort, targeted before Phase 4 | **Decided** | Pin 2.4-LTM app trains; isolate approval gating (`approval_required` → Approval Workflows at 3.0); keep libraries pure-Python. Risk: 2.4's Django 4.2 passed upstream EOL Apr 2026; LTM window ends when Nautobot 3.3 ships. |
+| 2 | 2026-08-05 | PA-VM management: **standalone or SCM only — no Panorama** | **Decided** | `pa_bootstrap` builder ships two init-cfg variants: `standalone` (auth-code licensing) and `scm` (`panorama-server=cloud` + auto-registration PINs). Per-site choice is a VM attribute, not a code branch. |
+| 3 | 2026-08-05 | SE350 fleet is the **"with Security Pack"** variant | **Confirmed** | ThinkShield activation is already required on our units (only Security Pack units have it). RMA runbook starts with ThinkShield claim; pre-ship procedure must handle motion-detection/SED tamper lock. Verify what the current ESXi-era ship process already does about motion detection. |
+| 4 | — | XCC **Enterprise FoD license** present on fleet units? | **Open** | Gates the entire no-USB bare-metal track (Redfish virtual media). Simple read-only test in [se350-verification-checklist.md](se350-verification-checklist.md) §1. If absent: buy per-serial keys (EOL-platform lead time) or fall back to USB/manual install for L0. |
+| 5 | — | Standalone Proxmox nodes, **never corosync-clustered**; pairing modeled in Nautobot only | Proposed | Two-node cluster without shared storage loses quorum when one node dies and blocks VM autostart — the exact failure an unattended edge site can't tolerate. One-way: can't join an in-service node with VMs into a cluster later. |
+| 6 | — | One LACP bond (802.3ad, layer3+4) + one **VLAN-aware bridge**; no OVS, no SDN zones, no bridge-per-VLAN | Proposed | `tag=` per vNIC = access port; untagged or `trunks=` = VGT-style trunk for self-tagging VNFs (PA-VM, C8000v). |
+| 7 | — | Intent/deploy split: design job materializes site intent into Nautobot; layered idempotent deploy jobs (L0–L4) converge devices to intent | Proposed | Collapses all three operating scenarios into one code path entered at different layers. Progress checkpointed in a `provisioning_state` custom field; every layer job re-checks state on entry. |
+| 8 | — | Model each SE350 as its own **one-host Cluster**; VNFs as **VirtualMachines** (not Devices) | Proposed | Revisit (dual-record Device+VM) only if Golden Config compliance on VNF configs becomes a requirement — decide before populating data at scale. |
+| 9 | — | Firstboot hook builds the **final** network topology (bond + bridge + mgmt); the L2 job is verify/converge only | Proposed | Avoids the strand-prone installer-network→bond cutover where the API call's own transport drops mid-apply. |
+| 10 | — | Golden images: HTTPS repo + `download-url` (checksummed, content=`import`) + `import-from` volume IDs; no shared storage, no per-node template maintenance | Proposed | Absolute-path `import-from` fails for all API tokens — the volume-ID path is the only token-compatible mechanism. |
+| 11 | — | Bare-metal ISO strategy: **one generic auto-install ISO + HTTP answer fetch** (answer service renders `answer.toml` from Nautobot, keyed on DMI serial) | Proposed | Discovery mode (baked URL vs DHCP opt 250 vs DNS TXT) still open. Note XCC1 constraint: the vmedia ISO URL itself must be plain HTTP. |
+| 12 | — | Field bare-metal reinstalls over WAN: **never** — always ship a lab-rebuilt unit; field operations are VM-level only (L3/L4), approval-gated | Proposed | Reversing this materially changes the answer-service/webhook connectivity and TLS design. |
+| 13 | — | Hypervisor pairs stay **homogeneous** during ESXi→Proxmox cutover (a failure-driven migration converts both nodes of a pair) | Proposed | A mixed ESXi+Proxmox pair means two toolchains for one redundant VM pair mid-incident. Cost this into the cutover policy. |
+| 14 | — | Platform profiles as data (per-DeviceType YAML: vmedia method, BIOS attribute map, disk filter, NIC naming, licenses) | Proposed | SE350 is XCC1 (PATCH-on-EXT vmedia); SE455 V3 is XCC2 (POST InsertMedia); fleet will be mixed — no per-platform if/else in code. |
