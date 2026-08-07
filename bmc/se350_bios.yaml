@@ -80,12 +80,16 @@ legacy_standard:
   - menu: "Thermal Mode"
     value: "Performance"
     redfish_attribute: null
-    verified: false
+    method: "xcc-ssh-cli"
+    command: "thermal performance"
+    verified: true   # method confirmed by the team 2026-08-07
     note: >
-      NOT exposed as a UEFI Bios attribute on SE350 (absent from all 172 dumped
-      attributes). Lenovo fan/cooling policy is commonly an XCC-side setting,
-      not UEFI — confirm with the legacy tool's owner where it actually sets
-      this (XCC API vs a different platform in the tool's scope).
+      Confirmed 2026-08-07: NOT a UEFI attribute — the legacy tool sets it via
+      SSH to the XCC CLI ("thermal performance"), in the same session as its
+      `asu set` commands (ASU dotted names map 1:1 to the Redfish attributes
+      above). The discovery job's chassis/OEM probe checks whether a Redfish
+      OEM equivalent exists; until one is found, ApplyBiosPolicyJob keeps one
+      small XCC-SSH step for this setting.
 
 # Settings the plan wants asserted on top of the legacy standard. The sampled
 # unit is ALREADY at the desired value for every one of these (factory/current

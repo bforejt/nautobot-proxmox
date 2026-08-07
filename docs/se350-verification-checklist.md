@@ -57,8 +57,11 @@ curl -sk -u 'XCC_USER:XCC_PASS' https://XCC_IP/redfish/v1/Systems/1/Bios | pytho
 **Done 2026-08-07** (first discovery-job run, 172 attributes + registry): all nine
 UEFI-side standard settings verified with exact names/enums in `bmc/se350_bios.yaml`
 (one correction: `MMConfigBase_3GB` enum prefix). Findings: **Thermal Mode is not a
-UEFI attribute on SE350** — likely XCC-side cooling policy; confirm with the legacy
-tool's owner where it sets it. **The sampled unit shows drift**: it sits at the
+UEFI attribute on SE350** — confirmed: the legacy tool sets it via SSH to the XCC CLI
+(`thermal performance`), in the same session as its `asu set` commands (ASU names map
+1:1 to the Redfish attributes). The discovery job's chassis/OEM probe (next run) tells
+us whether a Redfish OEM equivalent exists; otherwise ApplyBiosPolicyJob keeps one
+small XCC-SSH step for thermal. **The sampled unit shows drift**: it sits at the
 `MaximumPerformance` preset with `MONITORMWAIT=Disable` (the preset forces it),
 not the standard's CustomMode + MWAIT Enable — either un-standardized or predates
 the tool; the audit job exists for exactly this. All proposed-addition settings

@@ -130,6 +130,7 @@ class DiscoverSe350Platform(Job):
         self._log_bios_highlights(report.get("bios", {}))
         self._log_secure_boot(report.get("secure_boot", {}))
         self._log_firmware(report.get("firmware_inventory", {}))
+        self._log_thermal_probe(report.get("chassis", {}))
         self._attach_files(report)
 
         if dress_rehearsal_reboot and not run_vmedia_write_test:
@@ -278,12 +279,35 @@ class DiscoverSe350Platform(Job):
                 "Firmware: %s = %s", item.get("name") or item.get("id"), item.get("version")
             )
 
+    def _log_thermal_probe(self, chassis):
+        if "error" in chassis:
+            self.logger.warning("Chassis/OEM thermal probe failed: %s", chassis["error"])
+            return
+        hits = chassis.get("thermal_hits", [])
+        if hits:
+            self.logger.info(
+                "THERMAL PROBE: %d thermal/cooling-related Redfish paths found — "
+                "inspect chassis.json to see whether the XCC 'thermal' mode is "
+                "settable via Redfish OEM (would let ApplyBiosPolicyJob stay "
+                "pure-Redfish).",
+                len(hits),
+            )
+            for hit in hits[:20]:
+                self.logger.info("thermal hit: %s = %r", hit["path"], hit["value"])
+        else:
+            self.logger.info(
+                "THERMAL PROBE: no thermal/cooling mode setting found in Chassis or "
+                "Manager OEM — plan on keeping the XCC-SSH 'thermal performance' "
+                "step in ApplyBiosPolicyJob."
+            )
+
     def _attach_files(self, report):
         files = {
             "discovery_full.json": report,
             "bios_attributes.json": report.get("bios", {}),
             "bios_registry.json": report.get("bios_registry", {}),
             "virtual_media.json": report.get("virtual_media", {}),
+            "chassis.json": report.get("chassis", {}),
         }
         for filename, content in files.items():
             payload = json.dumps(content, indent=2, sort_keys=True, default=str)
