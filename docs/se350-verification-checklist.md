@@ -50,14 +50,19 @@ Capture exact spellings/enums for: `OperatingModes_ChooseOperatingMode`
 found in research: preset operating modes lock the individual C-state knobs — combining
 Maximum Performance with custom C-states requires `CustomMode` with every knob explicit.
 
-## 4. M.2 boot storage: Marvell 88SE9230 exposure
+## 4. Boot storage: hardware-RAID volume characterization (design decided)
 
-The plan prefers **ZFS RAID1 across two M.2 boot devices**, which requires the Marvell
-adapter to present both disks as plain AHCI/JBOD. Verify in UEFI setup / a live Linux
-boot (`lsblk`, `lspci -k`) that the disks appear individually. If the adapter only
-presents a RAID volume, the boot-storage design in `answer.toml` changes — do **not**
-use the Marvell firmware RAID (UEFI-boot-only fake-RAID that Linux can't health-monitor).
-Also record data-bay M.2 population (SATA vs NVMe) per unit.
+Answered 2026-08-07: the fleet's RAID controller presents a **single volume** from the
+M.2 set — individual disks are not visible at install (matches the ESXi experience).
+Design: **ext4 + LVM-thin on that volume**, no ZFS. What remains is characterization
+on a live Linux boot (`lsblk -o NAME,MODEL,SERIAL,SIZE`, `lspci -k`):
+
+- Capture the volume's model/serial string exactly as Linux enumerates it — this
+  becomes the `answer.toml` disk filter so the installer can never select a data disk.
+- Determine what alerting exists for a **degraded mirror** (XCC event? UEFI POST
+  message only? nothing?) — scenario 3 needs a dead member to page someone, not hide;
+  document the residual risk if visibility is poor.
+- Record data-bay M.2 population (SATA vs NVMe) per unit and how those enumerate.
 
 ## 5. DMI serial ↔ Nautobot serial match (answer-service lookup key)
 

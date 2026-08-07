@@ -223,7 +223,8 @@ until the OpenGear serial path to that node is proven.**
   `DeployVmJob` re-checks at deploy time. "Actuals" counts **physical cores, not SMT
   threads** (fleet: 16-core/32-thread D-2183IT, 256 GB): budget = 16 cores minus 2–4
   reserved for host/housekeeping (vhost threads, bridge, mgmt) ≈ 12–14 VNF vCPUs; RAM =
-  256 GB minus host overhead and the pinned ZFS `arc-max`. Budget `queues=` too —
+  256 GB minus host overhead (no ZFS ARC to reserve — boot storage is the hardware
+  RAID volume with ext4+LVM-thin). Budget `queues=` too —
   multiqueue adds host CPU load. This guardrail **is** the CPU-reservation equivalent —
   KVM has no MHz-floor primitive, so admission control lives here. The same computation
   can emit disjoint `affinity` cpusets (host/housekeeping cores excluded) when the
@@ -266,8 +267,11 @@ Lock the one-way choices; get one SE350 pair + a Nautobot instance in the lab.
 - SE350 platform verification checklist on a real unit: XCC Enterprise FoD present? `EXT`
   vmedia members visible? Dump `GET /redfish/v1/Systems/1/Bios` (capture exact
   `OperatingModes_*` / `DevicesandIOPorts_*` attribute spellings). Does the Marvell
-  88SE9230 M.2 adapter expose disks as plain AHCI/JBOD (required for the ZFS-mirror
-  design — if it only presents RAID volumes, the boot-storage design changes)?
+  88SE9230 M.2 adapter storage: answered — the fleet's RAID controller presents a
+  single volume (individual M.2s not visible at install), so boot storage is
+  ext4+LVM-thin on that volume; capture its Linux enumeration (model/serial string)
+  for the answer.toml disk filter, and determine what alerting exists for a degraded
+  mirror (XCC event vs none)?
   `proxmox-auto-install-assistant system-info` DMI serial matches Nautobot serial? X722
   `disable-fw-lldp` honored at fleet NIC firmware? Current motion-detection/tamper
   configuration on the (confirmed Security Pack) units?
@@ -371,8 +375,10 @@ decisions in §6.
   prepare time, so it's one ISO per (PVE release × answer-service endpoint); DHCP option
   250 or DNS TXT discovery would make it fully generic `[decision-needed — pick the
   discovery mode]`. CI runs `proxmox-auto-install-assistant validate-answer` on rendered
-  answers. answer.toml: ZFS RAID1 by disk filter with explicit `zfs.arc-max` (4–8 GiB,
-  subtracted from the VM RAM budget) — pending the Phase 0 M.2/AHCI answer.
+  answers. answer.toml: **ext4 + LVM-thin on the hardware-RAID volume** (the Marvell
+  controller presents a single disk — fleet standard; no ZFS, no ARC reservation),
+  disk filter matched to the RAID volume's model/serial string so a data disk can
+  never be selected.
 - Firstboot hook (small fetch-and-exec stub): kernel cmdline (C-states, serial console —
   both GRUB and proxmox-boot-tool paths), ethtool/`disable-fw-lldp` systemd oneshot, NIC
   name pinning, **final network topology** (`vmbr0` = active-backup bond on the copper
@@ -475,7 +481,7 @@ nautobot-proxmox/
 │   ├── se350_bios.yaml
 │   └── se455v3_bios.yaml
 ├── proxmox-install/
-│   ├── answer.toml.j2             # kebab-case keys; zfs.arc-max explicit; webhook + first-boot
+│   ├── answer.toml.j2             # kebab-case keys; ext4+LVM-thin on HW-RAID volume; webhook + first-boot
 │   ├── answer_service/            # FastAPI: DMI POST → Nautobot lookup → rendered TOML
 │   │                              #   + install webhook receiver + credential-bootstrap sink
 │   ├── firstboot/

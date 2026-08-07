@@ -183,5 +183,6 @@ design. Where a function has no equivalent, the reason is given.
   cores, not SMT threads** — budget = 16, with 2–4 cores reserved for the
   host/housekeeping (vhost threads, bridge, mgmt), leaving ~12–14 cores of VNF vCPU
   budget; SMT siblings absorb housekeeping but are never counted as VNF capacity. RAM
-  budget = 256 GB minus host overhead and the pinned ZFS ARC cap. Thin provisioning
-  stays fine (LVM-thin/ZFS/qcow2).
+  budget = 256 GB minus host overhead (no ZFS ARC — boot storage is the hardware-RAID
+  volume with ext4+LVM-thin, matching the ESXi single-presented-disk pattern). Thin
+  provisioning stays fine.
