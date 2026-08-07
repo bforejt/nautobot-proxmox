@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Job-result captures dropped locally for analysis (contain unit serial/UUID)
+/discovery_full.json
+/bios_attributes.json
+/bios_registry.json
+/virtual_media.json
