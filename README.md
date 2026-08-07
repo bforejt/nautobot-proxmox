@@ -55,7 +55,9 @@ Reference research (dense, per-dimension findings backing the plan):
 Setup (Nautobot 2.4):
 
 1. Add this repo as a **Git Repository** (Extensibility → Git Repositories), provides:
-   **jobs**, then Sync.
+   **jobs**, then Sync. Note the repo-root [`__init__.py`](__init__.py) is load-bearing:
+   Nautobot imports the checkout as a package named after the repo slug, and job
+   discovery finds nothing without it (sync warns "No jobs were registered").
 2. Create two Secrets named `xcc_username` and `xcc_password` (any provider — e.g.
    Environment Variable on the worker), matching the bare-metal starter's convention.
 3. Enable the job (Jobs are disabled on first sync), run it against one lab XCC IP.
