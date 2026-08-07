@@ -128,7 +128,7 @@ code path entered at different layers.
 |---|---|---|
 | Interactive robot Q&A (site code, subnets, server 1/2) | Nautobot design job inputs; intent stored in SoT | `SiteNfvDesignJob` |
 | Fresh ESXi install (manual/kickstart) | Automated-installer ISO + `answer.toml` | Redfish vmedia mount + one-time CD boot; `proxmox-auto-install-assistant` |
-| Host power policy = High Performance | Two layers: firmware `OperatingModes_ChooseOperatingMode = MaximumPerformance` (Redfish BIOS) + kernel `intel_idle.max_cstate=1 processor.max_cstate=1` (governor already defaults to `performance` with intel_pstate) | `bmc/` BIOS policy + firstboot hook |
+| Host power policy = High Performance | Firmware standard confirmed (legacy XCC BIOS tool, carried verbatim in `bmc/se350_bios.yaml`): **Custom Mode** with explicit knobs — C-States/C1E/Energy-Efficient-Turbo disabled, MONITOR/MWAIT enabled, Power/Performance Bias = Platform Controlled → Maximum Performance, Thermal Mode = Performance. Kernel C-state cmdline caps become defense-in-depth (likely redundant with BIOS-level disable — lab-confirm); governor already `performance` with intel_pstate | `bmc/` BIOS policy + firstboot hook |
 | vSwitch + LAG (dot1q trunk; today `channel-group mode on` — static, a vSS limitation) | `bond0`: bond-mode `802.3ad`, xmit-hash `layer2+3` (pair with Cisco `src-dst-ip`; 9300 default is `src-mac` — change it), miimon 100. **Switch ports flip `mode on`→`mode active` in the same window** — both mismatch directions black-hole (see site-reference-architecture.md) | `POST /nodes/{n}/network` (staged) + `PUT /nodes/{n}/network` (apply, ifupdown2, live) |
 | Port groups (one per VLAN; `LOC_NAME_VlanNum` naming) | ONE VLAN-aware data bridge `vmbr1` ("LAN-Trunk" equivalent; `bridge_vlan_aware=1`, `bridge_vids` = site VLAN list from IPAM — VLAN 1 excluded by default; MTU 9000) + `vmbr0` for mgmt (= vSwitch0). Port-group naming becomes the Nautobot VLAN naming standard; VMInterface↔VLAN assignment replaces the port-group object | Same network API |
 | VM vNIC on access port group | `net0: virtio,bridge=vmbr0,tag=<vid>[,queues=<vCPUs>]` | VM config API |
@@ -366,10 +366,12 @@ decisions in §6.
 - **Platform profiles** as data (per Nautobot DeviceType YAML in `bmc/`): vmedia method,
   BIOS attribute map, disk filter, NIC naming, license requirements, ThinkShield steps.
 - `ApplyBiosPolicyJob`: generic Redfish `Bios/Settings` PATCH → reboot → readback-verify,
-  driven by the YAML (SE350: MaximumPerformance, COM1 redirect, Secure Boot disabled
-  pending shim test). Note: preset operating modes lock individual C-state knobs —
-  combining MaximumPerformance with custom C-states requires CustomMode with every knob
-  explicit `[lab-verify]`.
+  driven by the YAML. `bmc/se350_bios.yaml` is seeded: `legacy_standard` carries the
+  team's existing XCC BIOS tool settings verbatim (Custom Mode + explicit
+  C-state/power/PCI knobs — the CustomMode-not-preset pattern the tool already
+  follows); `proposed_additions` (COM1 console redirect explicit, serial-port sharing
+  off, Secure Boot off) pend team sign-off. Exact Redfish attribute spellings/enums
+  get verified by the discovery job dump before first PATCH `[lab-verify]`.
 - ISO/answer decision resolved: **one generic prepared ISO + HTTP answer fetch**. Note the
   real coupling — with `--fetch-from http` the URL + cert fingerprint are baked at
   prepare time, so it's one ISO per (PVE release × answer-service endpoint); DHCP option
@@ -515,9 +517,15 @@ nautobot-proxmox/
    ThinkShield claim is step 1 of the scenario-3 runbook; pre-ship procedure handles
    motion detection (scenario 1). `[lab-verify]` current motion/tamper settings on
    in-service units; whether ThinkShield/FoD keys transfer to spare units.
-3. `[lab-verify]` Exact SE350 Redfish BIOS attribute names/enums (dump on real hardware);
-   MaximumPerformance vs CustomMode C-state interplay.
-4. `[lab-verify]` Marvell 88SE9230 M.2: AHCI/JBOD exposure (gates ZFS RAID1 boot design).
+3. Answered (Aug 2026): the BIOS standard is provided — the legacy XCC BIOS tool's
+   settings are carried verbatim in `bmc/se350_bios.yaml` (Custom Mode + explicit
+   knobs; the preset-locking caveat was already solved by the tool's own pattern).
+   `[lab-verify]` remaining: exact Redfish attribute spellings/enums via the discovery
+   job dump (incl. the Thermal Mode attribute name), and sign-off on the
+   `proposed_additions` (console redirect, serial sharing off, Secure Boot off).
+4. Answered (Aug 2026): boot storage is the hardware-RAID single volume →
+   ext4 + LVM-thin, no ZFS. `[lab-verify]` the volume's Linux model/serial enumeration
+   (answer.toml disk filter) and degraded-mirror alerting visibility (checklist §4).
 5. `[lab-verify]` DMI serial as POSTed by the installer matches Nautobot serials;
    auto-install boot under Secure Boot (default: disable).
 6. `[lab-verify]` X722 `disable-fw-lldp` at fleet NIC firmware; OOB NIC-firmware updates
