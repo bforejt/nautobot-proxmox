@@ -110,12 +110,18 @@ enabled. Confirm the auto-install ISO boots with Secure Boot disabled.
 
 On a representative 9300 stack: `show etherchannel load-balance` (default is `src-mac`,
 which polarizes NFV traffic onto one member — the runbook standardizes an IP-based hash,
-e.g. `src-dst-ip`, paired with Linux `layer2+3`) and `show run` of the server-facing
+e.g. `src-dst-ip`, paired with Linux `layer2+3`), `show system mtu` (data path targets
+jumbo 9000 to match the legacy LAN-Trunk vswitch), and `show run` of the server-facing
 port-channels (expect `channel-group mode on` today). Confirm the port-role wiring
 against the reference architecture: p1 = XCC, p3/p4 = 1G copper, f1/f2 = 10G fiber,
 cross-connected to both stack members — and decide the Proxmox port-role map
-(decision log #20). After any test conversion: `show etherchannel summary` must show
-flags `P` (bundled) and `/proc/net/bonding/bond0` a non-zero partner MAC.
+(decision log #20: which ports back `vmbr0` mgmt vs the `vmbr1` data bond). After any
+test conversion: `show etherchannel summary` must show flags `P` (bundled) and
+`/proc/net/bonding/bond0` a non-zero partner MAC.
+
+Also verify on the PVE test host: `qm set <vmid> --affinity <cpuset>` succeeds with the
+privilege-separated API token (not just root@pam) — pinning is baseline for
+latency-sensitivity parity (plan §6 #31), and the fallback changes the job design.
 
 ## 11. Proxmox VE 9 manual install + burn-in
 

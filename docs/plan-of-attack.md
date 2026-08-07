@@ -25,10 +25,13 @@ must make are tagged `[decision-needed]` (consolidated in §6).
   (`cluster not ready - no quorum (500)`). A QDevice workaround would need a third
   always-on box per site. The existing "two standalone servers, redundant VM pairs"
   philosophy is exactly what standalone Proxmox nodes want. **Never cluster these.**
-- **Walking slowly is right.** Several tempting features (CPU pinning, hugepages, OVS,
-  Proxmox SDN zones, Proxmox HA, drift-sync/SSoT) are all correctly deferrable — and some
-  have hard blockers anyway (hugepages settings are root@pam-only; API tokens can't set
-  them).
+- **Walking slowly is right.** Several tempting features (hugepages, OVS, Proxmox SDN
+  zones, Proxmox HA, drift-sync/SSoT) are all correctly deferrable — and some have hard
+  blockers anyway (hugepages settings are root@pam-only; API tokens can't set them).
+  One exception surfaced later: per-VM CPU affinity is **not** deferrable, because the
+  legacy estate runs `sched.cpu.latencysensitivity=high` with reservations (exclusive
+  pCPU access) — parity requires pinning from day one (see site-reference-architecture.md,
+  VM tuning table).
 - **The colleague's pipeline philosophy is validated:** Nautobot Jobs stay fast and
   re-runnable, long multi-stage work writes status back to Nautobot. Research shows this
   can live *inside* Nautobot (dedicated JobQueue + per-job time limits + job chaining)
@@ -63,8 +66,10 @@ code path entered at different layers.
    since Dec 2025) later for fleet *visibility* — never as an orchestration dependency.
 2. **VLAN-aware bridge, not port-group emulation.** Do not replicate ESXi
    port-group-per-VLAN as bridge-per-VLAN (the colleague's `proxmox-config/` README hints
-   at "bridge-per-VLAN mapping" — steer this). One LACP bond + one VLAN-aware bridge
-   covers everything (§2).
+   at "bridge-per-VLAN mapping" — steer this). The bridge layout mirrors the legacy
+   two-vswitch pattern: `vmbr0` (mgmt, = vSwitch0) + `vmbr1` (VLAN-aware "LAN-Trunk"
+   on the 10G LACP bond, MTU 9000) — port groups collapse into Nautobot VLAN/VMInterface
+   assignments rendered as `tag=`/`trunks=` (§2).
 3. **VNF modeling: Device vs VirtualMachine.** Nautobot core cannot pin a VM to a specific
    host Device inside a multi-host cluster, and Golden Config / the `Controller` model
    only work against `dcim.Device`. Recommendation: model each SE350 as its own
@@ -122,7 +127,7 @@ code path entered at different layers.
 | Fresh ESXi install (manual/kickstart) | Automated-installer ISO + `answer.toml` | Redfish vmedia mount + one-time CD boot; `proxmox-auto-install-assistant` |
 | Host power policy = High Performance | Two layers: firmware `OperatingModes_ChooseOperatingMode = MaximumPerformance` (Redfish BIOS) + kernel `intel_idle.max_cstate=1 processor.max_cstate=1` (governor already defaults to `performance` with intel_pstate) | `bmc/` BIOS policy + firstboot hook |
 | vSwitch + LAG (dot1q trunk; today `channel-group mode on` — static, a vSS limitation) | `bond0`: bond-mode `802.3ad`, xmit-hash `layer2+3` (pair with Cisco `src-dst-ip`; 9300 default is `src-mac` — change it), miimon 100. **Switch ports flip `mode on`→`mode active` in the same window** — both mismatch directions black-hole (see site-reference-architecture.md) | `POST /nodes/{n}/network` (staged) + `PUT /nodes/{n}/network` (apply, ifupdown2, live) |
-| Port groups (one per VLAN) | ONE VLAN-aware bridge `vmbr0` (`bridge_vlan_aware=1`, `bridge_vids` = site VLAN list from IPAM; note VLAN 1 is excluded by default) | Same network API |
+| Port groups (one per VLAN; `LOC_NAME_VlanNum` naming) | ONE VLAN-aware data bridge `vmbr1` ("LAN-Trunk" equivalent; `bridge_vlan_aware=1`, `bridge_vids` = site VLAN list from IPAM — VLAN 1 excluded by default; MTU 9000) + `vmbr0` for mgmt (= vSwitch0). Port-group naming becomes the Nautobot VLAN naming standard; VMInterface↔VLAN assignment replaces the port-group object | Same network API |
 | VM vNIC on access port group | `net0: virtio,bridge=vmbr0,tag=<vid>[,queues=<vCPUs>]` | VM config API |
 | VLAN 4095 / VGT trunk (PA-VM, C8000v self-tagging) | vNIC with no `tag` (full trunk) or `trunks=<vid;vid;…>` (filtered — preferred, generated from IPAM) | VM config API |
 | Port-group "forged transmits / promiscuous" | Not needed — Linux bridge does no MAC anti-spoofing; keep `firewall=0` on VNF dataplane NICs so floating MACs (VRRP, PA HA) are never filtered | VM config |
@@ -132,9 +137,9 @@ code path entered at different layers.
 | Golden VMDK deploy | qcow2 in `import`-typed storage; VM create with `import-from=<volume ID>` | `download-url` + VM create APIs |
 | Guest customization (Ubuntu) | Native cloud-init (`ide2=<store>:cloudinit`, `--ciuser --sshkeys --ipconfig0`); avoid `cicustom` snippets (no upload API) | Pure API |
 | VNF day-0 (PA bootstrap, IOS-XE config) | Generated CD-ROM ISO: PA = `/config/init-cfg.txt` (+ empty `/license /software /content`); C8000v & 9800-CL = `iosxe_config.txt` at ISO root; SD-WAN = unmodified Manager-generated `ciscosdwan_cloud_init.cfg` | Jinja2 → ISO build → storage `upload` API (content=iso) → attach `media=cdrom` |
-| VM autostart + start delay | `onboot=1` + `startup=order=N,up=S` (pve-guests at boot; reverse order at shutdown) | VM config API |
+| VM autostart + start delay (legacy default 15 s) | `onboot=1` + `startup=order=N,up=15` (pve-guests at boot; reverse order at shutdown) | VM config API |
 | Host serial → OpenGear | Firmware COM1 console-redirect (Redfish BIOS, standardize 115200 8N1) + kernel `console=tty0 console=ttyS0,115200n8` + GRUB serial. Two persistence paths: `/etc/default/grub` + `update-grub` (GRUB installs) vs `/etc/kernel/cmdline` + `proxmox-boot-tool refresh` (UEFI/ZFS-root) — automation must handle both | `bmc/` policy + firstboot |
-| VM console access | `serial0: socket` on every VNF (+ `vga=serial0` for serial-primary guests) → `qm terminal <vmid>` from the host shell reached via OpenGear (Ctrl-O detaches) | VM config API |
+| VM console access (legacy: per-VM telnet to host TCP ports through the host firewall) | `serial0: socket` on every VNF (+ `vga=serial0` for serial-primary guests) → `qm terminal <vmid>` natively; per-VM TCP exposure reproduced with socat/ser2net units generated from the VM list, mgmt-VLAN-bound and firewalled to OpenGear/mgmt sources | VM config API + host baseline |
 | vCenter (fleet view) | Proxmox Datacenter Manager 1.1.x — visibility/ops only | PDM enrollment token needs `Sys.Audit` at `/` (fixes the colleague's 403) |
 | ESXi host firmware updates (OneCLI) | OneCLI does **not** support Debian — use out-of-band XCC web UI / Redfish UpdateService | `bmc/` track |
 
@@ -216,7 +221,9 @@ until the OpenGear serial path to that node is proven.**
   threads** (fleet: 16-core/32-thread D-2183IT, 256 GB): budget = 16 cores minus 2–4
   reserved for host/housekeeping (vhost threads, bridge, mgmt) ≈ 12–14 VNF vCPUs; RAM =
   256 GB minus host overhead and the pinned ZFS `arc-max`. Budget `queues=` too —
-  multiqueue adds host CPU load.
+  multiqueue adds host CPU load. The same computation emits each VM's **disjoint
+  `affinity` cpuset** (host/housekeeping cores excluded) — reproducing ESXi
+  latency-sensitivity=high exclusive placement declaratively.
 - Replaced VM disks are renamed, not deleted, until post-deploy checks pass.
 
 ---
@@ -292,10 +299,17 @@ Against a hand-built lab PVE node, API-only. Split so each sub-phase ships alone
   `proxmox_client` library (proxmoxer 2.3+, token auth, task-UPID polling);
   `IngestImageJob` (download-url + checksum verify); `DeployVmJob` — the generic
   "qcow2 import + optional bootstrap ISO" engine with per-VNF profile objects (cpu=host,
-  numa=1, machine type with **pinned version**, NIC list with bridge/tag/trunks/queues/
-  pinned MAC, `smbios1 uuid=` from Nautobot, `serial0: socket`, onboot + startup order,
-  firewall=0 on dataplane NICs, qemu-guest-agent where supported) and pluggable
-  `iso_builder` types. Destroy-and-recreate semantics (day-0 ISOs are first-boot-only).
+  `sockets=1` + cores per profile, numa=1, `balloon=0` (memory fully committed —
+  reservation parity), `affinity=<cpuset>` from the design job's disjoint core
+  assignment (latency-sensitivity parity; `[lab-verify]` token privilege), machine type
+  with **pinned version**, NIC list with bridge/tag/trunks/queues/pinned MAC (virtio
+  `mtu=1` inherits bridge MTU), `smbios1 uuid=` from Nautobot, `serial0: socket`,
+  onboot + `startup` (default up=15), firewall=0 on dataplane NICs, no
+  cpulimit/rate/I-O caps, qemu-guest-agent where supported) and pluggable `iso_builder`
+  types. Pre-flight before any write: Nautobot Device ↔ node hostname **and** DMI
+  serial match, storage target exists/is-intended/has-capacity (replaces the robot's
+  name-match and datastore sanity checks). Destroy-and-recreate semantics (day-0 ISOs
+  are first-boot-only).
 - **2b — PA-VM**: `pa_bootstrap` builder (init-cfg.txt tree); q35 + SeaBIOS + virtio,
   pinned q35 machine version validated per PAN-OS release `[lab-verify — history of
   version-specific boot failures]`. Management model decided: **standalone or SCM, no
@@ -345,9 +359,11 @@ separate line items gated on the licensing/BOM decisions in §6.
   subtracted from the VM RAM budget) — pending the Phase 0 M.2/AHCI answer.
 - Firstboot hook (small fetch-and-exec stub): kernel cmdline (C-states, serial console —
   both GRUB and proxmox-boot-tool paths), ethtool/`disable-fw-lldp` systemd oneshot, NIC
-  name pinning, **final bond0/vmbr0 + mgmt topology**, apt repo config (no-subscription)
-  + point-release pin, lldpd, qemu-guest-agent-ready defaults, root SSH key, **pveum
-  credential bootstrap**, phone-home webhook.
+  name pinning, **final network topology** (mgmt `vmbr0` + 10G LACP bond → VLAN-aware
+  `vmbr1`, MTU 9000 on the data path), KSM disabled, lldpd with CDP mode, apt repo
+  config (no-subscription) + point-release pin, qemu-guest-agent-ready defaults,
+  socat/ser2net per-VM console exposure scaffolding, root SSH key, **pveum credential
+  bootstrap**, phone-home webhook.
 - `HostBaselineJob` (L1, bounded idempotent SSH): day-N remediation for firstboot-domain
   settings (new ethtool flag, cmdline change) on in-service hosts — the alternative is
   "tuning changes require rebuild," which is not acceptable for field fleets.
@@ -397,8 +413,10 @@ never converted in place; pairs stay homogeneous).
 ### Phase 5 — Later / on-demand (explicitly not now)
 
 Proxmox→Nautobot SSoT drift sync (model on the official vSphere DiffSync adapter; the two
-community `nautobot-ssot-proxmox` repos are reference reading only). `affinity` pinning /
-hugepages — only on measured jitter (and note hugepages is root@pam-only). Golden Config
+community `nautobot-ssot-proxmox` repos are reference reading only). Hugepages + memory
+locking and emulator-thread isolation — only on measured jitter (hugepages is
+root@pam-only; note `affinity` pinning itself moved into the Phase 2 baseline for
+legacy latency-sensitivity parity). Golden Config
 for VNF configs (forces the dual-record modeling decision). Packaged Nautobot App (when
 custom models or pinned pip dependencies appear — Git-synced jobs can't declare
 dependencies). Packer-built Ubuntu golden templates in CI. PXE as an ISO alternative.
@@ -545,16 +563,21 @@ nautobot-proxmox/
     ethtool/ring tweaks exist in the robot code.
 
 **Site architecture (added Aug 2026)**
-29. Recommended, `[decision-needed]` to ratify: server-facing EtherChannels flip
-    `channel-group mode on` → `mode active` (LACP) in the same maintenance window as
-    each server's Proxmox conversion — both mismatch directions black-hole (802.3ad
-    into mode-on = partial hash-dependent loss; balance-xor into mode-active = members
-    suspended). Post-flip verification: `show etherchannel summary` flags `P`,
-    `/proc/net/bonding/bond0` partner MAC non-zero. Capture per-site
-    `show etherchannel load-balance` (9300 default `src-mac` polarizes NFV traffic) and
-    standardize an IP-based hash both sides (`src-dst-ip` ↔ Linux `layer2+3`).
-30. `[lab-verify]` SE350 port-role map under Proxmox: today p1 = XCC, p3/p4 = 1G copper
-    ("esx"), f1/f2 = 10G MMF to both stack members. Decide and encode in the network
-    profile whether Proxmox uses a single 10G data bond with mgmt on copper, or mirrors
-    some other role split — the plan's single-bond assumption needs this confirmed
-    against real cabling before the firstboot network template is written.
+29. **Decided (Aug 2026):** server-facing EtherChannels flip `channel-group mode on` →
+    `mode active` (LACP) in the same maintenance window as each server's Proxmox
+    conversion — both mismatch directions black-hole (802.3ad into mode-on = partial
+    hash-dependent loss; balance-xor into mode-active = members suspended). Post-flip
+    verification: `show etherchannel summary` flags `P`, `/proc/net/bonding/bond0`
+    partner MAC non-zero. Capture per-site `show etherchannel load-balance` (9300
+    default `src-mac` polarizes NFV traffic) and standardize an IP-based hash both
+    sides (`src-dst-ip` ↔ Linux `layer2+3`).
+30. Logical split resolved by the legacy two-vswitch pattern: `vmbr0` mgmt (= vSwitch0)
+    + `vmbr1` VLAN-aware data ("LAN-Trunk") on the 10G LACP bond, MTU 9000 on the data
+    path. `[lab-verify]` remaining: which physical ports carry each role (p3/p4 copper
+    vs f1/f2 fiber) against real cabling, whether mgmt gets its own bond or a single
+    port, and switch `system mtu` supports jumbo end-to-end.
+31. `[lab-verify]` `affinity` (vCPU pinning) settable via the privilege-separated API
+    token — required in Phase 2 now that pinning is baseline (legacy VMs run
+    latency-sensitivity=high). If root-only like hugepages, the fallback is applying
+    affinity via the `HostBaselineJob` SSH layer (`qm set` locally) — decide before the
+    Phase 2 role definition hardens.

@@ -60,8 +60,13 @@ Reference research (dense, per-dimension findings backing the plan):
   (confirmed; functional check at fleet firmware level remains in the
   [checklist](docs/se350-verification-checklist.md)).
 - **Server-facing port-channels flip static→LACP at Proxmox conversion**, same
-  maintenance window — both mismatch directions black-hole (proposed; see the
+  maintenance window — both mismatch directions black-hole (decided; see the
   [site reference architecture](docs/site-reference-architecture.md)).
 - **Image repo = the existing nautobot-composer server** (decided).
+- **Per-VM realtime tuning is baseline, not deferred** — legacy VMs run ESXi
+  latency-sensitivity=high with reservations; Proxmox parity = disjoint CPU affinity +
+  `balloon=0` + KSM off (proposed; VM tuning table in the site reference architecture).
+- **Two-bridge layout mirrors the legacy vSwitch0/LAN-Trunk split** — mgmt `vmbr0` +
+  VLAN-aware `vmbr1` on the 10G LACP bond, jumbo MTU on the data path (proposed).
 
 See the [decision log](docs/decision-log.md) for the full list with status.

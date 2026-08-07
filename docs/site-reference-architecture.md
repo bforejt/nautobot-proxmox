@@ -114,15 +114,46 @@ documentation showed the first two **assert ESXi defaults** rather than change b
 | VM autostart | Per-VM autostart + delay | `onboot=1` + `startup=order=N,up=S` |
 | SSH shell + serial console shell | ESXi TSM/TSM-SSH services | Break-glass root SSH key (firstboot) + GRUB/getty serial console on ttyS0 → OpenGear |
 
-### Latency-sensitivity parity note
+### VM-level tuning standard (legacy, confirmed Aug 2026)
 
-The written standard references the vSphere 8 Latency-Sensitive Workloads white paper,
-but the robot never applied per-VM `Latency Sensitivity = High` (exclusive pCPU
-affinity + full memory reservation + coalescing off) — only the host power policy. The
-Proxmox baseline (cpu=host, strict no-oversubscription, performance governor, capped
-C-states) is therefore **at parity with what actually ran**, not a regression. Full
-white-paper parity (vCPU pinning, hugepages/memory locking, emulator-thread isolation)
-remains deliberately deferred to a measured need.
+The team confirmed the ESXi estate applies per-VM realtime tuning, not just host
+settings. On ESXi, `Latency Sensitivity = High` grants exclusive pCPU access (each vCPU
+owns a physical CPU), bypasses the VMkernel scheduler, and disables vNIC coalescing —
+and requires the CPU/memory reservations the robot also sets. **Parity on Proxmox
+therefore requires per-VM measures, not only host tuning:**
+
+| ESXi VM setting | Proxmox equivalent |
+|---|---|
+| Cores-per-socket sized so virtual sockets = physical sockets (SE350: always 1) | `sockets: 1, cores: N` — explicit in every VNF profile |
+| `sched.cpu.latencysensitivity = high` (exclusive pCPU affinity, scheduler bypass, coalescing off) | Composite: `affinity: <cpuset>` per VM with **disjoint core sets computed from the core budget** (the design job assigns core ranges the same way it budgets vCPUs), host cores 0–1 (+ SMT siblings) reserved for housekeeping, C-states capped at host level. `[lab-verify]` whether `affinity` is settable via a non-root API token |
+| CPU min / memory min reservations ("pins up resources") | No-oversubscription budget (CPU side) + `balloon: 0` (memory fully committed at start, no overcommit path) + **KSM disabled host-wide** (no page merging on realtime hosts) |
+| All throughput caps off | No `cpulimit`, no vNIC `rate=`, no disk I/O throttles in any profile |
+| Guest desktop autolock off | Ubuntu golden-template / cloud-init setting |
+
+Still deliberately deferred (not part of legacy parity): hugepages + memory locking
+(root@pam-only via API anyway) and emulator-thread isolation — revisit on measured
+jitter.
+
+## Legacy robot function map
+
+Function-by-function mapping of the ESXi deployment robot onto the Proxmox/Nautobot
+design. Where a function has no equivalent, the reason is given.
+
+| Robot function / behavior | Proxmox / Nautobot-job equivalent |
+|---|---|
+| `verify_vswitch` — idempotent vswitch check; on create: MTU 9000+, CDP enabled, allow promiscuous / MAC change / forged transmits | `DeployHostNetworkJob` verify/converge of bridges. **MTU 9000 on bond + data bridge** (VM vNICs use virtio `mtu=1` to inherit the bridge MTU); `lldpd` with CDP mode enabled for neighbor visibility; the three ESXi security-policy relaxations need no equivalent — a Linux bridge doesn't filter promiscuous/forged-MAC by default (keep `firewall=0` on dataplane vNICs) |
+| Two vswitches: `vSwitch0` (host mgmt) + `LAN-Trunk` (VM networking) | **Two bridges**: `vmbr0` (mgmt) + `vmbr1` (VLAN-aware "LAN-Trunk" on the 10G LACP bond). Resolves the logical half of the port-role question — remaining is which physical ports carry each |
+| `find_and_config_pg` — port groups `LOC_NAME_VlanNum`, tagged packets → specific vNICs | Port groups have no Proxmox object; the mapping lives in Nautobot: VLAN objects named by the same `LOC_NAME_VlanNum` convention, VMInterface↔VLAN assignments, rendered to `net tag=`/`trunks=` at deploy. The audit job replaces "check the port group exists" |
+| Load VMDK/VMX, edit in place: map network names, scrub identity (UUID etc.) that must not duplicate | Identity handling **inverts**: fresh qcow2 import + VM config generated from Nautobot intent (`smbios1 uuid=`, pinned MACs, bridge/tag) — nothing to scrub. Golden images must be identity-clean (machine-id reset / cloud-init for Ubuntu; vendor images ship clean) |
+| VMDK zeroed-thick format | Thin provisioning (LVM-thin/ZFS/qcow2), sanctioned by the written policy; thin is also what enables native snapshots. Preallocation options exist if ever needed |
+| `create_vm` — autostart automatic power-on for all VMs (default delay 15) | `onboot=1` + `startup=order=N,up=15` (15 s as the default `up`, per-profile overrides) |
+| vNIC driver vmxnet3 | virtio-net (+ `queues=<vCPUs>` on dataplane NICs) |
+| Sanity checks: target server name must match; datastores checked for space and correct targets | `DeployVmJob` pre-flight: Nautobot Device ↔ Proxmox node hostname **and** DMI serial match (refuse on mismatch); storage ID exists, is the intended target, and has capacity — all via API before any write |
+| Final alert with 30 s bail-out window + host report | Replaced with something stronger: `DryRunVar` preview (explicit diff of what will happen) + approval gating on field-targeted jobs — an affirmative confirmation instead of a countdown |
+| SSH shell enabled | Break-glass root SSH key (firstboot) |
+| Console → serial; host firewall opens per-VM remote serial ports (VM consoles via telnet to host TCP ports) | Host: GRUB/getty on ttyS0 → OpenGear. Per-VM: `serial0: socket` + **socat/ser2net systemd units generated from the VM list, exposing each socket on a TCP port** bound to the mgmt VLAN and firewalled to OpenGear/mgmt sources — preserving the existing telnet-to-port workflow; `qm terminal` remains the native path |
+| LROEnabled, FeatPairEnable, power high performance | See host-tweak table above (ESXi defaults / multiqueue / BIOS + C-states) |
+| Backup tools added for CLI snapshots | Native: `qm snapshot` / `vzdump` are built in (thin storage makes them work); Proxmox Backup Server deferred |
 
 ## Compute sizing & oversubscription policy
 
