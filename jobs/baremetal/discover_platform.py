@@ -17,7 +17,7 @@ log carries the highlights and the checklist verdicts.
 
 import json
 
-from nautobot.apps.jobs import BooleanVar, IPAddressVar, Job, register_jobs
+from nautobot.apps.jobs import BooleanVar, IPAddressVar, Job, StringVar, register_jobs
 from nautobot.extras.models import Secret
 
 from ..lib.redfish_discovery import RedfishDiscovery
@@ -48,11 +48,13 @@ INTERESTING_BIOS_FRAGMENTS = (
 
 class DiscoverSe350Platform(Job):
     class Meta:
-        name = "SE350 Platform Discovery (read-only)"
+        name = "SE350 Platform Discovery"
         description = (
-            "Read-only Redfish dump from a Lenovo XCC: BIOS attributes, VirtualMedia "
-            "EXT members, firmware versions, Secure Boot state. Answers Phase 0 "
-            "checklist items 1-3 without touching the target."
+            "Redfish sweep of a Lenovo XCC: BIOS attributes, VirtualMedia EXT members, "
+            "firmware versions, Secure Boot state. Read-only by default (checklist "
+            "items 1-3). Optional WRITE checks: virtual-media mount/eject test, and a "
+            "DISRUPTIVE full dress rehearsal (boot-once from the mounted ISO + power "
+            "cycle) for lab units only."
         )
         has_sensitive_variables = False
 
@@ -67,7 +69,40 @@ class DiscoverSe350Platform(Job):
         default=True,
     )
 
-    def run(self, bmc_ip, skip_tls_verify):
+    run_vmedia_write_test = BooleanVar(
+        label="Run virtual-media WRITE test",
+        description=(
+            "Mount the test ISO via the platform-correct method (XCC1 PATCH-on-EXT vs "
+            "XCC2 InsertMedia, auto-detected), verify Inserted, then eject. Writes to "
+            "the BMC only — does not touch host power or OS. Safe on a running host, "
+            "but intended for lab units."
+        ),
+        default=False,
+    )
+
+    test_iso_url = StringVar(
+        label="Test ISO URL",
+        description=(
+            "HTTP(S) URL of a small ISO for the write test. Must be plain HTTP for "
+            "SE350/XCC1 (no authenticated HTTPS)."
+        ),
+        default="http://provisioning.example.internal/isos/test.iso",
+        required=False,
+    )
+
+    dress_rehearsal_reboot = BooleanVar(
+        label="DISRUPTIVE: full dress rehearsal (boot the ISO)",
+        description=(
+            "After mounting, set one-time boot to CD and power-cycle the node so it "
+            "boots the mounted ISO — the end-to-end proof of the no-USB install "
+            "mechanism. REBOOTS THE TARGET. Lab units only; requires the write test "
+            "to be enabled. Media is left mounted (eject by re-running the write test "
+            "without this option once finished)."
+        ),
+        default=False,
+    )
+
+    def run(self, bmc_ip, skip_tls_verify, run_vmedia_write_test, test_iso_url, dress_rehearsal_reboot):
         try:
             username = Secret.objects.get(name=XCC_USERNAME_SECRET_NAME).get_value()
             password = Secret.objects.get(name=XCC_PASSWORD_SECRET_NAME).get_value()
@@ -97,7 +132,69 @@ class DiscoverSe350Platform(Job):
         self._log_firmware(report.get("firmware_inventory", {}))
         self._attach_files(report)
 
+        if dress_rehearsal_reboot and not run_vmedia_write_test:
+            self.logger.error(
+                "Dress rehearsal requested without the write test enabled — enable "
+                "'Run virtual-media WRITE test' too. No write operations performed."
+            )
+            raise ValueError("dress_rehearsal_reboot requires run_vmedia_write_test")
+
+        if run_vmedia_write_test:
+            self._run_write_checks(discovery, test_iso_url, dress_rehearsal_reboot)
+
         return "Discovery complete — see attached JSON files for full dumps."
+
+    # ---------- write checks (opt-in) ----------
+
+    def _run_write_checks(self, discovery, test_iso_url, dress_rehearsal_reboot):
+        if not test_iso_url:
+            self.logger.error("Write test enabled but no Test ISO URL provided.")
+            raise ValueError("test_iso_url is required for the write test")
+
+        self.logger.info("WRITE TEST: mounting %s", test_iso_url)
+        mount = discovery.mount_iso(str(test_iso_url))
+        self.logger.info(
+            "Mount accepted via %s on %s", mount["mode"], mount["member_path"]
+        )
+
+        if discovery.wait_media_state(mount["member_path"], inserted=True):
+            self.logger.info(
+                "CHECKLIST §1 WRITE CHECK PASS: media shows Inserted=true "
+                "(mode=%s). The Redfish mount mechanism works on this unit.",
+                mount["mode"],
+            )
+        else:
+            self.logger.error(
+                "CHECKLIST §1 WRITE CHECK FAIL: media never showed Inserted=true "
+                "within timeout. Attempting eject to leave the BMC clean."
+            )
+            discovery.eject_iso(mount["member_path"], mount["mode"])
+            raise RuntimeError("Virtual media mount did not reach Inserted=true")
+
+        if dress_rehearsal_reboot:
+            discovery.set_boot_once_cd()
+            self.logger.info("Set one-time boot override to CD.")
+            power_state = discovery.get_power_state()
+            action = "ForceRestart" if power_state == "On" else "On"
+            discovery.power_action(action)
+            self.logger.warning(
+                "DRESS REHEARSAL: sent power action '%s' — the node is booting the "
+                "mounted test ISO. Watch the console (OpenGear/XCC). Media is left "
+                "mounted; eject later by re-running the write test without the "
+                "dress-rehearsal option.",
+                action,
+            )
+            return
+
+        self.logger.info("Ejecting test media (no reboot requested).")
+        discovery.eject_iso(mount["member_path"], mount["mode"])
+        if discovery.wait_media_state(mount["member_path"], inserted=False, timeout=60):
+            self.logger.info("Eject verified — BMC left in its original media state.")
+        else:
+            self.logger.warning(
+                "Eject not confirmed within timeout — check %s manually.",
+                mount["member_path"],
+            )
 
     # ---------- logging helpers ----------
 

@@ -50,7 +50,7 @@ Reference research (dense, per-dimension findings backing the plan):
 
 | Job | What it does |
 |---|---|
-| `SE350 Platform Discovery (read-only)` ([jobs/baremetal/discover_platform.py](jobs/baremetal/discover_platform.py)) | GET-only Redfish dump from one XCC: full BIOS attribute list (+ registry of allowed values when published), VirtualMedia EXT-member check, XCC/UEFI/NIC firmware versions, Secure Boot state. Attaches JSON dumps to the JobResult and logs checklist §1/§3 verdicts. |
+| `SE350 Platform Discovery` ([jobs/baremetal/discover_platform.py](jobs/baremetal/discover_platform.py)) | Redfish sweep of one XCC: full BIOS attribute list (+ registry of allowed values when published), VirtualMedia EXT-member check, XCC/UEFI/NIC firmware versions, Secure Boot state — read-only by default, with checklist §1/§3 verdicts logged and JSON dumps attached to the JobResult. Opt-in **write checks**: virtual-media mount/verify/eject test (auto-detects XCC1 PATCH-on-EXT vs XCC2 InsertMedia — the dual-mode client seed), and a clearly-marked DISRUPTIVE dress rehearsal that boot-once's the mounted ISO (lab units only). |
 
 Setup (Nautobot 2.4):
 
