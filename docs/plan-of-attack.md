@@ -193,11 +193,19 @@ Same payload delivers the node's TLS cert/CA so `proxmoxer` runs with `verify_ss
 pointing at a real bundle instead of `False`-forever, plus SSH host keys for break-glass
 `known_hosts`. Token is lost on reinstall — rebuild path re-runs the same bootstrap.
 
-**Proxmox service-account role** (privilege-separated token):
-`VM.Allocate, VM.Clone, VM.Config.*, VM.PowerMgmt, VM.Audit, VM.Console,
-Datastore.AllocateSpace, Datastore.AllocateTemplate, Datastore.Audit, Sys.Audit,
-Sys.Modify (required for the /nodes/{n}/network endpoints — note it widens blast radius),
-SDN.Use on /sdn/zones/localnetwork`.
+**Proxmox service-account role** (privilege-separated token) — **validated live on
+PVE 9.2.2 (lab NUC, Aug 2026)** as role `NFVAutomation`, user `svc-nfv@pve`, token
+`deploy`: `VM.Allocate, VM.Clone, VM.Config.* (enumerated), VM.PowerMgmt, VM.Audit,
+VM.Console, Datastore.AllocateSpace, Datastore.AllocateTemplate, Datastore.Audit,
+Sys.Audit, Sys.Modify (required for the /nodes/{n}/network endpoints — note it widens
+blast radius), SDN.Use`. Confirmed sufficient for: VM create with the full profile,
+cloud-init config, power ops, network staged-create + apply, `download-url`, and
+`import-from` volume-ID imports. **Critical setup gotcha (bit us in testing): a
+privilege-separated token's effective rights are the INTERSECTION of the token's ACLs
+and its owning user's ACLs — grant the role to BOTH the user and the token.** Known
+gap by design: storage *content deletion* (image rotation) needs `Datastore.Allocate`
+— grant it scoped to the import storage only if `IngestImageJob` is to prune old
+images, else leave cleanup root-side.
 
 **The most strand-prone step, designed away:** the auto-installer configures management on
 one NIC with a simple bridge; naively having a later API job replace that with
@@ -621,13 +629,13 @@ nautobot-proxmox/
     on the fleet IOS-XE release first); Proxmox data path mirrors MTU 9000.
     `[lab-verify]` remaining: Linux NIC-name↔faceplate pinning map (PCI path), and
     per-site `show system mtu` capture during rollout.
-31. Answered (Aug 2026, per Proxmox docs/forum): `affinity` (vCPU pinning) is
-    **root@pam-only** — same privileged class as hugepages; the privilege-separated
-    API token cannot set it. Stance revised after the reservations-vs-pinning
-    assessment: pinning is the **escalation path, not baseline** — the reservation
-    guarantee comes from the no-oversubscription guardrail + `balloon=0` + host-side
-    confinement (firstboot), and the Phase 2 jitter/latency soak decides whether
-    pinning is ever invoked. If invoked: `HostBaselineJob` applies it root-context
-    (`qm set <vmid> --affinity <cpuset>` from Nautobot intent, idempotent).
-    `[lab-verify]` items become part of the escalation validation, not the critical
-    path.
+31. **Empirically confirmed on PVE 9.2.2 (lab NUC, Aug 2026)**: `affinity` and
+    `hugepages` refuse **every** API token — including a full-privilege token of
+    root@pam — with `only root can set 'affinity' config`. Likewise `import-from`
+    with a filesystem path: `Only root can pass arbitrary filesystem paths`. So:
+    pinning (the escalation path, per the reservations-vs-pinning stance) applies
+    only via root-context SSH (`HostBaselineJob`, `qm set <vmid> --affinity`), and
+    the image pipeline's volume-ID mechanism is mandatory — both now facts, not
+    research claims. The volume-ID import path itself was validated end-to-end via
+    the privilege-separated token (`download-url` → `import-from=<vol-id>` → disk
+    created on LVM-thin).

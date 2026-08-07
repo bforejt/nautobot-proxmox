@@ -154,13 +154,13 @@ channeled. On a representative 9300 stack capture:
 After any test conversion: `show etherchannel summary` must show flags `P` (bundled)
 and `/proc/net/bonding/bond0` a non-zero partner MAC.
 
-Also on the PVE test host (escalation-path validation, not critical path — see plan
-§6 #31): confirm the documented restriction that `affinity` is root@pam-only still
-holds on PVE 9.x (quick negative test via the privilege-separated token), and validate
-`HostBaselineJob`-style `qm set <vmid> --affinity <cpuset>` over SSH with persistence
-across VM reboot and redeploy. Baseline instead relies on host-side confinement —
-verify `system.slice`/`user.slice` `AllowedCPUs=` takes effect (host daemons off the
-VNF cores) and NIC IRQ affinity steering works on the X722.
+Affinity restriction **confirmed on PVE 9.2.2** (lab NUC, Aug 2026): `affinity` and
+`hugepages` refuse every API token — even root's — with "only root can set"; the
+`HostBaselineJob` SSH path is the only way to apply pinning. Remaining on a PVE host
+with SSH access: validate `qm set <vmid> --affinity <cpuset>` persistence across VM
+reboot and redeploy, verify `system.slice`/`user.slice` `AllowedCPUs=` takes effect
+(host daemons off the VNF cores), and NIC IRQ affinity steering on the X722
+(SE350-specific).
 
 ## 11. Proxmox VE 9 manual install + burn-in
 
