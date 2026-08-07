@@ -301,7 +301,8 @@ Against a hand-built lab PVE node, API-only. Split so each sub-phase ships alone
   "qcow2 import + optional bootstrap ISO" engine with per-VNF profile objects (cpu=host,
   `sockets=1` + cores per profile, numa=1, `balloon=0` (memory fully committed —
   reservation parity), `affinity=<cpuset>` from the design job's disjoint core
-  assignment (latency-sensitivity parity; `[lab-verify]` token privilege), machine type
+  assignment (latency-sensitivity parity; root@pam-only option, applied via the
+  `HostBaselineJob` root-context step — §6 #31), machine type
   with **pinned version**, NIC list with bridge/tag/trunks/queues/pinned MAC (virtio
   `mtu=1` inherits bridge MTU), `smbios1 uuid=` from Nautobot, `serial0: socket`,
   onboot + `startup` (default up=15), firewall=0 on dataplane NICs, no
@@ -576,8 +577,11 @@ nautobot-proxmox/
     path. `[lab-verify]` remaining: which physical ports carry each role (p3/p4 copper
     vs f1/f2 fiber) against real cabling, whether mgmt gets its own bond or a single
     port, and switch `system mtu` supports jumbo end-to-end.
-31. `[lab-verify]` `affinity` (vCPU pinning) settable via the privilege-separated API
-    token — required in Phase 2 now that pinning is baseline (legacy VMs run
-    latency-sensitivity=high). If root-only like hugepages, the fallback is applying
-    affinity via the `HostBaselineJob` SSH layer (`qm set` locally) — decide before the
-    Phase 2 role definition hardens.
+31. Answered (Aug 2026, per Proxmox docs/forum): `affinity` (vCPU pinning) is
+    **root@pam-only** — same privileged class as hugepages; the privilege-separated
+    API token cannot set it. Design consequence: `DeployVmJob` creates the VM without
+    affinity, and the root-context host path applies it — `HostBaselineJob` (SSH,
+    `qm set <vmid> --affinity <cpuset>` rendered from the same Nautobot intent,
+    idempotent). `[lab-verify]` only that the restriction still holds on PVE 9.x
+    (quick negative test with the token) and that applied pinning persists across
+    reboot and redeploy.

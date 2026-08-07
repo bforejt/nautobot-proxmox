@@ -119,9 +119,11 @@ cross-connected to both stack members — and decide the Proxmox port-role map
 test conversion: `show etherchannel summary` must show flags `P` (bundled) and
 `/proc/net/bonding/bond0` a non-zero partner MAC.
 
-Also verify on the PVE test host: `qm set <vmid> --affinity <cpuset>` succeeds with the
-privilege-separated API token (not just root@pam) — pinning is baseline for
-latency-sensitivity parity (plan §6 #31), and the fallback changes the job design.
+Also on the PVE test host: confirm the documented restriction that `affinity` is
+root@pam-only still holds on PVE 9.x (a quick negative test — set it via the
+privilege-separated API token and expect a permission error), then validate the design
+path: `HostBaselineJob`-style `qm set <vmid> --affinity <cpuset>` over SSH, and check
+the pinning persists across VM reboot and redeploy (plan §6 #31).
 
 ## 11. Proxmox VE 9 manual install + burn-in
 
