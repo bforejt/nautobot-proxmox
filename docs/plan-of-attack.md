@@ -638,4 +638,11 @@ nautobot-proxmox/
     the image pipeline's volume-ID mechanism is mandatory — both now facts, not
     research claims. The volume-ID import path itself was validated end-to-end via
     the privilege-separated token (`download-url` → `import-from=<vol-id>` → disk
-    created on LVM-thin).
+    created on LVM-thin). The **positive half is also proven** (same NUC, over SSH):
+    `qm set --affinity 0-1` succeeds as root, `/proc` shows the QEMU main process
+    and every thread pinned to `0-1` at runtime, and the pinning persists across
+    stop/start. Host confinement demonstrated live: `system.slice AllowedCPUs=2-3`
+    confined pvedaemon while the VM in qemu.slice stayed untouched — exactly the
+    baseline split. Bonus: socat ships installed on PVE 9 (console-exposure units
+    need no extra package); ksmtuned runs by default (firstboot disables it as
+    planned).
