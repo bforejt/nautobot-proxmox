@@ -63,9 +63,11 @@ Reference research (dense, per-dimension findings backing the plan):
   maintenance window — both mismatch directions black-hole (decided; see the
   [site reference architecture](docs/site-reference-architecture.md)).
 - **Image repo = the existing nautobot-composer server** (decided).
-- **Per-VM realtime tuning is baseline, not deferred** — legacy VMs run ESXi
-  latency-sensitivity=high with reservations; Proxmox parity = disjoint CPU affinity +
-  `balloon=0` + KSM off (proposed; VM tuning table in the site reference architecture).
+- **Reservation parity by policy, pinning as escalation** — KVM has no ESXi-style CPU
+  reservation; the no-oversubscription guardrail is the admission control, plus
+  `balloon=0`, KSM off, and host services/IRQs confined to housekeeping cores. Per-VM
+  CPU affinity is invoked only if the Phase 2 jitter soak demands it (proposed; VM
+  tuning table in the site reference architecture).
 - **Two-bridge layout mirrors the legacy vSwitch0/LAN-Trunk split** — mgmt `vmbr0` +
   VLAN-aware `vmbr1` on the 10G LACP bond, jumbo MTU on the data path (proposed).
 

@@ -28,10 +28,13 @@ must make are tagged `[decision-needed]` (consolidated in §6).
 - **Walking slowly is right.** Several tempting features (hugepages, OVS, Proxmox SDN
   zones, Proxmox HA, drift-sync/SSoT) are all correctly deferrable — and some have hard
   blockers anyway (hugepages settings are root@pam-only; API tokens can't set them).
-  One exception surfaced later: per-VM CPU affinity is **not** deferrable, because the
-  legacy estate runs `sched.cpu.latencysensitivity=high` with reservations (exclusive
-  pCPU access) — parity requires pinning from day one (see site-reference-architecture.md,
-  VM tuning table).
+  One nuance surfaced later: the legacy estate runs `sched.cpu.latencysensitivity=high`
+  with CPU/memory reservations per VM. KVM has no reservation primitive, so the
+  reservation guarantee is reproduced by the no-oversubscription guardrail (admission
+  control) + `balloon=0` + host-side confinement (host services and NIC IRQs restricted
+  to housekeeping cores); per-VM `affinity` pinning is the documented **escalation
+  path**, invoked only if the Phase 2 jitter/latency soak demands it (see
+  site-reference-architecture.md, VM tuning table).
 - **The colleague's pipeline philosophy is validated:** Nautobot Jobs stay fast and
   re-runnable, long multi-stage work writes status back to Nautobot. Research shows this
   can live *inside* Nautobot (dedicated JobQueue + per-job time limits + job chaining)
@@ -221,9 +224,11 @@ until the OpenGear serial path to that node is proven.**
   threads** (fleet: 16-core/32-thread D-2183IT, 256 GB): budget = 16 cores minus 2–4
   reserved for host/housekeeping (vhost threads, bridge, mgmt) ≈ 12–14 VNF vCPUs; RAM =
   256 GB minus host overhead and the pinned ZFS `arc-max`. Budget `queues=` too —
-  multiqueue adds host CPU load. The same computation emits each VM's **disjoint
-  `affinity` cpuset** (host/housekeeping cores excluded) — reproducing ESXi
-  latency-sensitivity=high exclusive placement declaratively.
+  multiqueue adds host CPU load. This guardrail **is** the CPU-reservation equivalent —
+  KVM has no MHz-floor primitive, so admission control lives here. The same computation
+  can emit disjoint `affinity` cpusets (host/housekeeping cores excluded) when the
+  pinning escalation is invoked — reproducing ESXi latency-sensitivity=high exclusive
+  placement declaratively.
 - Replaced VM disks are renamed, not deleted, until post-deploy checks pass.
 
 ---
@@ -300,9 +305,10 @@ Against a hand-built lab PVE node, API-only. Split so each sub-phase ships alone
   `IngestImageJob` (download-url + checksum verify); `DeployVmJob` — the generic
   "qcow2 import + optional bootstrap ISO" engine with per-VNF profile objects (cpu=host,
   `sockets=1` + cores per profile, numa=1, `balloon=0` (memory fully committed —
-  reservation parity), `affinity=<cpuset>` from the design job's disjoint core
-  assignment (latency-sensitivity parity; root@pam-only option, applied via the
-  `HostBaselineJob` root-context step — §6 #31), machine type
+  reservation parity), `cpuunits` weighting VNFs above utility VMs, optional
+  `affinity=<cpuset>` escalation from the design job's disjoint core assignment
+  (root@pam-only option, applied via the `HostBaselineJob` root-context step — §6 #31;
+  invoked only on measured jitter), machine type
   with **pinned version**, NIC list with bridge/tag/trunks/queues/pinned MAC (virtio
   `mtu=1` inherits bridge MTU), `smbios1 uuid=` from Nautobot, `serial0: socket`,
   onboot + `startup` (default up=15), firewall=0 on dataplane NICs, no
@@ -335,8 +341,11 @@ Against a hand-built lab PVE node, API-only. Split so each sub-phase ships alone
   hard limit SIGKILLs long jobs).
 
 Exit per sub-phase: VNF boots from Nautobot intent with day-0 config applied and mgmt
-reachable, zero SSH. Onboarding criteria (PA→Panorama/SCM registration, AP joins) are
-separate line items gated on the licensing/BOM decisions in §6.
+reachable, zero SSH. 2a additionally stands up the **latency/jitter measurement
+harness**; 2b/2c include a datapath latency/jitter soak against acceptance thresholds —
+the decision gate for the per-VM pinning escalation (§6 #31). Onboarding criteria
+(PA→SCM registration, AP joins) are separate line items gated on the licensing/BOM
+decisions in §6.
 
 ### Phase 3 — Bare-metal track: port L0 to SE350 + close the loop (parallel with Phase 2)
 
@@ -361,10 +370,12 @@ separate line items gated on the licensing/BOM decisions in §6.
 - Firstboot hook (small fetch-and-exec stub): kernel cmdline (C-states, serial console —
   both GRUB and proxmox-boot-tool paths), ethtool/`disable-fw-lldp` systemd oneshot, NIC
   name pinning, **final network topology** (mgmt `vmbr0` + 10G LACP bond → VLAN-aware
-  `vmbr1`, MTU 9000 on the data path), KSM disabled, lldpd with CDP mode, apt repo
-  config (no-subscription) + point-release pin, qemu-guest-agent-ready defaults,
-  socat/ser2net per-VM console exposure scaffolding, root SSH key, **pveum credential
-  bootstrap**, phone-home webhook.
+  `vmbr1`, MTU 9000 on the data path), KSM disabled, **host-service confinement**
+  (`system.slice`/`user.slice` `AllowedCPUs=` → housekeeping cores; NIC IRQ affinity
+  steered there — the "reserve the host away from VNFs" half of reservation parity),
+  lldpd with CDP mode, apt repo config (no-subscription) + point-release pin,
+  qemu-guest-agent-ready defaults, socat/ser2net per-VM console exposure scaffolding,
+  root SSH key, **pveum credential bootstrap**, phone-home webhook.
 - `HostBaselineJob` (L1, bounded idempotent SSH): day-N remediation for firstboot-domain
   settings (new ethtool flag, cmdline change) on in-service hosts — the alternative is
   "tuning changes require rebuild," which is not acceptable for field fleets.
@@ -414,10 +425,11 @@ never converted in place; pairs stay homogeneous).
 ### Phase 5 — Later / on-demand (explicitly not now)
 
 Proxmox→Nautobot SSoT drift sync (model on the official vSphere DiffSync adapter; the two
-community `nautobot-ssot-proxmox` repos are reference reading only). Hugepages + memory
-locking and emulator-thread isolation — only on measured jitter (hugepages is
-root@pam-only; note `affinity` pinning itself moved into the Phase 2 baseline for
-legacy latency-sensitivity parity). Golden Config
+community `nautobot-ssot-proxmox` repos are reference reading only). Per-VM `affinity`
+pinning, hugepages + memory locking, and emulator-thread isolation — the escalation
+ladder, invoked only if the Phase 2 jitter/latency soak (or field experience) demands
+it (hugepages and affinity are root@pam-only; the `HostBaselineJob` path applies them).
+Golden Config
 for VNF configs (forces the dual-record modeling decision). Packaged Nautobot App (when
 custom models or pinned pip dependencies appear — Git-synced jobs can't declare
 dependencies). Packer-built Ubuntu golden templates in CI. PXE as an ISO alternative.
@@ -579,9 +591,11 @@ nautobot-proxmox/
     port, and switch `system mtu` supports jumbo end-to-end.
 31. Answered (Aug 2026, per Proxmox docs/forum): `affinity` (vCPU pinning) is
     **root@pam-only** — same privileged class as hugepages; the privilege-separated
-    API token cannot set it. Design consequence: `DeployVmJob` creates the VM without
-    affinity, and the root-context host path applies it — `HostBaselineJob` (SSH,
-    `qm set <vmid> --affinity <cpuset>` rendered from the same Nautobot intent,
-    idempotent). `[lab-verify]` only that the restriction still holds on PVE 9.x
-    (quick negative test with the token) and that applied pinning persists across
-    reboot and redeploy.
+    API token cannot set it. Stance revised after the reservations-vs-pinning
+    assessment: pinning is the **escalation path, not baseline** — the reservation
+    guarantee comes from the no-oversubscription guardrail + `balloon=0` + host-side
+    confinement (firstboot), and the Phase 2 jitter/latency soak decides whether
+    pinning is ever invoked. If invoked: `HostBaselineJob` applies it root-context
+    (`qm set <vmid> --affinity <cpuset>` from Nautobot intent, idempotent).
+    `[lab-verify]` items become part of the escalation validation, not the critical
+    path.
