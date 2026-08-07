@@ -69,8 +69,11 @@ Notes for the design job:
     `vmbr0`, untagged
   - **f1/f2** — 10 GbE SFP+ fiber (X722), MMF: **LAN-Trunk / VM dataplane**,
     port-channeled. Proxmox mirror: `bond-mode 802.3ad` → VLAN-aware `vmbr1`
-  - Remaining lab items: the Linux-name↔faceplate pinning map (PCI path per port) and
-    the switch jumbo question (below).
+  - Remaining lab item: the Linux-name↔faceplate pinning map (PCI path per port).
+- **Jumbo standard (decided Aug 2026):** the L2 fabric is always jumbo-capable —
+  `system mtu` raised (target 9198) as part of the standard switch build, so an MTU
+  change is never needed later on an in-service stack. The Proxmox data path mirrors
+  MTU 9000 (bond + `vmbr1`); guests stay 1500 unless a profile opts in.
 - **Port-channel modes today:** `channel-group mode on` (static EtherChannel) on
   server-facing ports, `mode active` (LACP) between switch stacks. Mode-on exists
   because the ESXi *standard* vSwitch supports only static teaming (IP-hash); LACP
@@ -85,7 +88,12 @@ because static mode-on forwards onto anything with link (miimon can't detect a
 mis-patched cable or wrong-channel port), while LACP verifies channel membership per
 link before bundling.
 
-**Scope note (de-risks the cutover):** the flip applies **only to the data pair
+**Deployment posture:** net-new builds are the primary case — a new site's switch
+template simply ships with `mode active`, the IP-based hash, and jumbo `system mtu`
+from day one, and no flip ever happens. The coordinated-flip runbook below applies only
+to the secondary case: converting an existing ESXi site in place.
+
+**Scope note (de-risks conversions):** the flip applies **only to the data pair
 (f1/f2)** — the mgmt copper ports are non-channeled access ports and their switch
 config doesn't change at conversion, so management connectivity is never at risk from
 the channel-mode change itself.

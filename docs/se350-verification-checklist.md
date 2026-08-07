@@ -117,12 +117,12 @@ channeled. On a representative 9300 stack capture:
   paired with Linux `layer2+3`).
 - `show run` of the f1/f2-facing port-channels (expect `channel-group mode on` today)
   and of the mgmt access ports (confirm access VLAN = mgmt VLAN 200).
-- **The jumbo question:** `show system mtu` (default 1500, max 9198). The legacy robot
-  set MTU 9000 on the vswitch — host-side only, necessary but not sufficient. Also
-  check the PA config for jumbo-frames/HA2-MTU (HA2 sync on VLAN 907 is the likeliest
-  real >1500 consumer). If `system mtu` is 1500 everywhere, legacy jumbo was cosmetic —
-  decide: raise it at conversion (confirm live-vs-reload behavior on the fleet IOS-XE
-  release first) or standardize 1500 on the Proxmox data path with nothing lost.
+- **Jumbo (decided: fabric is always jumbo-capable):** capture `show system mtu` per
+  stack (default 1500, target 9198). Net-new sites carry it in the switch template;
+  for existing sites confirm whether `system mtu` change applies live or needs a
+  reload on the fleet IOS-XE release, then schedule proactive raises so it never has
+  to happen reactively. Also record the PA jumbo-frames/HA2-MTU config (HA2 sync on
+  VLAN 907 is the likeliest real >1500 consumer).
 - On the PVE side, record the Linux interface names for p3/p4 (igb/I350) and f1/f2
   (i40e/X722) by PCI path — feeds the platform profile's NIC pinning map.
 

@@ -249,6 +249,12 @@ runnable jobs (image ingest / VM deploy / host network / host baseline) rather t
 monolithic robot — a thin wrapper can still present them as a single operator action,
 but field one-off redeploys and partial re-runs need the per-layer entry points.
 
+**Deployment posture:** the primary case is a **net-new build** (lab as-built → ship),
+exactly like the legacy robot's normal job — new sites get the target switch config
+(LACP, IP-hash, jumbo `system mtu`) from day one and no flip runbooks are involved.
+In-place conversion of live ESXi sites is the supported-but-secondary case; the
+coordinated-flip and cutover-policy machinery below applies only there.
+
 ### Phase 0 — Platform decisions + lab bring-up
 
 Lock the one-way choices; get one SE350 pair + a Nautobot instance in the lab.
@@ -589,11 +595,12 @@ nautobot-proxmox/
     active/passive pair (no port-channel) into switch **access ports** → Proxmox
     `active-backup` bond under untagged `vmbr0`; data = f1/f2 10G fiber, channeled →
     `802.3ad` bond under VLAN-aware `vmbr1`. Consequence: the LACP flip (#29) touches
-    only the data pair — mgmt switch config never changes at conversion. `[lab-verify]`
-    remaining: Linux NIC-name↔faceplate pinning map (PCI path), and the switch jumbo
-    question — `show system mtu` per site (default 1500; was the legacy vswitch MTU
-    9000 host-side-only?), plus PA jumbo/HA2-MTU config; if raising `system mtu` at
-    conversion, confirm live-vs-reload behavior on the fleet IOS-XE release.
+    only the data pair — mgmt switch config never changes at conversion. Jumbo decided
+    (Aug 2026): the L2 fabric is always jumbo-capable (`system mtu` in the standard
+    switch build; existing sites verified/raised proactively — confirm live-vs-reload
+    on the fleet IOS-XE release first); Proxmox data path mirrors MTU 9000.
+    `[lab-verify]` remaining: Linux NIC-name↔faceplate pinning map (PCI path), and
+    per-site `show system mtu` capture during rollout.
 31. Answered (Aug 2026, per Proxmox docs/forum): `affinity` (vCPU pinning) is
     **root@pam-only** — same privileged class as hugepages; the privilege-separated
     API token cannot set it. Stance revised after the reservations-vs-pinning
