@@ -542,9 +542,9 @@ nautobot-proxmox/
    decides systemd-oneshot (recommended) vs interfaces-stanza for ethtool persistence.
 10. `[lab-verify]` `affinity` settable by non-root token (hugepages confirmed root-only);
     node-level `startall-onboot-delay` in PVE 9 (LACP convergence before VNF boot).
-11. `[decision-needed]` Image-repo reachability: lab-only vs field-reachable for
-    scenario-2 redeploys vs upload-API fallback. (XCC1 vmedia separately forces plain
-    HTTP for the install ISO.)
+11. Decided (Aug 2026): **nautobot-composer will be reachable from field nodes** —
+    scenario-2 field redeploys use `download-url` pulls directly; no upload-API
+    fallback needed. (XCC1 vmedia separately forces plain HTTP for the install ISO.)
 12. `[decision-needed]` Answer-service discovery mode: baked `--fetch-from` URL vs DHCP
     option 250 vs DNS TXT; where the service runs; who owns it.
 13. `[lab-verify]` Xeon D-2100 + PVE 9 (kernel 6.14+) burn-in before fleet rollout.
@@ -552,19 +552,23 @@ nautobot-proxmox/
 **VNF guests**
 14. `[lab-verify]` q35 machine-version matrix for chosen PAN-OS on PVE 9.x; re-test on
     PVE upgrades.
-15. `[decision-needed]` PAN-OS 11.2.x vs 12.1; fixed model vs flex credits. Management
-    model decided (standalone or SCM, no Panorama); remaining choice is which sites get
-    which, and it only selects the bootstrap template. Proxmox absent from PA's
-    qualified matrix — accept posture explicitly.
+15. Decided (Aug 2026): **PAN-OS 11.2.x** (the environment's current supported
+    version); KVM support posture **accepted** (Proxmox is standard KVM/QEMU —
+    functionally supported, formally unqualified by PA). **Standalone firewalls now,
+    SCM in the near future** — the builder ships both templates from day one; per-VM
+    attribute selects. Remaining `[decision-needed]`: fixed model vs flex credits.
 16. `[lab-verify]` Cisco day-0 CD-ROM: ISO volume-label requirements on KVM; official
     support of iosxe_config.txt-via-CD on 9800-CL.
-17. `[decision-needed]` C8000v `_serial` qcow2 vs standard image + `platform console
-    serial`; UUID allocation flow (Smart Account → Manager WAN-edge list) and
-    Manager-version image gate; HSECK9 SLAC for >250 Mbps crypto sites.
-18. `[decision-needed]` Ubuntu jump host: Desktop (template-bake only — no cloud image
-    exists) vs Server + tooling on the standard cloud image.
-19. `[lab-verify]` 9800-CL template sizing from the official guide of the chosen 17.18.x
-    release; release choice gated by fleet AP models.
+17. Ratified (Aug 2026): C8000v as proposed — `_serial` qcow2 variant, iosxe_config
+    day-0, throughput level set day-0. Process items remain: UUID allocation flow
+    (Smart Account → Manager WAN-edge list), Manager-version image gate, HSECK9 SLAC
+    for >250 Mbps crypto sites.
+18. Decided (Aug 2026): Ubuntu jump host is **Desktop** → golden-template bake path
+    (no cloud image exists for Desktop): build the template once (bake in remote-access
+    tooling and **autolock off**), clone + native cloud-init per deploy.
+19. Decided (Aug 2026): 9800-CL sized for **Catalyst 9136 APs** → IOS-XE 17.18.x train
+    (9136 support requires ≥17.7; 17.18 is the current extended-maintenance train).
+    `[lab-verify]` final release pick + template size from that release's install guide.
 
 **Nautobot**
 20. Decided: build on the existing 2.4 LTM. Plan the 3.x upgrade as its own effort
@@ -580,8 +584,10 @@ nautobot-proxmox/
 23. `[decision-needed]` Design Builder adoption after the Phase 4 spike.
 24. `[decision-needed]` Secrets backend of record: env-var Secrets on the worker now vs
     pointing nautobot-app-secrets-providers at existing Vault.
-25. `[decision-needed]` Approval policy: gate field redeploys from day one (recommended)
-    vs lab friction.
+25. Decided (Aug 2026): **no approval gating at first** — jobs run ungated everywhere;
+    revisit at the Phase 4 field pilot (the twin-health pre-flight and dry-run preview
+    remain the guardrails). Simplifies the 2.4→3.x approval-migration surface to zero
+    for now.
 
 **Process / cutover**
 26. `[decision-needed]` Cutover rule: pairs stay homogeneous, so a failure-driven
