@@ -7,6 +7,16 @@ machine serial (they feed Nautobot device records and the platform-profile YAML)
 Replace `XCC_IP`, `XCC_USER:XCC_PASS` as appropriate. All curl examples are plain GETs
 and safe against in-service units.
 
+> **Shortcut for §§1–3:** the `SE350 Platform Discovery` Nautobot Job
+> ([jobs/baremetal/discover_platform.py](../jobs/baremetal/discover_platform.py))
+> collects all of it in one run — BIOS dump (+ allowed-values registry), VirtualMedia
+> EXT check with pass/fail verdict, firmware inventory, Secure Boot state — and
+> attaches the JSON dumps to the JobResult. Its opt-in **write checks** also cover
+> §1's functional test: mount/verify/eject of a test ISO, plus the DISRUPTIVE
+> dress-rehearsal option (boot-once from the mounted ISO — lab units only) that is
+> the end-to-end proof of the no-USB install mechanism. The curl commands below
+> remain as the no-Nautobot fallback.
+
 ## 1. XCC virtual media functional check (license question answered)
 
 **Answered 2026-08-06: fleet licenses are XCC Enterprise**, so virtual media is

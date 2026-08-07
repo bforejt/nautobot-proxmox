@@ -4,9 +4,10 @@ Nautobot-driven lifecycle automation for Proxmox VE NFV hypervisors — Lenovo T
 SE350 pairs running edge VNF workloads (Palo Alto VM-Series, Cisco Catalyst 8000v,
 Catalyst 9800-CL, Cisco SD-WAN edges, Ubuntu jump hosts).
 
-**Status: planning.** No job code yet — this repo currently holds the project
-documentation set produced from the initial analysis and research pass (August 2026).
-Implementation follows the phased plan below.
+**Status: planning + first tooling.** This repo holds the project documentation set
+produced from the initial analysis and research pass (August 2026), plus the first
+Nautobot Job: a read-only SE350 platform discovery that answers the Phase 0 checklist's
+Redfish questions (see *Jobs* below). Implementation follows the phased plan.
 
 ## What this project is
 
@@ -44,6 +45,24 @@ Reference research (dense, per-dimension findings backing the plan):
 | [docs/research/nautobot-modeling-and-jobs.md](docs/research/nautobot-modeling-and-jobs.md) | Data modeling (one-host Clusters, VNFs as VMs), job architecture, app ecosystem, 2.4-LTM vs 3.x |
 | [docs/research/se350-platform-notes.md](docs/research/se350-platform-notes.md) | SE350 hardware, XCC1 Redfish mechanics & licensing, BIOS attributes, Security Pack/ThinkShield, EOL |
 | [docs/research/nfv-lifecycle-process.md](docs/research/nfv-lifecycle-process.md) | Process design: intent-vs-imperative split, layering, orchestration placement, cutover strategy |
+
+## Jobs
+
+| Job | What it does |
+|---|---|
+| `SE350 Platform Discovery` ([jobs/baremetal/discover_platform.py](jobs/baremetal/discover_platform.py)) | Redfish sweep of one XCC: full BIOS attribute list (+ registry of allowed values when published), VirtualMedia EXT-member check, XCC/UEFI/NIC firmware versions, Secure Boot state — read-only by default, with checklist §1/§3 verdicts logged and JSON dumps attached to the JobResult. Opt-in **write checks**: virtual-media mount/verify/eject test (auto-detects XCC1 PATCH-on-EXT vs XCC2 InsertMedia — the dual-mode client seed), and a clearly-marked DISRUPTIVE dress rehearsal that boot-once's the mounted ISO (lab units only). |
+
+Setup (Nautobot 2.4):
+
+1. Add this repo as a **Git Repository** (Extensibility → Git Repositories), provides:
+   **jobs**, then Sync.
+2. Create two Secrets named `xcc_username` and `xcc_password` (any provider — e.g.
+   Environment Variable on the worker), matching the bare-metal starter's convention.
+3. Enable the job (Jobs are disabled on first sync), run it against one lab XCC IP.
+
+The pure-Python client ([jobs/lib/redfish_discovery.py](jobs/lib/redfish_discovery.py))
+also runs standalone: `python redfish_discovery.py --bmc-ip <ip> --username <u>
+--password <p> --insecure`.
 
 ## Key decisions so far
 
