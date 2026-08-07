@@ -1,0 +1,80 @@
+#cloud-config
+# Golden-template BUILD seed — Ubuntu jump host.
+# Desktop experience on the Ubuntu Server cloud image (decision log #30):
+# applied ONCE when building the template; per-deploy clones use a separate,
+# identity-only cloud-init (hostname/IP/users from Nautobot).
+#
+# Per-deploy note: create users with groups [sudo, wireshark] so non-root
+# packet capture works out of the box.
+
+package_update: true
+package_upgrade: true
+
+apt:
+  debconf_selections:
+    # Allow non-superuser capture (setuid dumpcap + wireshark group) — answers
+    # the interactive prompt so the build stays unattended.
+    wireshark: wireshark-common wireshark-common/install-setuid boolean true
+    # Run iperf3 as an always-on daemon: every jump host is a ready iperf3
+    # server, so pair-to-pair and circuit throughput tests need zero setup.
+    iperf3: iperf3 iperf3/start_daemon boolean true
+
+packages:
+  # desktop + platform
+  - ubuntu-desktop-minimal
+  - qemu-guest-agent
+  # capture & analysis
+  - wireshark            # Qt GUI + dumpcap
+  - tshark
+  - tcpdump
+  - ngrep
+  - python3-scapy        # packet crafting for oddball reproductions
+  # performance / circuit testing
+  - iperf3
+  - mtr-tiny
+  - speedtest-cli        # DIA circuit validation
+  - iftop
+  - nload
+  - ethtool
+  # reachability / DNS / scanning
+  - nmap
+  - fping
+  - iputils-arping
+  - dnsutils             # dig / nslookup
+  - whois
+  - netcat-openbsd
+  - socat
+  - telnet               # OpenGear serial-port sessions
+  - hping3               # crafted TCP probes for firewall-policy testing
+  - snmp                 # snmpget/snmpwalk
+  # utilities
+  - ipcalc
+  - sipcalc
+  - tmux
+  - traceroute
+
+write_files:
+  # Autolock OFF, system-wide (legacy VM standard) — dconf system profile so it
+  # applies to every user, not one account's gsettings.
+  - path: /etc/dconf/profile/user
+    content: |
+      user-db:user
+      system-db:local
+  - path: /etc/dconf/db/local.d/00-nfv-nolock
+    content: |
+      [org/gnome/desktop/screensaver]
+      lock-enabled=false
+      [org/gnome/desktop/session]
+      idle-delay=uint32 0
+  - path: /etc/dconf/db/local.d/locks/nfv-nolock
+    content: |
+      /org/gnome/desktop/screensaver/lock-enabled
+      /org/gnome/desktop/session/idle-delay
+
+runcmd:
+  - dconf update
+  - systemctl enable --now qemu-guest-agent
+
+# Sealing (cloud-init clean, machine-id truncate, poweroff, convert to
+# template) is done by the build script over SSH after the agent reports
+# cloud-init complete — deliberately not part of this seed.
