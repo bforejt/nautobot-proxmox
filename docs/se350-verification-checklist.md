@@ -108,16 +108,26 @@ enabled. Confirm the auto-install ISO boots with Secure Boot disabled.
 
 ## 10. Switch-side EtherChannel capture (per site type, feeds the conversion runbook)
 
-On a representative 9300 stack: `show etherchannel load-balance` (default is `src-mac`,
-which polarizes NFV traffic onto one member — the runbook standardizes an IP-based hash,
-e.g. `src-dst-ip`, paired with Linux `layer2+3`), `show system mtu` (data path targets
-jumbo 9000 to match the legacy LAN-Trunk vswitch), and `show run` of the server-facing
-port-channels (expect `channel-group mode on` today). Confirm the port-role wiring
-against the reference architecture: p1 = XCC, p3/p4 = 1G copper, f1/f2 = 10G fiber,
-cross-connected to both stack members — and decide the Proxmox port-role map
-(decision log #20: which ports back `vmbr0` mgmt vs the `vmbr1` data bond). After any
-test conversion: `show etherchannel summary` must show flags `P` (bundled) and
-`/proc/net/bonding/bond0` a non-zero partner MAC.
+Port roles are confirmed (decision log #20): mgmt = p3/p4 copper active/passive on
+**access ports** (no channel — unchanged at conversion); data = f1/f2 fiber,
+channeled. On a representative 9300 stack capture:
+
+- `show etherchannel load-balance` — default is `src-mac`, which polarizes NFV traffic
+  onto one member; the runbook standardizes an IP-based hash (e.g. `src-dst-ip`,
+  paired with Linux `layer2+3`).
+- `show run` of the f1/f2-facing port-channels (expect `channel-group mode on` today)
+  and of the mgmt access ports (confirm access VLAN = mgmt VLAN 200).
+- **The jumbo question:** `show system mtu` (default 1500, max 9198). The legacy robot
+  set MTU 9000 on the vswitch — host-side only, necessary but not sufficient. Also
+  check the PA config for jumbo-frames/HA2-MTU (HA2 sync on VLAN 907 is the likeliest
+  real >1500 consumer). If `system mtu` is 1500 everywhere, legacy jumbo was cosmetic —
+  decide: raise it at conversion (confirm live-vs-reload behavior on the fleet IOS-XE
+  release first) or standardize 1500 on the Proxmox data path with nothing lost.
+- On the PVE side, record the Linux interface names for p3/p4 (igb/I350) and f1/f2
+  (i40e/X722) by PCI path — feeds the platform profile's NIC pinning map.
+
+After any test conversion: `show etherchannel summary` must show flags `P` (bundled)
+and `/proc/net/bonding/bond0` a non-zero partner MAC.
 
 Also on the PVE test host (escalation-path validation, not critical path — see plan
 §6 #31): confirm the documented restriction that `affinity` is root@pam-only still

@@ -60,12 +60,17 @@ Notes for the design job:
 - Cisco Catalyst 9300-48UXM (Network Essentials) stacks, `swi<site>` naming, minimum
   2 members (data + power stack cabling), up to 8.
 - Server naming: `nfv<site>1` (LEFT) / `nfv<site>2` (RIGHT); UPS `ups<site>1`.
-- SE350 physical connection map (each server cross-connects to both stack members):
+- SE350 physical connection map (each server cross-connects to both stack members);
+  **port roles confirmed Aug 2026**:
   - **p1** — XCC (XClarity) management port
-  - **p3/p4** — 1 GbE copper (I350), used by ESXi today (labelled "esx")
-  - **f1/f2** — 10 GbE SFP+ fiber (X722), MMF
-  - Exact port roles under Proxmox (mgmt vs VM dataplane vs unused) are a Phase 0
-    verification item — see the decision log.
+  - **p3/p4** — 1 GbE copper (I350): **vSwitch0 / host mgmt**, active/passive pair
+    (NIC-teaming failover, NOT a port-channel) into switch **access ports** (untagged
+    mgmt VLAN). Proxmox mirror: `bond-mode active-backup` over the copper pair →
+    `vmbr0`, untagged
+  - **f1/f2** — 10 GbE SFP+ fiber (X722), MMF: **LAN-Trunk / VM dataplane**,
+    port-channeled. Proxmox mirror: `bond-mode 802.3ad` → VLAN-aware `vmbr1`
+  - Remaining lab items: the Linux-name↔faceplate pinning map (PCI path per port) and
+    the switch jumbo question (below).
 - **Port-channel modes today:** `channel-group mode on` (static EtherChannel) on
   server-facing ports, `mode active` (LACP) between switch stacks. Mode-on exists
   because the ESXi *standard* vSwitch supports only static teaming (IP-hash); LACP
@@ -79,6 +84,11 @@ Linux bonding supports LACP natively, and Proxmox's documented recommendation is
 because static mode-on forwards onto anything with link (miimon can't detect a
 mis-patched cable or wrong-channel port), while LACP verifies channel membership per
 link before bundling.
+
+**Scope note (de-risks the cutover):** the flip applies **only to the data pair
+(f1/f2)** — the mgmt copper ports are non-channeled access ports and their switch
+config doesn't change at conversion, so management connectivity is never at risk from
+the channel-mode change itself.
 
 **The flip is unforgiving in both directions and must land in the same maintenance
 window as the server conversion:**
@@ -142,7 +152,7 @@ design. Where a function has no equivalent, the reason is given.
 | Robot function / behavior | Proxmox / Nautobot-job equivalent |
 |---|---|
 | `verify_vswitch` — idempotent vswitch check; on create: MTU 9000+, CDP enabled, allow promiscuous / MAC change / forged transmits | `DeployHostNetworkJob` verify/converge of bridges. **MTU 9000 on bond + data bridge** (VM vNICs use virtio `mtu=1` to inherit the bridge MTU); `lldpd` with CDP mode enabled for neighbor visibility; the three ESXi security-policy relaxations need no equivalent — a Linux bridge doesn't filter promiscuous/forged-MAC by default (keep `firewall=0` on dataplane vNICs) |
-| Two vswitches: `vSwitch0` (host mgmt) + `LAN-Trunk` (VM networking) | **Two bridges**: `vmbr0` (mgmt) + `vmbr1` (VLAN-aware "LAN-Trunk" on the 10G LACP bond). Resolves the logical half of the port-role question — remaining is which physical ports carry each |
+| Two vswitches: `vSwitch0` (host mgmt) + `LAN-Trunk` (VM networking) | **Two bridges**: `vmbr0` (mgmt: active-backup bond on the copper pair, untagged access ports) + `vmbr1` (VLAN-aware "LAN-Trunk" on the f1/f2 10G LACP bond). Port roles confirmed — see the connection map above |
 | `find_and_config_pg` — port groups `LOC_NAME_VlanNum`, tagged packets → specific vNICs | Port groups have no Proxmox object; the mapping lives in Nautobot: VLAN objects named by the same `LOC_NAME_VlanNum` convention, VMInterface↔VLAN assignments, rendered to `net tag=`/`trunks=` at deploy. The audit job replaces "check the port group exists" |
 | Load VMDK/VMX, edit in place: map network names, scrub identity (UUID etc.) that must not duplicate | Identity handling **inverts**: fresh qcow2 import + VM config generated from Nautobot intent (`smbios1 uuid=`, pinned MACs, bridge/tag) — nothing to scrub. Golden images must be identity-clean (machine-id reset / cloud-init for Ubuntu; vendor images ship clean) |
 | VMDK zeroed-thick format | Thin provisioning (LVM-thin/ZFS/qcow2), sanctioned by the written policy; thin is also what enables native snapshots. Preallocation options exist if ever needed |

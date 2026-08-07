@@ -369,8 +369,9 @@ decisions in §6.
   subtracted from the VM RAM budget) — pending the Phase 0 M.2/AHCI answer.
 - Firstboot hook (small fetch-and-exec stub): kernel cmdline (C-states, serial console —
   both GRUB and proxmox-boot-tool paths), ethtool/`disable-fw-lldp` systemd oneshot, NIC
-  name pinning, **final network topology** (mgmt `vmbr0` + 10G LACP bond → VLAN-aware
-  `vmbr1`, MTU 9000 on the data path), KSM disabled, **host-service confinement**
+  name pinning, **final network topology** (`vmbr0` = active-backup bond on the copper
+  pair, untagged; f1/f2 10G 802.3ad bond → VLAN-aware `vmbr1`, MTU 9000 on the data
+  path pending the switch-jumbo answer), KSM disabled, **host-service confinement**
   (`system.slice`/`user.slice` `AllowedCPUs=` → housekeeping cores; NIC IRQ affinity
   steered there — the "reserve the host away from VNFs" half of reservation parity),
   lldpd with CDP mode, apt repo config (no-subscription) + point-release pin,
@@ -584,11 +585,15 @@ nautobot-proxmox/
     partner MAC non-zero. Capture per-site `show etherchannel load-balance` (9300
     default `src-mac` polarizes NFV traffic) and standardize an IP-based hash both
     sides (`src-dst-ip` ↔ Linux `layer2+3`).
-30. Logical split resolved by the legacy two-vswitch pattern: `vmbr0` mgmt (= vSwitch0)
-    + `vmbr1` VLAN-aware data ("LAN-Trunk") on the 10G LACP bond, MTU 9000 on the data
-    path. `[lab-verify]` remaining: which physical ports carry each role (p3/p4 copper
-    vs f1/f2 fiber) against real cabling, whether mgmt gets its own bond or a single
-    port, and switch `system mtu` supports jumbo end-to-end.
+30. Resolved (Aug 2026): port roles confirmed — mgmt = p3/p4 copper as an
+    active/passive pair (no port-channel) into switch **access ports** → Proxmox
+    `active-backup` bond under untagged `vmbr0`; data = f1/f2 10G fiber, channeled →
+    `802.3ad` bond under VLAN-aware `vmbr1`. Consequence: the LACP flip (#29) touches
+    only the data pair — mgmt switch config never changes at conversion. `[lab-verify]`
+    remaining: Linux NIC-name↔faceplate pinning map (PCI path), and the switch jumbo
+    question — `show system mtu` per site (default 1500; was the legacy vswitch MTU
+    9000 host-side-only?), plus PA jumbo/HA2-MTU config; if raising `system mtu` at
+    conversion, confirm live-vs-reload behavior on the fleet IOS-XE release.
 31. Answered (Aug 2026, per Proxmox docs/forum): `affinity` (vCPU pinning) is
     **root@pam-only** — same privileged class as hugepages; the privilege-separated
     API token cannot set it. Stance revised after the reservations-vs-pinning
