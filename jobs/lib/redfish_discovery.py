@@ -219,6 +219,45 @@ class RedfishDiscovery:
         except Exception as exc:  # noqa: BLE001
             return self._section_error(exc)
 
+    def chassis_and_oem(self) -> dict:
+        """Chassis members + Manager Oem section, hunting for a thermal-mode setting.
+
+        The legacy tool sets thermal mode via the XCC SSH CLI ("thermal
+        performance") — it is not a UEFI Bios attribute. This probe looks for a
+        Redfish OEM representation of the same setting so ApplyBiosPolicyJob
+        can stay pure-Redfish; if nothing surfaces, the job keeps one small
+        XCC-SSH step instead.
+        """
+        try:
+            result: dict = {"chassis_members": [], "manager_oem": {}, "thermal_hits": []}
+            root = self._get("/redfish/v1/")
+            chassis_col = self._get(root["Chassis"]["@odata.id"])
+            for ref in chassis_col.get("Members", []):
+                result["chassis_members"].append(self._get(ref["@odata.id"]))
+            if not self._manager_path:
+                self.discover_paths()
+            result["manager_oem"] = self._get(self._manager_path).get("Oem", {})
+
+            def hunt(obj, path):
+                if isinstance(obj, dict):
+                    for key, value in obj.items():
+                        sub = f"{path}.{key}" if path else key
+                        if any(w in key.lower() for w in ("thermal", "cooling", "fanmode", "fan_mode", "acoustic")):
+                            result["thermal_hits"].append(
+                                {"path": sub, "value": value if not isinstance(value, (dict, list)) else "<object>"}
+                            )
+                        hunt(value, sub)
+                elif isinstance(obj, list):
+                    for i, value in enumerate(obj):
+                        hunt(value, f"{path}[{i}]")
+
+            for i, member in enumerate(result["chassis_members"]):
+                hunt(member, f"chassis[{i}]")
+            hunt(result["manager_oem"], "manager.Oem")
+            return result
+        except Exception as exc:  # noqa: BLE001
+            return self._section_error(exc)
+
     # ---------- write operations (opt-in; used by the job's write checks) ----------
 
     def _patch(self, path: str, body: dict) -> None:
@@ -324,6 +363,7 @@ class RedfishDiscovery:
             "virtual_media": self.virtual_media(),
             "secure_boot": self.secure_boot(),
             "firmware_inventory": self.firmware_inventory(),
+            "chassis": self.chassis_and_oem(),
         }
 
 
