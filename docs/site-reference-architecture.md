@@ -128,9 +128,36 @@ documentation showed the first two **assert ESXi defaults** rather than change b
 |---|---|---|
 | Enable TCPIP LRO | vmkernel-stack LRO for *host-terminated* TCP (mgmt/storage) — default-on in ESXi; does not touch the VM dataplane | Nothing to do: Linux GRO is default-on for the mgmt path — keep it there. On VNF dataplane bridge ports, LRO is kernel-auto-disabled when bridged, and GRO/TSO should be explicitly off (coalescing adds latency/jitter into guest routers; standard NFV host guidance) |
 | Enable Network Queue Pairing | NetQueue RX/TX queue-thread pairing — also an ESXi default | virtio-net multiqueue: `queues=<guest vCPUs>` on dataplane vNICs (vhost gives each queue pair its own kernel thread); guests activate via `ethtool -L` (PAN-OS/IOS-XE handle their own) |
-| Power policy = High Performance | ESXi host power policy | Firmware `OperatingModes_ChooseOperatingMode=MaximumPerformance` (Redfish BIOS) + kernel C-state cap; governor already `performance` on intel_pstate |
+| Power policy = High Performance | ESXi host power policy | Firmware side is the confirmed UEFI/BIOS standard below (Custom Mode + explicit knobs, `bmc/se350_bios.yaml`); kernel C-state caps become defense-in-depth (likely redundant — lab-confirm); governor already `performance` on intel_pstate |
 | VM autostart | Per-VM autostart + delay | `onboot=1` + `startup=order=N,up=S` |
 | SSH shell + serial console shell | ESXi TSM/TSM-SSH services | Break-glass root SSH key (firstboot) + GRUB/getty serial console on ttyS0 → OpenGear |
+
+### UEFI/BIOS standard (confirmed Aug 2026)
+
+The team's existing tool pushes these XCC BIOS settings as the build standard —
+carried forward verbatim into `bmc/se350_bios.yaml` (`legacy_standard` section), which
+`ApplyBiosPolicyJob` will apply via Redfish:
+
+| Setting | Value |
+|---|---|
+| Thermal Mode | Performance |
+| Operating Mode | **Custom Mode** (presets lock the individual knobs — the tool already uses the right pattern) |
+| Processors → C-States | Disable |
+| Processors → C1 Enhanced Mode | Disable |
+| Processors → Energy Efficient Turbo | Disable |
+| Processors → MONITOR/MWAIT | Enable (ESXi relied on mwait; fine/beneficial on KVM) |
+| Power → Power/Performance Bias | Platform Controlled |
+| Power → Platform Controlled Type | Maximum Performance |
+| Devices and I/O Ports → PCI 64-Bit Resource Allocation | Auto |
+| Devices and I/O Ports → MM Config Base | 3GB (carried as-is for parity) |
+
+Implications: with C-states/C1E disabled at BIOS level, the firstboot kernel-cmdline
+C-state caps are likely redundant — lab-confirm exposed idle states after applying the
+policy (`cpupower idle-info`), then keep as defense-in-depth or drop. The tool does
+**not** touch console redirection or Secure Boot; those are `proposed_additions` in
+the YAML pending sign-off (SE350 UEFI defaults may already provide the redirect).
+Exact Redfish attribute spellings come from the discovery job dump before the first
+PATCH.
 
 ### VM-level tuning standard (legacy, confirmed Aug 2026)
 

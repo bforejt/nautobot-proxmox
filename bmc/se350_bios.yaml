@@ -1,0 +1,101 @@
+# SE350 UEFI/BIOS policy — the data ApplyBiosPolicyJob applies via Redfish
+# (PATCH /redfish/v1/Systems/{id}/Bios/Settings, applied at next reboot,
+# readback-verified).
+#
+# legacy_standard: the settings the team's existing XCC BIOS tool pushes today,
+# provided 2026-08-07 — carried forward verbatim as the confirmed standard.
+#
+# proposed_additions: settings the Proxmox plan wants on top (serial console,
+# Secure Boot) — pending team sign-off; see docs/plan-of-attack.md.
+#
+# redfish_attribute values follow Lenovo's menu-name-with-underscores
+# convention and are BEST-GUESS spellings until verified against a real unit's
+# dump (run the "SE350 Platform Discovery (read-only)" job; flip verified: true
+# per setting once the exact name and enum are confirmed).
+
+platform: SE350
+machine_types: [7Z46, 7D1X, 7D27]
+
+legacy_standard:
+  - menu: "Thermal Mode"
+    value: "Performance"
+    redfish_attribute: null   # name not derivable from convention — take from discovery dump
+    redfish_value: "Performance"
+    verified: false
+  - menu: "Operating Modes -> Choose Operating Mode"
+    value: "Custom Mode"
+    redfish_attribute: "OperatingModes_ChooseOperatingMode"
+    redfish_value: "CustomMode"
+    verified: false
+  - menu: "Processors -> C-States"
+    value: "Disable"
+    redfish_attribute: "Processors_CStates"
+    redfish_value: "Disable"
+    verified: false
+  - menu: "Processors -> C1 Enhanced Mode"
+    value: "Disable"
+    redfish_attribute: "Processors_C1EnhancedMode"
+    redfish_value: "Disable"
+    verified: false
+  - menu: "Processors -> Energy Efficient Turbo"
+    value: "Disable"
+    redfish_attribute: "Processors_EnergyEfficientTurbo"
+    redfish_value: "Disable"
+    verified: false
+  - menu: "Processors -> MONITOR/MWAIT"
+    value: "Enable"
+    redfish_attribute: "Processors_MONITORMWAIT"
+    redfish_value: "Enable"
+    verified: false
+  - menu: "Power -> Power/Performance Bias"
+    value: "Platform Controlled"
+    redfish_attribute: "Power_PowerPerformanceBias"
+    redfish_value: "PlatformControlled"
+    verified: false
+  - menu: "Power -> Platform Controlled Type"
+    value: "Maximum Performance"
+    redfish_attribute: "Power_PlatformControlledType"
+    redfish_value: "MaximumPerformance"
+    verified: false
+  - menu: "Devices and I/O Ports -> PCI 64-Bit Resource Allocation"
+    value: "Auto"
+    redfish_attribute: "DevicesandIOPorts_PCI64BitResourceAllocation"
+    redfish_value: "Auto"
+    verified: false
+  - menu: "Devices and I/O Ports -> MM Config Base"
+    value: "3GB"
+    redfish_attribute: "DevicesandIOPorts_MMConfigBase"
+    redfish_value: "3GB"
+    verified: false
+
+proposed_additions:
+  - menu: "Devices and I/O Ports -> Console Redirection Settings -> COM1"
+    value: "Enable, 115200 8N1, ANSI"
+    redfish_attribute: null   # DevicesandIOPorts_* group — exact fields from discovery dump
+    rationale: >
+      Explicit serial console redirect for the OpenGear path. SE350 UEFI defaults
+      (COM1 Enable, Console Redirection Auto) may already suffice — the legacy tool
+      does not touch these — so this may resolve to "assert defaults".
+    verified: false
+  - menu: "Devices and I/O Ports -> Serial Port Sharing / Access Mode"
+    value: "Disable / Disable"
+    redfish_attribute: null
+    rationale: "Keep the physical RJ45 serial port host-owned (not shared with XCC)."
+    verified: false
+  - menu: "Secure Boot"
+    value: "Disable"
+    redfish_attribute: null   # standard Redfish SecureBoot resource, not a Bios attribute
+    rationale: "Simplest fleet policy for the unattended-install pipeline; TPM stays enabled."
+    verified: false
+
+notes:
+  - Custom Mode is required because preset operating modes lock the individual
+    C-state/power knobs — the legacy tool already follows this pattern.
+  - With C-states and C1E disabled at BIOS level, the firstboot kernel-cmdline
+    C-state caps (intel_idle.max_cstate=1 processor.max_cstate=1) are likely
+    redundant. Lab-confirm exposed idle states after applying this policy
+    (cpupower idle-info), then keep the cmdline args as defense-in-depth or drop.
+  - MONITOR/MWAIT stays enabled (ESXi relied on mwait; Linux idle also uses it —
+    harmless-to-beneficial on KVM).
+  - PCI 64-bit resource allocation / MM Config Base are carried as-is for parity
+    (PCIe/MMIO layout; no known Linux downside).

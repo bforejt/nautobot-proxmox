@@ -51,11 +51,15 @@ out-of-band only (XCC UI / Redfish UpdateService).
 curl -sk -u 'XCC_USER:XCC_PASS' https://XCC_IP/redfish/v1/Systems/1/Bios | python3 -m json.tool > se350-bios-dump.json
 ```
 
-Capture exact spellings/enums for: `OperatingModes_ChooseOperatingMode`
-(expect `MaximumPerformance`), the C-state controls, and the
-`DevicesandIOPorts_*` console-redirection group (COM1 enable, baud, emulation). Caveat
-found in research: preset operating modes lock the individual C-state knobs — combining
-Maximum Performance with custom C-states requires `CustomMode` with every knob explicit.
+The BIOS standard itself is known (legacy tool settings, carried in
+`bmc/se350_bios.yaml`) — the dump's job is to **verify the exact Redfish attribute
+spellings and enums** for each of its ten settings (expect Custom Mode + explicit
+C-state/power knobs), pin down the Thermal Mode attribute name (not derivable from
+the menu-name convention), and capture the `DevicesandIOPorts_*` console-redirection
+group for the proposed additions. Flip each setting's `verified:` flag in the YAML as
+it's confirmed. Afterwards, with the policy applied, run `cpupower idle-info` on the
+PVE host to confirm which idle states remain exposed — that decides whether the
+firstboot kernel C-state args stay or go.
 
 ## 4. Boot storage: hardware-RAID volume characterization (design decided)
 
