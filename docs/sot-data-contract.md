@@ -77,16 +77,33 @@ Items marked **PROPOSED** await team confirmation; everything else is settled.
   records is a team data-migration task.
 - **DNS/NTP and similar site services**: config context. *(Settled pattern.)*
 
-### Platform behavior (distinct from device settings)
+### Platform behavior — Settled (2026-08-08): facts in code, tunables as Platform CFs
 
-Per the team's rule, **data about devices lives in the SoT** — but *knowledge
-about platforms* (how to deploy a PAN-OS vs an Ubuntu image: NIC name↔netN
-order, machine type, serial-console flag, which day-0 builder) is not a
-device setting. It is code-adjacent constants, tightly coupled to the builder
-code that interprets it, so it ships **with the job code in this repo**
-(`vnf-profiles/<platform>/profile.yaml`) and versions atomically with it — the
-same argument that keeps the template seed in git. PROPOSED — awaiting team
-ack of this data-vs-knowledge line. Nothing per-device ever lives here.
+Standing rule applied: **desired-state data lives in the SoT and nowhere else,
+stored once.** The line it draws here:
+
+- **Immutable platform FACTS** — guest NIC-name↔order (PA: `mgmt`,
+  `ethernet1/1…`; IOS-XE: `Gi1…`), cloud-init class, serial-console
+  expectations — are *behavior the code interprets*, not desired state. They
+  live in the job code and change only with it (every possible "edit" to them
+  is a broken deploy).
+- **TUNABLES** — genuinely adjustable desired state — are **custom fields on
+  the Platform object** (Option A):
+  - `day0_builder` (select): which day-0 mechanism the platform binds to. The
+    **choice list is maintained by the bootstrap job to exactly match the
+    builders the code ships** — the code↔data handshake; selecting a
+    nonexistent builder is a UI impossibility.
+  - `machine_type` (text): the QEMU machine pin (e.g. `q35`, or a versioned
+    pin like `pc-q35-8.1` after lab validation) — the canonical operational
+    lever admins adjust without a code release.
+- The bootstrap job **seeds values create-only** (a fresh instance works out
+  of the box; an admin's adjustment is never overwritten by a re-run).
+- Deploy **fails closed**: unset `day0_builder`/unknown values → precise
+  refusal, no partial deploy.
+- Because these are SoT desired state, they feed the converge trajectory:
+  idempotent jobs diff intent vs actual (change classes: hot-apply /
+  restart-required / redeploy-only) and JobHook receivers can auto-generate
+  drift reports when watched fields change. Apply remains human-triggered.
 
 ## 4. The hypervisor record
 

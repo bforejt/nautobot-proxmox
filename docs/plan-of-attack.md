@@ -455,7 +455,7 @@ it (hugepages and affinity are root@pam-only; the `HostBaselineJob` path applies
 Golden Config
 for VNF configs (forces the dual-record modeling decision). Packaged Nautobot App (when
 custom models or pinned pip dependencies appear — Git-synced jobs can't declare
-dependencies). Packer-built Ubuntu golden templates in CI. PXE as an ISO alternative.
+dependencies). Packer-built Ubuntu golden templates in CI. PXE as an ISO alternative. SoT converge engine (`ConvergeVmJob`: intent-vs-actual diff/apply with hot/restart/redeploy change classes) + JobHook-triggered drift reports on watched-field edits — the SoT-as-control-plane trajectory (decision #40).
 
 ---
 
