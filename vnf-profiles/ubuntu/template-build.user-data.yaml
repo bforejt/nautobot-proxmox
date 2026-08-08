@@ -10,6 +10,18 @@
 package_update: true
 package_upgrade: true
 
+# Build-only access: this user exists ONLY during the template build — the
+# seal step deletes the account (and with it this key) before export.
+users:
+  - name: nfvbuild
+    gecos: "Template build access (removed at seal)"
+    groups: [sudo]
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    shell: /bin/bash
+    lock_passwd: true
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEVD+qGm6vsppP9y8th61XtAT1ueOfUhqfvTm56o7jrj nfv-lab-test
+
 apt:
   debconf_selections:
     # Allow non-superuser capture (setuid dumpcap + wireshark group) — answers
@@ -54,6 +66,19 @@ packages:
   - traceroute
 
 write_files:
+  # Deploy-time default user (created by PVE native cloud-init 'ciuser') gets
+  # capture rights out of the box. The full default_user block is specified
+  # because a cloud.cfg.d override replaces the dict wholesale.
+  - path: /etc/cloud/cloud.cfg.d/99-nfv-defaults.cfg
+    content: |
+      system_info:
+        default_user:
+          name: ubuntu
+          lock_passwd: true
+          gecos: NFV Jump Host User
+          groups: [adm, cdrom, dialout, floppy, lxd, netdev, plugdev, sudo, video, wireshark]
+          sudo: ["ALL=(ALL) NOPASSWD:ALL"]
+          shell: /bin/bash
   # Autolock OFF, system-wide (legacy VM standard) — dconf system profile so it
   # applies to every user, not one account's gsettings.
   - path: /etc/dconf/profile/user
