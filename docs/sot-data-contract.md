@@ -115,6 +115,29 @@ stored once.** The line it draws here:
 | BMC/XCC address | **Settled (2026-08-08)**: a dedicated interface named `xcc` on the SE350 device with its IP assigned — native, visible, cable-truthful | Layout process creates it |
 | VM bridge + storage targets | Hypervisor-device CFs `vm_bridge`, `vm_storage`, `import_storage` — set by the layout engine per node (SE350 standard: `vmbr1`/`local-lvm`/`local`); deploy refuses if unset | **Settled (2026-08-08)** — desired state, stored once, on the object it describes |
 
+## 4b. Console credentials (cloud-init platforms)
+
+Users reach the jump host at the **desktop/console, never SSH** (team,
+2026-08-08). So the guest needs a working username+password:
+
+- **Username**: Platform CF `console_user` (seeded `ubuntu`). It **must match
+  the template's baked `default_user`** — that user carries the desktop groups
+  (wireshark, sudo); a different name would create a group-less account.
+  Changing the console username properly = a template rebuild (seed edit),
+  not just a CF change. Documented coupling.
+- **Password**: a single fleet-wide Nautobot **Secret**
+  `jumphost_console_password` (text-file provider). The deploy job reads it and
+  passes it as Proxmox `cipassword`; Proxmox hashes it before storing (verified:
+  `$5$` SHA-256), so plaintext only transits the TLS API call, never at rest,
+  never in job logs/inputs. Deploy **refuses** (ContractViolation) if a
+  cloud-init platform has no console password Secret — no un-loginable desktop.
+- **Verified mechanism**: `ciuser`+`cipassword` makes Proxmox emit
+  `user: <u>` + `password:` + `users: [default]`, so cloud-init builds the
+  baked default_user (groups preserved) and set_passwords unlocks it
+  (overriding the seed's `lock_passwd`), `expire: False` (no forced change).
+- **Rotation** (future): update the Secret → converge job re-pushes
+  `cipassword` (applies next boot; pairs with the twin-safe reboot guardrail).
+
 ## 5. Normalization guardrails (the standing rule, operationalized)
 
 - Job inputs are **object references** (Device, SoftwareVersion), never

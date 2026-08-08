@@ -29,6 +29,11 @@ from ..lib.proxmox_client import ProxmoxClient, ProxmoxError
 
 PROXMOX_TOKEN_ID_SECRET = "proxmox_token_id"
 PROXMOX_TOKEN_SECRET_SECRET = "proxmox_token_secret"
+# Fleet-wide console password for cloud-init guests (users log in at the
+# desktop/console, never SSH). Proxmox hashes it before storing; the plaintext
+# only transits the TLS API call. Rotation = update this Secret + a converge
+# job that re-pushes cipassword (applies on next boot).
+CONSOLE_PASSWORD_SECRET = "jumphost_console_password"
 
 
 class ContractViolation(ValueError):
@@ -207,6 +212,20 @@ class DeployVnfDevice(Job):
             self.logger.warning("Disk resize skipped: %s", exc)
 
         ci = {"ipconfig0": ipconfig0}
+        if day0 == "native-cloudinit":
+            # Console login: username from the platform (must match the
+            # template's baked default_user), password from the fleet Secret.
+            console_user = _require(platform.cf.get("console_user"), f"console_user on platform {platform.name}")
+            try:
+                console_password = Secret.objects.get(name=CONSOLE_PASSWORD_SECRET).get_value()
+            except Secret.DoesNotExist:
+                raise ContractViolation(
+                    f"Cloud-init platform needs the fleet console password — Secret "
+                    f"{CONSOLE_PASSWORD_SECRET!r} not found"
+                )
+            ci["ciuser"] = console_user
+            ci["cipassword"] = console_password  # never logged
+            self.logger.info("Console login: user %r, password from Secret %r", console_user, CONSOLE_PASSWORD_SECRET)
         if ssh_pubkeys:
             ci["sshkeys"] = ProxmoxClient.encode_sshkeys(str(ssh_pubkeys))
         client.set_vm_config(node, vmid, ci)
