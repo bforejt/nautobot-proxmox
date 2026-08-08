@@ -11,7 +11,10 @@ package_update: true
 package_upgrade: true
 
 # Build-only access: this user exists ONLY during the template build — the
-# seal step deletes the account (and with it this key) before export.
+# seal step deletes the account (and its key) before export. The public key is
+# EPHEMERAL: the build process generates a fresh keypair per build and
+# substitutes __BUILD_SSH_KEY__ at stage time, so no session-specific key is
+# ever committed to git.
 users:
   - name: nfvbuild
     gecos: "Template build access (removed at seal)"
@@ -20,7 +23,7 @@ users:
     shell: /bin/bash
     lock_passwd: true
     ssh_authorized_keys:
-      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEVD+qGm6vsppP9y8th61XtAT1ueOfUhqfvTm56o7jrj nfv-lab-test
+      - __BUILD_SSH_KEY__
 
 apt:
   debconf_selections:
