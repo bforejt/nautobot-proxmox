@@ -25,8 +25,8 @@ Items marked **PROPOSED** await team confirmation; everything else is settled.
 | Need | Source | Notes |
 |---|---|---|
 | VM name / guest hostname | `device.name` | Settled |
-| Image to deploy | `device.software_version` → its default `SoftwareImageFile` | **PROPOSED**: layout sets `software_version` explicitly; deploy refuses if unset or if the version's status ≠ Active (keeps the Staged→Active promotion gate authoritative) |
-| Sizing (vcpus / memory / disk) | Custom-field overrides on the device (`vcpus`, `memory_mb`, `disk_gb`) **when set**; otherwise the role/platform standard from the config-context profile | **PROPOSED** precedence: device CF > profile standard. Standards stay in Git-synced config context (still SoT) so sizing changes are one edit, not N device edits |
+| Image to deploy | `device.software_version` → its default `SoftwareImageFile` | **PROPOSED**: the layout process — whatever creates the VNF Device records (the team's Design Builder design or equivalent) — also sets the native `software_version` FK on each device (e.g. → `ubuntu-jumphost 24.04-v1`). Deploy refuses if unset or if the version's status ≠ Active, keeping the Staged→Active promotion gate authoritative |
+| Sizing (vcpus / memory / disk) | The three integer CFs the bootstrap created on `dcim.device` (`vcpus`, `memory_mb`, `disk_gb`, grouping "NFV") are **per-device exception overrides — normally empty**. The rule lives in the **platform profile**: a Git-synced config context scoped by Platform, carrying the standard sizing plus platform behavior (see example below) | **PROPOSED** precedence: device CF (the exception, visible on the one device that deviates) > profile standard (the rule, defined once). One edit changes the fleet standard; exceptions never hide |
 | Platform behavior (day-0 builder, machine type, serial console, NIC model) | `device.platform` → the platform profile (config context) | Settled pattern from the plan |
 | Proxmox VMID | CF `vmid` — **written back** by the deploy job after create | Settled (bootstrapped) |
 | Host lifecycle stage | CF `provisioning_state` (hypervisors) | Settled (bootstrapped) |
@@ -55,9 +55,19 @@ Items marked **PROPOSED** await team confirmation; everything else is settled.
   3. The one sanctioned learn-INTO-SoT flow is explicit **onboarding** of
      pre-existing (converted ESXi) sites, where a one-time backfill job records
      current MACs/ordering into Nautobot before the SoT takes over.
-- **MAC addresses**: **PROPOSED** — layout pins `mac_address` on each
-  interface; deploy passes it through (deterministic guest NIC identity,
-  PA licensing stability).
+- **MAC addresses — RECOMMENDED: pinned, not dynamic.** The layout allocates a
+  MAC per interface once (deterministic or random-then-stored) into the native
+  `Interface.mac_address` field; deploy passes it through; redeploys reuse it.
+  Why it matters *for this project specifically*: the redeploy model is
+  destroy-and-recreate (day-0 ISOs are first-boot-only), and scenarios 2/3 are
+  core workflows — with dynamic MACs every redeploy mints new NICs, changing
+  DHCP leases (jump hosts), invalidating ARP/CAM and any DHCP-snooping or
+  port-security state, and breaking MAC-keyed monitoring. With pinned MACs a
+  redeployed VM is network-identical to its predecessor — invisible to the L2
+  fabric. Pinning also underwrites two settled items: cloud-init's match-by-MAC
+  order-proofing only helps if MACs survive redeploys, and the audit job's
+  MAC↔intent diff needs intent MACs to exist. FHRP/floating MACs are protocol
+  state and unaffected. Cost: a few lines of allocation logic in the layout.
 - **Primary/mgmt IP**: `device.primary_ip4` — settled Nautobot convention.
 - **Gateway — settled (2026-08-08)**: the default gateway IP in each prefix
   carries IPAddress **Role = `DefaultGW`** (team's standardization of the
@@ -69,12 +79,32 @@ Items marked **PROPOSED** await team confirmation; everything else is settled.
   records is a team data-migration task.
 - **DNS/NTP and similar site services**: config context. *(Settled pattern.)*
 
+### Platform profile example (the "profile standard")
+
+Git-synced config context, scoped to Platform `ubuntu-jumphost` — one document
+defines the standard for every device of that platform:
+
+```yaml
+nfv_vm_profile:
+  vcpus: 2
+  memory_mb: 4096
+  disk_gb: 32
+  nic_order: [eth0]          # the name<->netN order authority (contract §3)
+  machine: q35
+  serial_console: true
+  day0: native-cloudinit     # vs pa-bootstrap-iso / iosxe-config-iso
+```
+
+Equivalent profiles exist per platform (`paloalto-panos`, `cisco-iosxe`, ...).
+A device with empty sizing CFs gets these values; a set CF wins for that
+device only.
+
 ## 4. The hypervisor record
 
 | Need | Source | Notes |
 |---|---|---|
 | Node name (Proxmox) | `device.name` | Settled |
-| API endpoint | `device.primary_ip4` | **PROPOSED** |
+| API endpoint | `device.primary_ip4` | **Settled (2026-08-08)** |
 | API credentials | Secrets `proxmox_token_id`/`proxmox_token_secret` (global pair now; per-device SecretsGroup when field rollout warrants) | Settled for now |
 | BMC/XCC address | **Settled (2026-08-08)**: a dedicated interface named `xcc` on the SE350 device with its IP assigned — native, visible, cable-truthful | Layout process creates it |
 | Storage names, bridge names | Platform profile / config context (`local-lvm`, `local`, `vmbr0`/`vmbr1` as site standards) | Settled pattern |
