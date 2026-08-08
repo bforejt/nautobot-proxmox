@@ -11,12 +11,10 @@ DeployVnfDevice recreates it (the redeploy primitive, in two halves).
 
 from nautobot.apps.jobs import Job, ObjectVar, register_jobs
 from nautobot.dcim.models import Device
-from nautobot.extras.models import RelationshipAssociation, Secret, Status
+from nautobot.extras.models import RelationshipAssociation, Status
 
+from ..lib.nautobot_helpers import resolve_proxmox_credentials
 from ..lib.proxmox_client import ProxmoxClient
-
-PROXMOX_TOKEN_ID_SECRET = "proxmox_token_id"
-PROXMOX_TOKEN_SECRET_SECRET = "proxmox_token_secret"
 
 
 class DecommissionVnfDevice(Job):
@@ -54,8 +52,7 @@ class DecommissionVnfDevice(Job):
         if hyp.primary_ip4 is None:
             raise ValueError(f"Hypervisor {hyp.name} has no primary_ip4")
 
-        token_id = Secret.objects.get(name=PROXMOX_TOKEN_ID_SECRET).get_value()
-        token_secret = Secret.objects.get(name=PROXMOX_TOKEN_SECRET_SECRET).get_value()
+        token_id, token_secret = resolve_proxmox_credentials(hyp)
         client = ProxmoxClient(host=str(hyp.primary_ip4.address.ip), token_id=token_id, token_secret=token_secret)
 
         node = hyp.name

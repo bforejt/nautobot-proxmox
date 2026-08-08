@@ -175,6 +175,11 @@ class BootstrapNfvSchema(Job):
             ("vm_bridge", "text", "VM Bridge"),
             ("vm_storage", "text", "VM Disk Storage"),
             ("import_storage", "text", "Import Storage"),
+            # Per-hypervisor Proxmox API credentials: names a SecretsGroup
+            # (Generic/Username = token id, Generic/Secret = token UUID). Empty
+            # = fall back to the global proxmox_token_id/secret pair (single-host
+            # quickstart). Each standalone node in a pair needs its own token.
+            ("secrets_group", "text", "Proxmox SecretsGroup"),
         ]
         for key, cf_type, label in cf_defs:
             cf, created = CustomField.objects.get_or_create(

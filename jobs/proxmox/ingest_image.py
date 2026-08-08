@@ -1,49 +1,56 @@
 """
-Nautobot Job: pre-stage a SoftwareImageFile onto a Proxmox node.
+Nautobot Job: pre-stage a SoftwareImageFile onto a hypervisor's import storage.
 
-Thin wrapper over the same idempotent ensure_image() the deploy job uses:
-checksum-verified `download-url` pull from the firmware server into the
-node's import storage. Useful for warming a node (or a whole site's pair)
-ahead of a maintenance window so deploys are copy-fast.
+Device-driven (SSoT-first): pick the image file + the hypervisor Device; the
+node name, API host, import storage, and credentials all resolve from the SoT.
+Idempotent checksum-verified `download-url` pull — no-op if already present.
+Useful to warm a node (or a whole pair) ahead of a maintenance window.
 """
 
-from nautobot.apps.jobs import Job, ObjectVar, StringVar, register_jobs
-from nautobot.dcim.models import SoftwareImageFile
-from nautobot.extras.models import Secret
+from nautobot.apps.jobs import Job, ObjectVar, register_jobs
+from nautobot.dcim.models import Device, SoftwareImageFile
 
+from ..lib.nautobot_helpers import resolve_proxmox_credentials
 from ..lib.proxmox_client import ProxmoxClient
-
-PROXMOX_TOKEN_ID_SECRET = "proxmox_token_id"
-PROXMOX_TOKEN_SECRET_SECRET = "proxmox_token_secret"
 
 
 class IngestImage(Job):
     class Meta:
         name = "Ingest Image onto Proxmox Node"
         description = (
-            "Checksum-verified pull of a SoftwareImageFile from the firmware server "
-            "onto a node's import storage. Idempotent — no-op if already present."
+            "Checksum-verified pull of a SoftwareImageFile from its download_url onto "
+            "a hypervisor's import storage. Device-driven; idempotent."
         )
         has_sensitive_variables = False
         soft_time_limit = 1500
         time_limit = 1800
 
     image_file = ObjectVar(model=SoftwareImageFile, label="Software Image File")
-    node_api_host = StringVar(label="Proxmox API Host", default="10.40.3.253")
-    node_name = StringVar(label="Node Name", default="pve")
-    import_storage = StringVar(label="Import Storage", default="local")
+    hypervisor = ObjectVar(
+        model=Device,
+        label="Hypervisor",
+        description="Target node (API host from primary_ip4, import storage from its CF)",
+        query_params={"role": "Hypervisor"},
+    )
 
-    def run(self, image_file, node_api_host, node_name, import_storage):
-        token_id = Secret.objects.get(name=PROXMOX_TOKEN_ID_SECRET).get_value()
-        token_secret = Secret.objects.get(name=PROXMOX_TOKEN_SECRET_SECRET).get_value()
-        client = ProxmoxClient(host=str(node_api_host), token_id=token_id, token_secret=token_secret)
+    def run(self, image_file, hypervisor):
+        if hypervisor.primary_ip4 is None:
+            raise ValueError(f"Hypervisor {hypervisor.name} has no primary_ip4")
+        import_storage = hypervisor.cf.get("import_storage")
+        if not import_storage:
+            raise ValueError(f"Hypervisor {hypervisor.name} has no import_storage custom field")
+
+        token_id, token_secret = resolve_proxmox_credentials(hypervisor)
+        client = ProxmoxClient(
+            host=str(hypervisor.primary_ip4.address.ip), token_id=token_id, token_secret=token_secret
+        )
         volid = client.ensure_image(
-            str(node_name), str(import_storage), image_file.image_file_name,
+            hypervisor.name, str(import_storage), image_file.image_file_name,
             url=image_file.download_url, checksum=image_file.image_file_checksum,
             checksum_algorithm=image_file.hashing_algorithm or "sha256",
             logger=self.logger,
         )
-        return f"Image available on {node_name}: {volid}"
+        return f"Image available on {hypervisor.name}: {volid}"
 
 
 register_jobs(IngestImage)

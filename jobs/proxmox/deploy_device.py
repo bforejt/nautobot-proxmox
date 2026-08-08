@@ -24,11 +24,10 @@ from nautobot.dcim.models import Device
 from nautobot.extras.models import RelationshipAssociation, Secret, Status
 from nautobot.ipam.models import IPAddress
 
+from ..lib.nautobot_helpers import resolve_proxmox_credentials
 from ..lib.platform_facts import get_platform_facts
 from ..lib.proxmox_client import ProxmoxClient, ProxmoxError
 
-PROXMOX_TOKEN_ID_SECRET = "proxmox_token_id"
-PROXMOX_TOKEN_SECRET_SECRET = "proxmox_token_secret"
 # Fleet-wide console password for cloud-init guests (users log in at the
 # desktop/console, never SSH). Proxmox hashes it before storing; the plaintext
 # only transits the TLS API call. Rotation = update this Secret + a converge
@@ -169,8 +168,7 @@ class DeployVnfDevice(Job):
             vcpus, memory_mb, disk_gb, machine, len(nics), ipconfig0,
         )
 
-        token_id = Secret.objects.get(name=PROXMOX_TOKEN_ID_SECRET).get_value()
-        token_secret = Secret.objects.get(name=PROXMOX_TOKEN_SECRET_SECRET).get_value()
+        token_id, token_secret = resolve_proxmox_credentials(hyp)
         client = ProxmoxClient(host=str(api_host.address.ip), token_id=token_id, token_secret=token_secret)
 
         # Idempotency / collision checks against reality
