@@ -15,10 +15,10 @@ Items marked **PROPOSED** await team confirmation; everything else is settled.
 - The **`Hosted On` relationship** (key `hosted_on`, hypervisor Device → VNF
   Devices) IS the roster. A site's server-2 differences are simply which VNF
   devices the layout relates to which hypervisor. *(Settled — stated by the team.)*
-- **PROPOSED — deploy trigger via native Status**: a VNF Device in status
-  **Planned** is intent-not-yet-deployed; the deploy job builds it and flips it
-  to **Active**. Decommissioned/parked states use the existing status set.
-  Native field, no new custom anything, and the Jobs UI/API can filter on it.
+- **Settled (2026-08-08) — deploy trigger via native Status**: a VNF Device in
+  status **Planned** is intent-not-yet-deployed; the deploy job builds it and
+  flips it to **Active**. Decommissioned/parked states use the existing status
+  set. Native field; the Jobs UI/API filter on it.
 
 ## 2. Per-VNF data read from the Device record
 
@@ -37,22 +37,36 @@ Items marked **PROPOSED** await team confirmation; everything else is settled.
   with `mode`/`untagged_vlan`/`tagged_vlans` set — an access interface carries
   its VLAN, a trunk interface (PA dataplane) carries the tagged set. The deploy
   job renders these directly into Proxmox `netN` strings (`tag=` / `trunks=`).
-- **PROPOSED — NIC ordering contract**: Proxmox `netN` index follows the
-  platform profile's declared interface-name order (e.g. jump host: `eth0`;
-  PA: `mgmt`, then `ethernet1/1`, `ethernet1/2`, …). The layout names
-  interfaces exactly per that convention; the profile is the order authority.
-  (Guest NIC enumeration must match — this is the one place naming is
-  load-bearing.)
+- **NIC ordering — settled (2026-08-08): we PUSH order from the SoT; nothing is
+  learned from the device at deploy time.** The mechanics that make this safe:
+  Proxmox `netN` index → PCI slot order → guest enumeration order is fully
+  deterministic, and each guest OS assigns its interface *names* to that order
+  by fixed, per-platform rules (PA: first NIC = `mgmt`, then `ethernet1/1…` in
+  order; IOS-XE: `Gi1, Gi2…`; Ubuntu: predictable names by PCI slot). The
+  platform profile encodes that name↔index map once; the layout names the
+  device's Interfaces with the *guest's* names; deploy renders `netN` in the
+  profile's order. Three reinforcements:
+  1. **Pinned MACs** (below) make Linux-class guests order-proof outright —
+     PVE's generated cloud-init network config matches by MAC, not name.
+  2. The **audit job** is where "learning from the device" lives: it reads the
+     running guest's MAC↔interface mapping and diffs it against intent —
+     verification, never silent adoption (per the SSoT-first rule, reality is
+     checked against the SoT, not promoted into it).
+  3. The one sanctioned learn-INTO-SoT flow is explicit **onboarding** of
+     pre-existing (converted ESXi) sites, where a one-time backfill job records
+     current MACs/ordering into Nautobot before the SoT takes over.
 - **MAC addresses**: **PROPOSED** — layout pins `mac_address` on each
   interface; deploy passes it through (deterministic guest NIC identity,
   PA licensing stability).
 - **Primary/mgmt IP**: `device.primary_ip4` — settled Nautobot convention.
-- **Gateway (needed for static cloud-init/day-0)**: **QUESTION for the team** —
-  what marks a gateway today in your data? The role list suggests an existing
-  convention (`VIP`/`HSRP`/`VRRP`/`Anycast` roles exist). Recommendation if none
-  is established for these sites: the PA SVI address in each prefix carries an
-  IPAddress **Role = "Gateway"**; consumers resolve gateway =
-  the role-tagged IP within the interface's prefix. Native objects only.
+- **Gateway — settled (2026-08-08)**: the default gateway IP in each prefix
+  carries IPAddress **Role = `DefaultGW`** (team's standardization of the
+  existing "Default Gateway" role; named to acknowledge that *other* gateways
+  can coexist in a subnet — FHRP addresses keep their `VRRP`/`HSRP`/`VIP`
+  roles). Contract: **exactly one `DefaultGW`-role IP per prefix**; consumers
+  resolve gateway = the DefaultGW IP within the interface's prefix. The layout
+  process applies the role per subnet; renaming legacy "Default Gateway"
+  records is a team data-migration task.
 - **DNS/NTP and similar site services**: config context. *(Settled pattern.)*
 
 ## 4. The hypervisor record
@@ -62,7 +76,7 @@ Items marked **PROPOSED** await team confirmation; everything else is settled.
 | Node name (Proxmox) | `device.name` | Settled |
 | API endpoint | `device.primary_ip4` | **PROPOSED** |
 | API credentials | Secrets `proxmox_token_id`/`proxmox_token_secret` (global pair now; per-device SecretsGroup when field rollout warrants) | Settled for now |
-| BMC/XCC address | **QUESTION for the team** — how are BMC IPs modeled today? Recommendation: a dedicated interface (e.g. `xcc`) on the SE350 device with its IP assigned — native, visible, cable-truthful | |
+| BMC/XCC address | **Settled (2026-08-08)**: a dedicated interface named `xcc` on the SE350 device with its IP assigned — native, visible, cable-truthful | Layout process creates it |
 | Storage names, bridge names | Platform profile / config context (`local-lvm`, `local`, `vmbr0`/`vmbr1` as site standards) | Settled pattern |
 
 ## 5. Normalization guardrails (the standing rule, operationalized)
