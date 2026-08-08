@@ -50,6 +50,8 @@ Reference research (dense, per-dimension findings backing the plan):
 
 | Job | What it does |
 |---|---|
+| `Deploy VM from Software Version (cloud-init)` ([jobs/proxmox/deploy_vm.py](jobs/proxmox/deploy_vm.py)) | The Phase 2a engine: deploys from an **Active** SoftwareVersion — checksum-verified image pull if absent, `import-from` create, native cloud-init identity, autostart, guest-agent IP verification. Pre-flights: storage capacity, name-collision refusal, oversubscription warning. E2E-proven 2026-08-08 (jumphost-e2e-01 on the lab NUC). |
+| `Ingest Image onto Proxmox Node` ([jobs/proxmox/ingest_image.py](jobs/proxmox/ingest_image.py)) | Idempotent pre-stage of a SoftwareImageFile onto a node's import storage — warm nodes ahead of maintenance windows. |
 | `SE350 Platform Discovery` ([jobs/baremetal/discover_platform.py](jobs/baremetal/discover_platform.py)) | Redfish sweep of one XCC: full BIOS attribute list (+ registry of allowed values when published), VirtualMedia EXT-member check, XCC/UEFI/NIC firmware versions, Secure Boot state — read-only by default, with checklist §1/§3 verdicts logged and JSON dumps attached to the JobResult. Opt-in **write checks**: virtual-media mount/verify/eject test (auto-detects XCC1 PATCH-on-EXT vs XCC2 InsertMedia — the dual-mode client seed), and a clearly-marked DISRUPTIVE dress rehearsal that boot-once's the mounted ISO (lab units only). |
 
 Setup (Nautobot 2.4):
