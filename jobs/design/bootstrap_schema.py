@@ -156,9 +156,13 @@ class BootstrapNfvSchema(Job):
         cf_defs = [
             ("provisioning_state", "select", "Provisioning State"),
             ("vmid", "integer", "Proxmox VMID"),
-            ("vcpus", "integer", "vCPUs (override)"),
-            ("memory_mb", "integer", "Memory MB (override)"),
-            ("disk_gb", "integer", "Disk GB (override)"),
+            ("vcpus", "integer", "vCPUs"),
+            ("memory_mb", "integer", "Memory MB"),
+            ("disk_gb", "integer", "Disk GB"),
+            # Hypervisor-side deployment targets (set by the layout engine):
+            ("vm_bridge", "text", "VM Bridge"),
+            ("vm_storage", "text", "VM Disk Storage"),
+            ("import_storage", "text", "Import Storage"),
         ]
         for key, cf_type, label in cf_defs:
             cf, created = CustomField.objects.get_or_create(
