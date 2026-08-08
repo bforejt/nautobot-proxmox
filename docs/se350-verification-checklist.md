@@ -59,9 +59,12 @@ UEFI-side standard settings verified with exact names/enums in `bmc/se350_bios.y
 (one correction: `MMConfigBase_3GB` enum prefix). Findings: **Thermal Mode is not a
 UEFI attribute on SE350** — confirmed: the legacy tool sets it via SSH to the XCC CLI
 (`thermal performance`), in the same session as its `asu set` commands (ASU names map
-1:1 to the Redfish attributes). The discovery job's chassis/OEM probe (next run) tells
-us whether a Redfish OEM equivalent exists; otherwise ApplyBiosPolicyJob keeps one
-small XCC-SSH step for thermal. **The sampled unit shows drift**: it sits at the
+1:1 to the Redfish attributes). Probe verdict (second run, 2026-08-07): **no Redfish
+thermal-mode setting exists on this XCC1** — ApplyBiosPolicyJob keeps the one XCC-SSH
+step. Bonus finds in the same dump: `/redfish/v1/Managers/1/Oem/Lenovo/FoD` (license
+key inventory endpoint — feeds the FoD-transferability/spares question via API) and
+`.../SecureKeyLifecycleService` (SED key management — the ThinkShield/SED story has an
+API surface). **The sampled unit shows drift**: it sits at the
 `MaximumPerformance` preset with `MONITORMWAIT=Disable` (the preset forces it),
 not the standard's CustomMode + MWAIT Enable — either un-standardized or predates
 the tool; the audit job exists for exactly this. All proposed-addition settings

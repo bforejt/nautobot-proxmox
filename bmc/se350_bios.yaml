@@ -84,12 +84,13 @@ legacy_standard:
     command: "thermal performance"
     verified: true   # method confirmed by the team 2026-08-07
     note: >
-      Confirmed 2026-08-07: NOT a UEFI attribute — the legacy tool sets it via
-      SSH to the XCC CLI ("thermal performance"), in the same session as its
-      `asu set` commands (ASU dotted names map 1:1 to the Redfish attributes
-      above). The discovery job's chassis/OEM probe checks whether a Redfish
-      OEM equivalent exists; until one is found, ApplyBiosPolicyJob keeps one
-      small XCC-SSH step for this setting.
+      CLOSED 2026-08-07: the chassis/OEM probe found NO thermal/cooling/fan
+      mode setting anywhere in Chassis, Chassis.Oem.Lenovo, or
+      Manager.Oem.Lenovo on this XCC1 firmware (purley_gp_23-2) — only
+      telemetry subresources. ApplyBiosPolicyJob keeps one XCC-SSH step
+      ("thermal performance"), exactly mirroring the legacy tool. (Residual
+      theoretical lead: the unexplored Chassis "Controls" collection — not
+      worth another loop given the SSH step is one line.)
 
 # Settings the plan wants asserted on top of the legacy standard. The sampled
 # unit is ALREADY at the desired value for every one of these (factory/current
