@@ -55,7 +55,7 @@ Items marked **PROPOSED** await team confirmation; everything else is settled.
   3. The one sanctioned learn-INTO-SoT flow is explicit **onboarding** of
      pre-existing (converted ESXi) sites, where a one-time backfill job records
      current MACs/ordering into Nautobot before the SoT takes over.
-- **MAC addresses — pinned (tentatively agreed 2026-08-08). Storage: the
+- **MAC addresses — pinned (Settled 2026-08-08). Storage: the
   native `mac_address` field on the Nautobot Interface record** — a
   first-class core column on `dcim.Interface`, visible on the interface form,
   REST-filterable, fully inside the SoT (not a custom field, not external).
