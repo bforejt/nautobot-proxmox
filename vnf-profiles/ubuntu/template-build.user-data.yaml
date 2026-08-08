@@ -95,10 +95,20 @@ write_files:
     content: |
       /org/gnome/desktop/screensaver/lock-enabled
       /org/gnome/desktop/session/idle-delay
+  # Suppress the GNOME first-login wizard (Ubuntu Pro enrollment, "send data to
+  # Canonical" telemetry, keyboard/timezone) for EVERY deploy-time-created user:
+  # the marker goes in /etc/skel so each new user's home inherits it. Effect =
+  # No to Ubuntu Pro and No to data collection (the screens never run).
+  - path: /etc/skel/.config/gnome-initial-setup-done
+    content: "yes\n"
 
 runcmd:
   - dconf update
   - systemctl enable --now qemu-guest-agent
+  # Structurally ensure no telemetry leaves the box (defense-in-depth on
+  # "send data to Canonical -> No"), independent of the wizard.
+  - systemctl disable --now whoopsie.service || true
+  - apt-get -y purge ubuntu-report popularity-contest || true
 
 # Sealing (cloud-init clean, machine-id truncate, poweroff, convert to
 # template) is done by the build script over SSH after the agent reports
