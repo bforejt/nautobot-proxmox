@@ -31,6 +31,10 @@ Start here:
 | Document | What it is |
 |---|---|
 | [docs/plan-of-attack.md](docs/plan-of-attack.md) | **The main document.** Assessment & feedback, ESXi→Proxmox translation table, architecture spine, phased plan, proposed repo layout, and the consolidated `[lab-verify]` / `[decision-needed]` list (§6). |
+| [docs/getting-started.md](docs/getting-started.md) | **New-environment setup checklist** — the one-time steps to run the deploy jobs against an existing Proxmox host in a fresh lab. |
+| [docs/sot-data-contract.md](docs/sot-data-contract.md) | The exact Nautobot records the deploy jobs read (roster, sizing, networking, credentials, console login) — the interface your layout process fills. |
+| [docs/image-lifecycle.md](docs/image-lifecycle.md) | Golden-image build/publish/register/promote/deploy lifecycle. |
+| [docs/deployment-onboarding.md](docs/deployment-onboarding.md) | Portability assessment + gap register (what's turnkey, what isn't). |
 | [docs/decision-log.md](docs/decision-log.md) | Running log of decisions made and still open. |
 | [docs/site-reference-architecture.md](docs/site-reference-architecture.md) | The café-model site standard the automation reproduces: VLAN plan, switching/wiring, DIA model, the static→LACP port-channel flip, ESXi host-tweak translation, sizing policy. |
 | [docs/se350-verification-checklist.md](docs/se350-verification-checklist.md) | Actionable Phase 0 lab checklist for the SE350 platform (Redfish vmedia functional check, BIOS dump, M.2/AHCI, wiring/EtherChannel capture). |
@@ -50,8 +54,10 @@ Reference research (dense, per-dimension findings backing the plan):
 
 | Job | What it does |
 |---|---|
-| `Deploy VM from Software Version (cloud-init)` ([jobs/proxmox/deploy_vm.py](jobs/proxmox/deploy_vm.py)) | The Phase 2a engine: deploys from an **Active** SoftwareVersion — checksum-verified image pull if absent, `import-from` create, native cloud-init identity, autostart, guest-agent IP verification. Pre-flights: storage capacity, name-collision refusal, oversubscription warning. E2E-proven 2026-08-08 (jumphost-e2e-01 on the lab NUC). |
-| `Ingest Image onto Proxmox Node` ([jobs/proxmox/ingest_image.py](jobs/proxmox/ingest_image.py)) | Idempotent pre-stage of a SoftwareImageFile onto a node's import storage — warm nodes ahead of maintenance windows. |
+| `Bootstrap NFV Data Model` ([jobs/design/bootstrap_schema.py](jobs/design/bootstrap_schema.py)) | Idempotently creates the data-model prerequisites (Hosted On relationship, roles, virtual DeviceTypes, platforms, custom fields, platform tunables). Run once per environment; safe to re-run. |
+| `Deploy VNF Device (SoT-driven)` ([jobs/proxmox/deploy_device.py](jobs/proxmox/deploy_device.py)) | Deploys one Planned VNF Device reading everything from Nautobot per the [data contract](docs/sot-data-contract.md) — hypervisor via Hosted On, Active-gated image, sizing/tunables, pinned-MAC NICs, console credentials. Writes back VMID + flips to Active. Fail-closed on any missing datum. |
+| `Decommission VNF Device (SoT-driven)` ([jobs/proxmox/decommission_device.py](jobs/proxmox/decommission_device.py)) | SoT-true teardown: verifies vmid+name match, destroys the VM, writes back Active→Planned. Deploy+decommission = the redeploy primitive. |
+| `Ingest Image onto Proxmox Node` ([jobs/proxmox/ingest_image.py](jobs/proxmox/ingest_image.py)) | Device-driven idempotent pre-stage of a SoftwareImageFile onto a hypervisor's import storage — warm nodes ahead of maintenance windows. |
 | `SE350 Platform Discovery` ([jobs/baremetal/discover_platform.py](jobs/baremetal/discover_platform.py)) | Redfish sweep of one XCC: full BIOS attribute list (+ registry of allowed values when published), VirtualMedia EXT-member check, XCC/UEFI/NIC firmware versions, Secure Boot state — read-only by default, with checklist §1/§3 verdicts logged and JSON dumps attached to the JobResult. Opt-in **write checks**: virtual-media mount/verify/eject test (auto-detects XCC1 PATCH-on-EXT vs XCC2 InsertMedia — the dual-mode client seed), and a clearly-marked DISRUPTIVE dress rehearsal that boot-once's the mounted ISO (lab units only). |
 
 Setup (Nautobot 2.4):

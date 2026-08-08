@@ -111,7 +111,7 @@ stored once.** The line it draws here:
 |---|---|---|
 | Node name (Proxmox) | `device.name` | Settled |
 | API endpoint | `device.primary_ip4` | **Settled (2026-08-08)** |
-| API credentials | Secrets `proxmox_token_id`/`proxmox_token_secret` (global pair now; per-device SecretsGroup when field rollout warrants) | Settled for now |
+| API credentials | Per-hypervisor **SecretsGroup** named by the device's `secrets_group` CF (Generic/Username = token id, Generic/Secret = token UUID) — each standalone node has its own token; **falls back** to the global `proxmox_token_id`/`proxmox_token_secret` Secret pair when the CF is empty (single-host quickstart) | **Settled (2026-08-08)** |
 | BMC/XCC address | **Settled (2026-08-08)**: a dedicated interface named `xcc` on the SE350 device with its IP assigned — native, visible, cable-truthful | Layout process creates it |
 | VM bridge + storage targets | Hypervisor-device CFs `vm_bridge`, `vm_storage`, `import_storage` — set by the layout engine per node (SE350 standard: `vmbr1`/`local-lvm`/`local`); deploy refuses if unset | **Settled (2026-08-08)** — desired state, stored once, on the object it describes |
 
