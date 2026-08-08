@@ -75,6 +75,14 @@ class BootstrapNfvSchema(Job):
             role.content_types.add(device_ct)
             self._log_result("Role", role_name, created)
 
+        # Default-gateway marker per prefix (sot-data-contract.md §3): exactly
+        # one DefaultGW-role IPAddress per prefix; FHRP addresses keep their
+        # VRRP/HSRP/VIP roles. Named DefaultGW because other gateways coexist.
+        ipaddress_ct = ContentType.objects.get(app_label="ipam", model="ipaddress")
+        role, created = Role.objects.get_or_create(name="DefaultGW")
+        role.content_types.add(ipaddress_ct)
+        self._log_result("Role", "DefaultGW (ipam.ipaddress)", created)
+
         # ---- Manufacturers + 0U virtual DeviceTypes ----
         device_types = [
             ("Lenovo", "ThinkSystem SE350", 1),
