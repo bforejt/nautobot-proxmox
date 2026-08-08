@@ -132,10 +132,22 @@ class BootstrapNfvSchema(Job):
         cf_machine.content_types.add(platform_ct)
         self._log_result("CustomField", "machine_type (platform)", created)
 
+        # Console login username for cloud-init platforms. MUST match the
+        # template's baked default_user (that user carries the desktop groups);
+        # changing the username properly means a template rebuild. The fleet
+        # console PASSWORD is a Nautobot Secret (jumphost_console_password),
+        # not stored here.
+        cf_user, created = CustomField.objects.get_or_create(
+            key="console_user",
+            defaults={"type": "text", "label": "Console User", "grouping": "NFV"},
+        )
+        cf_user.content_types.add(platform_ct)
+        self._log_result("CustomField", "console_user (platform)", created)
+
         # Seed platform values — CREATE-ONLY: an admin's adjusted value is
         # never overwritten by a re-run.
         platform_seeds = {
-            "ubuntu-jumphost": {"day0_builder": "native-cloudinit", "machine_type": "q35"},
+            "ubuntu-jumphost": {"day0_builder": "native-cloudinit", "machine_type": "q35", "console_user": "ubuntu"},
             "paloalto-panos": {"machine_type": "q35"},
             "cisco-iosxe": {"machine_type": "q35"},
         }
