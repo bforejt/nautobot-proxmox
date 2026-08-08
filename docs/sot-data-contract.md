@@ -25,8 +25,8 @@ Items marked **PROPOSED** await team confirmation; everything else is settled.
 | Need | Source | Notes |
 |---|---|---|
 | VM name / guest hostname | `device.name` | Settled |
-| Image to deploy | `device.software_version` → its default `SoftwareImageFile` | **PROPOSED**: the layout process — whatever creates the VNF Device records (the team's Design Builder design or equivalent) — also sets the native `software_version` FK on each device (e.g. → `ubuntu-jumphost 24.04-v1`). Deploy refuses if unset or if the version's status ≠ Active, keeping the Staged→Active promotion gate authoritative |
-| Sizing (vcpus / memory / disk) | The three integer CFs the bootstrap created on `dcim.device` (`vcpus`, `memory_mb`, `disk_gb`, grouping "NFV") are **per-device exception overrides — normally empty**. The rule lives in the **platform profile**: a Git-synced config context scoped by Platform, carrying the standard sizing plus platform behavior (see example below) | **PROPOSED** precedence: device CF (the exception, visible on the one device that deviates) > profile standard (the rule, defined once). One edit changes the fleet standard; exceptions never hide |
+| Image to deploy | `device.software_version` → its default `SoftwareImageFile` | **Settled (2026-08-08)**: the layout process — whatever creates the VNF Device records (the team's Design Builder design or equivalent) — sets the native `software_version` FK on each device. Deploy **refuses** if unset or if the version's status ≠ Active, keeping the Staged→Active promotion gate authoritative |
+| Sizing (vcpus / memory / disk) | The device's own CFs (`vcpus`, `memory_mb`, `disk_gb`) — **REQUIRED on every VNF device, set by the layout engine at creation**. There is no external sizing profile: the SoT record is complete, consumers read one place. Deploy **refuses** if any sizing CF is unset (same discipline as software_version) | **Settled (2026-08-08)** — team direction: fully materialized per-device values; the "define once" DRY lives in the layout engine's templates, not in runtime lookups. Fleet-wide change flow (SoT-first): bulk-update the CFs (Nautobot bulk edit or a small job) → run the converge job to resize actual VMs to the updated intent. Never the reverse |
 | Platform behavior (day-0 builder, machine type, serial console, NIC model) | `device.platform` → the platform profile (config context) | Settled pattern from the plan |
 | Proxmox VMID | CF `vmid` — **written back** by the deploy job after create | Settled (bootstrapped) |
 | Host lifecycle stage | CF `provisioning_state` (hypervisors) | Settled (bootstrapped) |
@@ -55,19 +55,17 @@ Items marked **PROPOSED** await team confirmation; everything else is settled.
   3. The one sanctioned learn-INTO-SoT flow is explicit **onboarding** of
      pre-existing (converted ESXi) sites, where a one-time backfill job records
      current MACs/ordering into Nautobot before the SoT takes over.
-- **MAC addresses — RECOMMENDED: pinned, not dynamic.** The layout allocates a
-  MAC per interface once (deterministic or random-then-stored) into the native
-  `Interface.mac_address` field; deploy passes it through; redeploys reuse it.
-  Why it matters *for this project specifically*: the redeploy model is
-  destroy-and-recreate (day-0 ISOs are first-boot-only), and scenarios 2/3 are
-  core workflows — with dynamic MACs every redeploy mints new NICs, changing
-  DHCP leases (jump hosts), invalidating ARP/CAM and any DHCP-snooping or
-  port-security state, and breaking MAC-keyed monitoring. With pinned MACs a
-  redeployed VM is network-identical to its predecessor — invisible to the L2
-  fabric. Pinning also underwrites two settled items: cloud-init's match-by-MAC
-  order-proofing only helps if MACs survive redeploys, and the audit job's
-  MAC↔intent diff needs intent MACs to exist. FHRP/floating MACs are protocol
-  state and unaffected. Cost: a few lines of allocation logic in the layout.
+- **MAC addresses — pinned (tentatively agreed 2026-08-08). Storage: the
+  native `mac_address` field on the Nautobot Interface record** — a
+  first-class core column on `dcim.Interface`, visible on the interface form,
+  REST-filterable, fully inside the SoT (not a custom field, not external).
+  The layout engine writes it once at design time; deploy renders it into the
+  Proxmox `netN` line (`virtio=<mac>,bridge=...`); redeploys reuse it; the
+  audit job diffs running-guest MACs (via agent) against it. Rationale for
+  pinning: destroy-and-recreate redeploys stay invisible to the L2 fabric
+  (leases, ARP/CAM, snooping/port-security state, MAC-keyed monitoring all
+  survive), and cloud-init's match-by-MAC config plus the audit's MAC↔intent
+  diff both require stable intent MACs. FHRP/virtual MACs are unaffected.
 - **Primary/mgmt IP**: `device.primary_ip4` — settled Nautobot convention.
 - **Gateway — settled (2026-08-08)**: the default gateway IP in each prefix
   carries IPAddress **Role = `DefaultGW`** (team's standardization of the
@@ -79,25 +77,16 @@ Items marked **PROPOSED** await team confirmation; everything else is settled.
   records is a team data-migration task.
 - **DNS/NTP and similar site services**: config context. *(Settled pattern.)*
 
-### Platform profile example (the "profile standard")
+### Platform behavior (distinct from device settings)
 
-Git-synced config context, scoped to Platform `ubuntu-jumphost` — one document
-defines the standard for every device of that platform:
-
-```yaml
-nfv_vm_profile:
-  vcpus: 2
-  memory_mb: 4096
-  disk_gb: 32
-  nic_order: [eth0]          # the name<->netN order authority (contract §3)
-  machine: q35
-  serial_console: true
-  day0: native-cloudinit     # vs pa-bootstrap-iso / iosxe-config-iso
-```
-
-Equivalent profiles exist per platform (`paloalto-panos`, `cisco-iosxe`, ...).
-A device with empty sizing CFs gets these values; a set CF wins for that
-device only.
+Per the team's rule, **data about devices lives in the SoT** — but *knowledge
+about platforms* (how to deploy a PAN-OS vs an Ubuntu image: NIC name↔netN
+order, machine type, serial-console flag, which day-0 builder) is not a
+device setting. It is code-adjacent constants, tightly coupled to the builder
+code that interprets it, so it ships **with the job code in this repo**
+(`vnf-profiles/<platform>/profile.yaml`) and versions atomically with it — the
+same argument that keeps the template seed in git. PROPOSED — awaiting team
+ack of this data-vs-knowledge line. Nothing per-device ever lives here.
 
 ## 4. The hypervisor record
 
