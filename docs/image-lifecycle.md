@@ -29,9 +29,22 @@ a field node.
    watched by a human.
 4. **Seal**: `cloud-init clean`, truncate `machine-id`, drop the build-only SSH
    key the seed injected, detach the seed ISO, power off.
-5. **Publish**: extract the disk as qcow2, push to nautobot-composer as an
-   immutable versioned filename + SHA256 sidecar (e.g.
-   `ubuntu-jumphost-24.04-v2.qcow2`).
+5. **Publish**: extract the disk as qcow2 and push a complete, immutable
+   **version set** to nautobot-composer:
+   - `ubuntu-jumphost-24.04-v2.qcow2` — the template artifact
+   - `ubuntu-jumphost-24.04-v2.qcow2.sha256` — its checksum sidecar
+   - `ubuntu-jumphost-24.04-v2.user-data.yaml` — the exact seed used, copied
+     verbatim from the synced repo at build time
+   - `ubuntu-jumphost-24.04-v2.manifest.json` — build metadata: vendor base URL
+     + upstream checksum, seed git commit, build date/node, and the guest's
+     full package list (`dpkg -l`, captured just before sealing — answers
+     "which template versions ship package X?" without booting anything)
+
+   The composer copies are **frozen build output** — never edited there. The
+   editable source of the seed stays in git; a change produces a new version
+   set. Two copies, two roles: git = mutable, reviewed source; composer =
+   immutable per-version record. Every published version therefore carries its
+   own complete recipe, independent of any git host.
 6. **Register**: create the `SoftwareVersion` (status **Staged**) +
    `SoftwareImageFile` (composer URL, checksum, size) in Nautobot, stamped with
    the seed's git commit — full provenance chain: running clone → version record
