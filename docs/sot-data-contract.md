@@ -120,11 +120,12 @@ stored once.** The line it draws here:
 Users reach the jump host at the **desktop/console, never SSH** (team,
 2026-08-08). So the guest needs a working username+password:
 
-- **Username**: Platform CF `console_user` (seeded `ubuntu`). It **must match
-  the template's baked `default_user`** — that user carries the desktop groups
-  (wireshark, sudo); a different name would create a group-less account.
-  Changing the console username properly = a template rebuild (seed edit),
-  not just a CF change. Documented coupling.
+- **Username**: Platform CF `console_user` (seeded `manager`). **Verified**:
+  Proxmox `ciuser` overrides only the account NAME — cloud-init still applies
+  the template's baked `default_user` groups and sudo to it (tested: a
+  `manager` deploy came up in groups `sudo, wireshark, ...` with passwordless
+  sudo, no stray `ubuntu`). So the username is a genuine deploy-time SoT value;
+  changing it needs no template rebuild.
 - **Password**: a single fleet-wide Nautobot **Secret**
   `jumphost_console_password` (text-file provider). The deploy job reads it and
   passes it as Proxmox `cipassword`; Proxmox hashes it before storing (verified:
