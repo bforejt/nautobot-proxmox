@@ -105,6 +105,53 @@ class BootstrapNfvSchema(Job):
             _, created = Platform.objects.get_or_create(name=platform_name)
             self._log_result("Platform", platform_name, created)
 
+        # ---- Platform tunables (desired state: in the SoT, stored once) ----
+        # Immutable platform FACTS (guest NIC-name order, cloud-init class)
+        # live in code. TUNABLES live here as Platform custom fields
+        # (sot-data-contract.md). day0_builder is select-typed: this job
+        # maintains its choice list to exactly match the builders the job
+        # code ships — the code<->data contract handshake; an admin cannot
+        # select a builder that does not exist.
+        platform_ct = ContentType.objects.get(app_label="dcim", model="platform")
+        cf_day0, created = CustomField.objects.get_or_create(
+            key="day0_builder",
+            defaults={"type": "select", "label": "Day-0 Builder", "grouping": "NFV"},
+        )
+        cf_day0.content_types.add(platform_ct)
+        self._log_result("CustomField", "day0_builder (platform)", created)
+        for i, builder in enumerate(("native-cloudinit",)):  # extend as builders ship
+            _, ch_created = CustomFieldChoice.objects.get_or_create(
+                custom_field=cf_day0, value=builder, defaults={"weight": (i + 1) * 10}
+            )
+            if ch_created:
+                self._log_result("  builder choice", builder, True)
+        cf_machine, created = CustomField.objects.get_or_create(
+            key="machine_type",
+            defaults={"type": "text", "label": "Machine Type", "grouping": "NFV"},
+        )
+        cf_machine.content_types.add(platform_ct)
+        self._log_result("CustomField", "machine_type (platform)", created)
+
+        # Seed platform values — CREATE-ONLY: an admin's adjusted value is
+        # never overwritten by a re-run.
+        platform_seeds = {
+            "ubuntu-jumphost": {"day0_builder": "native-cloudinit", "machine_type": "q35"},
+            "paloalto-panos": {"machine_type": "q35"},
+            "cisco-iosxe": {"machine_type": "q35"},
+        }
+        for plat_name, values in platform_seeds.items():
+            plat = Platform.objects.filter(name=plat_name).first()
+            if plat is None:
+                continue
+            changed = False
+            for key, value in values.items():
+                if plat._custom_field_data.get(key) in (None, ""):
+                    plat._custom_field_data[key] = value
+                    changed = True
+                    self._log_result(f"Platform {plat_name}", f"{key}={value}", True)
+            if changed:
+                plat.validated_save()
+
         # ---- Custom fields on dcim.device ----
         cf_defs = [
             ("provisioning_state", "select", "Provisioning State"),
