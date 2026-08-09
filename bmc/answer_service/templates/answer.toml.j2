@@ -43,3 +43,6 @@ cert-fingerprint = "{{ cert_fingerprint }}"
 {% endif %}
 [post-installation-webhook]
 url = "{{ webhook_url }}"
+{% if cert_fingerprint -%}
+cert-fingerprint = "{{ cert_fingerprint }}"
+{% endif -%}
