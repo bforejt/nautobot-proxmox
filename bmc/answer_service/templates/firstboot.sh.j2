@@ -1,0 +1,106 @@
+#!/bin/bash
+# NFV firstboot — {{ node_name }} (serial {{ serial }})
+# Fetched once at install time via the answer file's [first-boot] from-url
+# (one-time key), baked into the installed system by proxmox-first-boot, and
+# run on the node's first boot. Idempotent where it matters; logs to journal.
+#
+# Scope (lab kit / nested profile): apt repos, the pveum service-account
+# bootstrap, and the credentials phone-home. Physical-node profiles will add
+# the SE350 topology/tuning steps here (plan-of-attack Phase 3).
+set -euo pipefail
+log() { echo "[nfv-firstboot] $*"; }
+
+# All SoT-sourced values enter as shell-quoted literals ONCE, here, and are
+# referenced as variables everywhere below — never re-injected into another
+# quoting context.
+NODE_NAME={{ node_name | shquote }}
+SERIAL={{ serial | shquote }}
+SERVICE_URL={{ service_url | shquote }}
+CRED_KEY={{ credentials_key | shquote }}
+PIN_FP={{ cert_fingerprint | shquote }}
+ROLE={{ pve_role | shquote }}
+PRIVS={{ pve_privs | shquote }}
+SVC_USER={{ pve_user | shquote }}
+TOKEN_NAME={{ pve_token | shquote }}
+
+log "starting on $(hostname) (expecting ${NODE_NAME})"
+
+# --- apt: community repo, drop the enterprise entries (no subscription) ---
+rm -f /etc/apt/sources.list.d/pve-enterprise.list \
+      /etc/apt/sources.list.d/pve-enterprise.sources \
+      /etc/apt/sources.list.d/ceph.list /etc/apt/sources.list.d/ceph.sources
+codename="$(. /etc/os-release && echo "${VERSION_CODENAME}")"
+cat > /etc/apt/sources.list.d/pve-no-subscription.sources <<EOF
+Types: deb
+URIs: http://download.proxmox.com/debian/pve
+Suites: ${codename}
+Components: pve-no-subscription
+Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
+EOF
+log "apt repos set to pve-no-subscription (${codename})"
+
+# --- pveum service-account bootstrap (decision: per-node token, least priv;
+#     grant the role to BOTH user and token — privsep rights are the
+#     INTERSECTION of the two ACL sets) ---
+pveum role list --output-format json | grep -q "\"${ROLE}\"" \
+  || pveum role add "${ROLE}" -privs "${PRIVS}"
+pveum user list --output-format json | grep -q "\"${SVC_USER}\"" \
+  || pveum user add "${SVC_USER}" --comment "NFV automation (firstboot-created)"
+pveum acl modify / --users "${SVC_USER}" --roles "${ROLE}"
+# Token value is shown exactly once — capture it here or lose it (reinstall
+# re-runs this same bootstrap, which is the designed rebuild path).
+TOKEN_SECRET="$(pveum user token add "${SVC_USER}" "${TOKEN_NAME}" --privsep 1 --output-format json \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')"
+pveum acl modify / --tokens "${SVC_USER}!${TOKEN_NAME}" --roles "${ROLE}"
+log "service account ${SVC_USER}!${TOKEN_NAME} created with role ${ROLE} (user+token ACLs)"
+
+# --- phone the credentials home (one-time key; retried — the key is only
+#     consumed server-side on success, so retrying is safe). Values pass via
+#     the environment: nothing is interpolated into the Python source. ---
+export NFV_URL="${SERVICE_URL}" NFV_SERIAL="${SERIAL}" NFV_KEY="${CRED_KEY}" \
+       NFV_NODE="${NODE_NAME}" NFV_FP="${PIN_FP}" \
+       NFV_TOKEN_ID="${SVC_USER}!${TOKEN_NAME}" NFV_TOKEN_SECRET="${TOKEN_SECRET}"
+python3 - <<'PYEOF'
+import hashlib, json, os, socket, ssl, sys, time, urllib.request
+
+url = os.environ["NFV_URL"] + "/firstboot-credentials"
+payload = {
+    "serial": os.environ["NFV_SERIAL"],
+    "key": os.environ["NFV_KEY"],
+    "node_name": os.environ["NFV_NODE"],
+    "token_id": os.environ["NFV_TOKEN_ID"],
+    "token_secret": os.environ["NFV_TOKEN_SECRET"],
+}
+
+ctx = None
+fp = os.environ.get("NFV_FP", "").replace(":", "").lower()
+if url.startswith("https://") and fp:
+    # Pin the service's (self-signed) cert by SHA256 fingerprint, then send
+    # with CA verification off — the pin IS the verification.
+    host = url.split("/")[2]
+    hostname, _, port = host.partition(":")
+    ctx = ssl._create_unverified_context()
+    with socket.create_connection((hostname, int(port or 443)), timeout=30) as sock:
+        with ctx.wrap_socket(sock, server_hostname=hostname) as tls:
+            der = tls.getpeercert(binary_form=True)
+    seen = hashlib.sha256(der).hexdigest()
+    if seen != fp:
+        sys.exit(f"answer-service cert fingerprint mismatch: {seen} != {fp}")
+
+req = urllib.request.Request(
+    url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}
+)
+for attempt in range(10):
+    try:
+        print(urllib.request.urlopen(req, timeout=30, context=ctx).read().decode())
+        break
+    except OSError as exc:
+        print(f"phone-home attempt {attempt + 1}/10 failed: {exc}", file=sys.stderr)
+        time.sleep(min(60, 5 * (attempt + 1)))
+else:
+    sys.exit("phone-home failed after 10 attempts — token NOT stored in Nautobot")
+PYEOF
+log "credentials stored in Nautobot — firstboot complete"
+
+# Single-use package: remove so the hook can never re-run on later boots.
+apt-get -y purge proxmox-first-boot >/dev/null 2>&1 || true

@@ -44,6 +44,7 @@ EXPECTED_JOBS = {
     "DecommissionVnfDevice",
     "IngestImage",
     "DiscoverSe350Platform",
+    "InstallProxmoxNode",
 }
 
 REGISTRY = []
