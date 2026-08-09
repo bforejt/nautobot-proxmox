@@ -178,6 +178,42 @@ vendor licenses remote vmedia (XCC Enterprise FoD is fleet-confirmed for us);
 **PXE is the escape hatch for unlicensed BMCs** — same artifact, boot it from
 the lab netboot server instead.
 
+## Disk layout of an installed node
+
+The `ext4` profile (fleet standard, decision #27) produces this layout —
+verified empirically on a node installed by this loop (values from a 32 GiB
+lab disk; proportions scale with disk size):
+
+| Piece | What it is |
+|---|---|
+| GPT + BIOS-boot + **ESP** (~1 GiB, vfat) | Boot partitions; `/boot/efi` |
+| Rest of the disk → **LVM PV**, VG **`pve`** | Everything else, three LVs |
+| **`root`** LV — ext4, `/` | The OS **and** the `local` directory storage (`iso`, `import`, `vztmpl`, `backup`) — the contract's `import_storage=local`. Observed 13.5G of 32G |
+| **`swap`** LV | ≈ RAM size, capped at 8 GiB on larger disks (observed ~4G) |
+| **`data`** LV — **LVM-thin pool** | The remainder; surfaces as the `local-lvm` storage for VM disks — the contract's `vm_storage=local-lvm`. Observed 11.8G |
+
+Consequences worth knowing:
+
+- **A fresh node needs zero post-install storage work**: `local` and
+  `local-lvm` exist with the right content types, so the hypervisor Device's
+  `vm_storage`/`import_storage` CFs match out of the box and the VM deploy
+  jobs can target it immediately.
+- The **whole selected disk is wiped** — the disk filter in the profile is the
+  only thing standing between the installer and a data disk, which is why the
+  SE350 profile pins the RAID volume's model string and single-disk boxes pin
+  `DEVNAME`.
+- Splits above are the installer's **auto-sizing**. For deterministic sizes,
+  declare them in the profile's `install.lvm` block (`hdsize`, `swapsize`,
+  `maxroot`, `maxvz`, `minfree` — GiB); they render into the answer file and
+  every node of that DeviceType gets the identical layout. That is the
+  SoT-honest mechanism: layout policy lives in the profile, not in anyone's
+  head. Rough expectation for a 500 GB NVMe at defaults: 1G ESP, 8G swap,
+  ~100G root, ~380G thin pool.
+- ZFS/Btrfs profiles use the same mechanism with their own option families
+  (`install.zfs` / `install.btrfs` — e.g. `zfs: {raid: raid1, ashift: 12}`);
+  the fleet standard stays ext4 + LVM-thin because the SE350's hardware RAID
+  presents a single volume (decision #27).
+
 ## Troubleshooting
 
 | Symptom | Look at |
