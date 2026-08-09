@@ -169,6 +169,12 @@ picky.)
 
 ```bash
 mkdir -p /srv/pxe-http && cp pxe/* /srv/pxe-http/
+# The generated boot.ipxe starts with a bare `dhcp` command — needed for
+# Proxmox's USB/embedded flows, redundant AND harmful in a chainload (the
+# NIC is already configured; re-opening it mid-script wedged the NUC's SNP
+# stack: boot.ipxe fetched fine, then every later fetch timed out without
+# a single packet reaching the server). Strip it for the netboot copy:
+sed -i '/^dhcp$/d' /srv/pxe-http/boot.ipxe
 # systemd unit: python3 -m http.server 8077 --directory /srv/pxe-http
 # dnsmasq: dhcp-boot=tag:ipxe,http://<boot-server>:8077/boot.ipxe
 ```
