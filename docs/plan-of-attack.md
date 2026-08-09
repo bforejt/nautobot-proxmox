@@ -127,7 +127,7 @@ code path entered at different layers.
 | ESXi concept / robot step | Proxmox VE 9.x equivalent | Mechanism |
 |---|---|---|
 | Interactive robot Q&A (site code, subnets, server 1/2) | Nautobot design job inputs; intent stored in SoT | `SiteNfvDesignJob` |
-| Fresh ESXi install (manual/kickstart) | Automated-installer ISO + `answer.toml` | Redfish vmedia mount + one-time CD boot; `proxmox-auto-install-assistant` |
+| Fresh ESXi install (manual/kickstart) | Automated-installer ISO + `answer.toml` | Redfish vmedia mount + one-time CD boot (primary); PXE secondary, official since PVE 9.2 (decision #41); `proxmox-auto-install-assistant` |
 | Host power policy = High Performance | Firmware standard confirmed (legacy XCC BIOS tool, carried verbatim in `bmc/se350_bios.yaml`): **Custom Mode** with explicit knobs — C-States/C1E/Energy-Efficient-Turbo disabled, MONITOR/MWAIT enabled, Power/Performance Bias = Platform Controlled → Maximum Performance, Thermal Mode = Performance. Kernel C-state cmdline caps become defense-in-depth (likely redundant with BIOS-level disable — lab-confirm); governor already `performance` with intel_pstate | `bmc/` BIOS policy + firstboot hook |
 | vSwitch + LAG (dot1q trunk; today `channel-group mode on` — static, a vSS limitation) | `bond0`: bond-mode `802.3ad`, xmit-hash `layer2+3` (pair with Cisco `src-dst-ip`; 9300 default is `src-mac` — change it), miimon 100. **Switch ports flip `mode on`→`mode active` in the same window** — both mismatch directions black-hole (see site-reference-architecture.md) | `POST /nodes/{n}/network` (staged) + `PUT /nodes/{n}/network` (apply, ifupdown2, live) |
 | Port groups (one per VLAN; `LOC_NAME_VlanNum` naming) | ONE VLAN-aware data bridge `vmbr1` ("LAN-Trunk" equivalent; `bridge_vlan_aware=1`, `bridge_vids` = site VLAN list from IPAM — VLAN 1 excluded by default; MTU 9000) + `vmbr0` for mgmt (= vSwitch0). Port-group naming becomes the Nautobot VLAN naming standard; VMInterface↔VLAN assignment replaces the port-group object | Same network API |
@@ -153,7 +153,7 @@ code path entered at different layers.
 **Layers, each an idempotent job runnable standalone, chained by a thin wrapper:**
 
 ```
-L0 bare-metal    XCC Redfish vmedia → auto-install ISO → answer.toml → firstboot hook
+L0 bare-metal    BMC vmedia (primary; PXE secondary) → auto-install → answer.toml → firstboot
 L1 host baseline verify/converge tuning (cmdline asserts, ethtool unit, apt repos, certs)
 L2 host network  verify/converge bond0 + vmbr0 (firstboot builds it; job diffs, no-ops)
 L3 VM provision  image ingest → VM create from profile → day-0 ISO → autoboot order
@@ -380,15 +380,25 @@ decisions in §6.
   follows); `proposed_additions` (COM1 console redirect explicit, serial-port sharing
   off, Secure Boot off) pend team sign-off. Exact Redfish attribute spellings/enums
   get verified by the discovery job dump before first PATCH `[lab-verify]`.
-- ISO/answer decision resolved: **one generic prepared ISO + HTTP answer fetch**. Note the
-  real coupling — with `--fetch-from http` the URL + cert fingerprint are baked at
-  prepare time, so it's one ISO per (PVE release × answer-service endpoint); DHCP option
-  250 or DNS TXT discovery would make it fully generic `[decision-needed — pick the
-  discovery mode]`. CI runs `proxmox-auto-install-assistant validate-answer` on rendered
-  answers. answer.toml: **ext4 + LVM-thin on the hardware-RAID volume** (the Marvell
-  controller presents a single disk — fleet standard; no ZFS, no ARC reservation),
-  disk filter matched to the RAID volume's model/serial string so a data disk can
-  never be selected.
+- ISO/answer decision resolved: **one generic prepared ISO + HTTP answer fetch**
+  (verified Aug 2026 against installer source: the answer request POSTs DMI
+  system/baseboard/chassis serials, UUID, product name, and every NIC's link+MAC —
+  per-node server-side rendering is the documented pattern; PVE 9.2 adds a bearer
+  `--answer-auth-token` so the service can authenticate nodes). **Delivery decided
+  (2026-08-09, decision #41): Redfish vmedia primary, PXE secondary.** PVE 9.2's
+  `prepare-iso --pxe --pxe-loader ipxe` emits the *same* prepared artifact as
+  kernel + initrd + iPXE snippet, so PXE is a delivery-layer option, not a fork —
+  its caveats (full ~1.6–1.9 GB ISO into RAM ≥4 GB; UEFI+HTTP the reliable combo;
+  needs DHCP/proxyDHCP; Secure-Boot-over-PXE undemonstrated) make it the lab/staging
+  path and the unlicensed-BMC escape hatch. Discovery mode follows delivery: vmedia
+  at field sites (no DHCP control) → baked `--url` + cert fingerprint (accepting one
+  ISO per PVE release × endpoint); PXE/lab → DHCP option 250
+  (`proxmox-auto-installer-manifest-url`) or DNS TXT
+  `proxmox-auto-installer.<search-domain>`. CI runs `proxmox-auto-install-assistant
+  validate-answer` on rendered answers. answer.toml: **ext4 + LVM-thin on the
+  hardware-RAID volume** (the Marvell controller presents a single disk — fleet
+  standard; no ZFS, no ARC reservation), disk filter matched to the RAID volume's
+  model/serial string so a data disk can never be selected.
 - Firstboot hook (small fetch-and-exec stub): kernel cmdline (C-states, serial console —
   both GRUB and proxmox-boot-tool paths), ethtool/`disable-fw-lldp` systemd oneshot, NIC
   name pinning, **final network topology** (`vmbr0` = active-backup bond on the copper
@@ -455,7 +465,7 @@ it (hugepages and affinity are root@pam-only; the `HostBaselineJob` path applies
 Golden Config
 for VNF configs (forces the dual-record modeling decision). Packaged Nautobot App (when
 custom models or pinned pip dependencies appear — Git-synced jobs can't declare
-dependencies). Packer-built Ubuntu golden templates in CI. PXE as an ISO alternative. SoT converge engine (`ConvergeVmJob`: intent-vs-actual diff/apply with hot/restart/redeploy change classes) + JobHook-triggered drift reports on watched-field edits — the SoT-as-control-plane trajectory (decision #40).
+dependencies). Packer-built Ubuntu golden templates in CI. PXE delivery exercised in the lab as the decided secondary path (same prepared artifact via `prepare-iso --pxe`; decision #41). SoT converge engine (`ConvergeVmJob`: intent-vs-actual diff/apply with hot/restart/redeploy change classes) + JobHook-triggered drift reports on watched-field edits — the SoT-as-control-plane trajectory (decision #40).
 
 ---
 
@@ -553,8 +563,10 @@ nautobot-proxmox/
 11. Decided (Aug 2026): **nautobot-composer will be reachable from field nodes** —
     scenario-2 field redeploys use `download-url` pulls directly; no upload-API
     fallback needed. (XCC1 vmedia separately forces plain HTTP for the install ISO.)
-12. `[decision-needed]` Answer-service discovery mode: baked `--fetch-from` URL vs DHCP
-    option 250 vs DNS TXT; where the service runs; who owns it.
+12. Discovery mode resolved with delivery decision #41 (2026-08-09): baked `--url` +
+    cert fingerprint for the vmedia/field path (no site-DHCP dependency); DHCP option
+    250 for the PXE/lab path. The service runs alongside nautobot-composer. Remaining
+    `[decision-needed]`: who owns the answer service in production.
 13. `[lab-verify]` Xeon D-2100 + PVE 9 (kernel 6.14+) burn-in before fleet rollout.
 
 **VNF guests**
