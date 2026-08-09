@@ -149,8 +149,25 @@ systemctl restart dnsmasq
 
 Artifacts: `prepare-install-iso.sh --pxe` emits `pxe/` (vmlinuz, initrd.img,
 the prepared ISO, `boot.ipxe` with relative paths — publish the whole
-directory to composer at `/images/pxe/`, no URL editing needed). The iPXE
-menu defaults to the automated target after 10 s.
+directory, no URL editing needed). The iPXE menu defaults to the automated
+target after 10 s.
+
+**Serve the PXE payloads from the boot server itself** (e.g.
+`/srv/pxe-http` behind a trivial HTTP server on the same box running
+dnsmasq), not from a container port-forward on a workstation. Learned the
+hard way: iPXE's minimal TCP stack fetched flakily (1-in-3) through Docker
+Desktop's macOS port-forwarding proxy while every full OS fetched the same
+URL perfectly — the DHCP/TFTP side looked healthy and only the HTTP hop
+failed. A plain Linux HTTP server on wired L2 is the battle-tested iPXE
+path. (The installer itself — a full Linux stack — fetches its answer from
+the containerized answer service without issue; only the iPXE stage is
+picky.)
+
+```bash
+mkdir -p /srv/pxe-http && cp pxe/* /srv/pxe-http/
+# systemd unit: python3 -m http.server 8077 --directory /srv/pxe-http
+# dnsmasq: dhcp-boot=tag:ipxe,http://<boot-server>:8077/boot.ipxe
+```
 
 Target machine: UEFI boot mode, Secure Boot off for the netboot (the
 *installed* system is SB-signed regardless), ≥4 GB RAM (the whole installer
