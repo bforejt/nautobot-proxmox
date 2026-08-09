@@ -1,0 +1,25 @@
+# Install profile: Lenovo ThinkSystem SE350 (XCC1) — the physical edge target.
+# Delivery via Redfish virtual media (decision #41 primary); the XCC1 quirks
+# (PATCH-on-EXT insert, plain-HTTP ISO URL only, Enterprise FoD required) are
+# handled by the dual-mode client in jobs/lib/redfish_discovery.py.
+device_type: "ThinkSystem SE350"
+
+install:
+  filesystem: ext4            # decision #27: ext4 + LVM-thin on the RAID volume
+  network_source: from-answer
+  # Marvell 88SE9230 hardware RAID presents ONE virtual disk from the M.2 set.
+  # [lab-verify] the exact ID_MODEL/ID_SERIAL string a real unit enumerates
+  # (plan-of-attack §6 item 4) — pinned so a data disk can never be selected.
+  disk_filter:
+    ID_MODEL: "*88SE9230*"    # placeholder until lab-verified
+  reboot_mode: reboot         # boot-once CD override clears; falls to disk
+  # LVM sizing (ext4/xfs options live under lvm.* in the answer schema):
+  # lvm:
+  #   hdsize: 200             # GiB for the PVE volume group; rest stays free
+  #   swapsize: 8
+
+delivery:
+  method: redfish-vmedia
+  # ISO URL constraint: XCC1 mounts plain HTTP only (composer's plain-HTTP
+  # vhost). The answer fetch inside the installer CAN still be HTTPS
+  # (prepare-iso --fingerprint) — the two are independent channels.

@@ -1,0 +1,45 @@
+{#- Proxmox automated-installer answer file, rendered per node from Nautobot.
+    Kebab-case keys (snake_case deprecated as of PVE 9.0). Validate rendered
+    output with `proxmox-auto-install-assistant validate-answer`. -#}
+[global]
+keyboard = "{{ keyboard }}"
+country = "{{ country }}"
+fqdn = "{{ fqdn }}"
+mailto = "{{ mailto }}"
+timezone = "{{ timezone }}"
+root-password-hashed = "{{ root_password_hashed }}"
+{% if root_ssh_keys -%}
+root-ssh-keys = [{% for k in root_ssh_keys %}"{{ k }}"{{ ", " if not loop.last }}{% endfor %}]
+{% endif -%}
+reboot-on-error = false
+reboot-mode = "{{ reboot_mode }}"
+
+[network]
+source = "{{ network_source }}"
+{% if network_source == "from-answer" -%}
+cidr = "{{ cidr }}"
+gateway = "{{ gateway }}"
+dns = "{{ dns }}"
+{% for key, glob in net_filter.items() -%}
+filter.{{ key }} = "{{ glob }}"
+{% endfor -%}
+{% endif %}
+[disk-setup]
+filesystem = "{{ filesystem }}"
+{# fs option family: lvm.* for ext4/xfs (no ext4.*/xfs.* keys exist);
+   zfs.*/btrfs.* for those filesystems — fs_family computed by the app. -#}
+{% for key, value in fs_options.items() -%}
+{{ fs_family }}.{{ key }} = {{ value if value is number else '"%s"' % value }}
+{% endfor -%}
+{% for key, glob in disk_filter.items() -%}
+filter.{{ key }} = "{{ glob }}"
+{% endfor %}
+[first-boot]
+source = "from-url"
+url = "{{ firstboot_url }}"
+ordering = "fully-up"
+{% if cert_fingerprint -%}
+cert-fingerprint = "{{ cert_fingerprint }}"
+{% endif %}
+[post-installation-webhook]
+url = "{{ webhook_url }}"

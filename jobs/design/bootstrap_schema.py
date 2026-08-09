@@ -91,6 +91,9 @@ class BootstrapNfvSchema(Job):
             ("Cisco Systems", "C8000v", 0),
             ("Cisco Systems", "C9800-CL", 0),
             ("Canonical", "Ubuntu Jump Host VM", 0),
+            # L0 lab kit: a VM on a lab Proxmox host standing in for a blank
+            # physical server (bmc/profiles/nested-lab-node.yaml).
+            ("Proxmox", "Nested Lab Node", 0),
         ]
         for mfr_name, model, u_height in device_types:
             mfr, m_created = Manufacturer.objects.get_or_create(name=mfr_name)
@@ -102,7 +105,9 @@ class BootstrapNfvSchema(Job):
             self._log_result("DeviceType", f"{mfr_name} {model}", created)
 
         # ---- Platforms ----
-        for platform_name in ("ubuntu-jumphost", "paloalto-panos", "cisco-iosxe"):
+        # proxmox-ve: the hypervisors' own OS — installer images register as
+        # SoftwareVersions under it (same Staged->Active gate as guest images).
+        for platform_name in ("ubuntu-jumphost", "paloalto-panos", "cisco-iosxe", "proxmox-ve"):
             _, created = Platform.objects.get_or_create(name=platform_name)
             self._log_result("Platform", platform_name, created)
 

@@ -64,9 +64,9 @@ doesn't.
 
 | Gap | Impact | Where it goes |
 |---|---|---|
-| **Bare-metal track unbuilt** (Phase 3: XCC → PVE install) | Can't go from a blank SE350 to a running node automatically; node must be hand-installed | Colleague's `xcc_deploy` + the plan's L0 |
+| **Bare-metal track: L0 lab kit built, hardware leg unproven** (Phase 3) | The full install loop (answer service → unattended install → firstboot credential bootstrap → state write-back) is implemented and lab-testable via the nested adapter ([baremetal-install.md](baremetal-install.md)); the physical vmedia leg awaits the SE350 write test + dress rehearsal | Run the nested loop; then the discovery job's opt-in checks on a real unit |
 | **Host baseline + network jobs unbuilt** (L1/L2: bond/bridge/tuning) | Node networking (LACP, VLAN-aware bridge, MTU) is manual today | firstboot hook + `DeployHostNetworkJob` |
-| **Service-account bootstrap manual** | Every node's automation token created by hand | pveum in the firstboot hook (plan §3) |
+| **Service-account bootstrap manual** *(closed for installed-by-us nodes)* | Nodes installed via the L0 loop get `svc-nfv@pve!deploy` + role + SecretsGroup automatically (firstboot → phone-home); hand-built hosts still follow the manual pveum steps | [baremetal-install.md](baremetal-install.md); manual path in getting-started §4 |
 | **Template build is a script, not a job** | Rebuilds need an operator with build-node SSH running [build-template.sh](../vnf-profiles/ubuntu/build-template.sh), not a button | A build-template job |
 | **Image registration is manual** | Version + image file + `download_url` entered by hand per environment | A registration helper / the build-template job |
 | **Layout engine has no reference implementation** | Each adopter must author their Design Builder design from the contract; the getting-started worked example demonstrates the shape by hand | Adopter responsibility; a reference design would help |
