@@ -131,7 +131,11 @@ PXE-requesting clients in proxy mode):
 
 ```bash
 apt-get install -y dnsmasq ipxe
-mkdir -p /srv/tftp && cp /usr/lib/ipxe/ipxe.efi /srv/tftp/
+# snponly.efi drives the NIC through the UEFI firmware's own driver — use it
+# for the chainload. Field-debugged: native-driver ipxe.efi stalled mid-
+# download ("Connection timed out") on an Intel NUC's i219 during sustained
+# transfers, while small fetches and TFTP worked; snponly is the standard fix.
+mkdir -p /srv/tftp && cp /usr/lib/ipxe/snponly.efi /srv/tftp/
 cat > /etc/dnsmasq.d/nfv-pxe.conf <<'EOF'
 port=0
 interface=vmbr0
@@ -140,7 +144,7 @@ dhcp-range=10.40.2.0,proxy,255.255.254.0     # your subnet
 enable-tftp
 tftp-root=/srv/tftp
 dhcp-match=set:ipxe,175
-pxe-service=tag:!ipxe,X86-64_EFI,"Chainload iPXE",ipxe.efi
+pxe-service=tag:!ipxe,X86-64_EFI,"Chainload iPXE",snponly.efi
 dhcp-boot=tag:ipxe,http://<composer>/images/pxe/boot.ipxe
 pxe-prompt="NFV auto-install",3
 EOF
