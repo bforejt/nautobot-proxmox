@@ -83,10 +83,12 @@ class DiscoverSe350Platform(Job):
     test_iso_url = StringVar(
         label="Test ISO URL",
         description=(
-            "HTTP(S) URL of a small ISO for the write test. Must be plain HTTP for "
-            "SE350/XCC1 (no authenticated HTTPS)."
+            "URL of a small bootable ISO for the write test — e.g. "
+            "http://<composer-host>/images/<file>.iso. Must be plain HTTP for "
+            "SE350/XCC1 (no authenticated HTTPS). Required when the write test "
+            "is enabled."
         ),
-        default="http://provisioning.example.internal/isos/test.iso",
+        default="",
         required=False,
     )
 
@@ -133,6 +135,13 @@ class DiscoverSe350Platform(Job):
         self._log_thermal_probe(report.get("chassis", {}))
         self._attach_files(report)
 
+        if run_vmedia_write_test and not (test_iso_url or "").strip():
+            self.logger.error(
+                "Write test enabled but no Test ISO URL given — host a small "
+                "bootable ISO at a plain-HTTP URL (e.g. the composer firmware "
+                "server: http://<host>/images/<file>.iso) and re-run."
+            )
+            raise ValueError("run_vmedia_write_test requires test_iso_url")
         if dress_rehearsal_reboot and not run_vmedia_write_test:
             self.logger.error(
                 "Dress rehearsal requested without the write test enabled — enable "

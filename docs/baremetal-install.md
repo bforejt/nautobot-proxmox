@@ -195,9 +195,10 @@ BMC IP (contract §4) and Secrets `xcc_username`/`xcc_password`. The
 `redfish-vmedia` adapter auto-detects XCC1 (PATCH-on-EXT, plain-HTTP ISO) vs
 XCC2 (standard InsertMedia), arms a one-shot CD boot, and powers on.
 Remaining `[lab-verify]` on a real SE350: the vmedia write test + boot dress
-rehearsal (already built into `SE350 Platform Discovery` as opt-in checks) and
-the RAID volume's `ID_MODEL` string for the
-[profile's disk filter](../bmc/profiles/thinksystem-se350.yaml).
+rehearsal (already built into `SE350 Platform Discovery` as opt-in checks —
+**tester procedure: [se350-verification-checklist.md §1
+runbook](se350-verification-checklist.md)**) and the RAID volume's `ID_MODEL`
+string for the [profile's disk filter](../bmc/profiles/thinksystem-se350.yaml).
 
 Other vendors (iDRAC/iLO/Supermicro) = a new profile + at most a small vmedia
 quirk in the client; the answer service and job don't change. Note every

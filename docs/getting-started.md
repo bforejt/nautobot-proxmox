@@ -12,10 +12,13 @@ they are fine as manual one-time setup today.
 ## 1. Connect the jobs
 
 ⚙️ Extensibility → **Git Repositories** → Add this repo, Provides: **jobs**,
-Sync. Then Jobs → run **`Bootstrap NFV Data Model`** once (it is idempotent —
-re-run any time; re-running after a repo update adds only what is new). This
-creates every role, relationship, DeviceType, platform, and custom field the
-other jobs rely on.
+Sync. Git-synced jobs arrive **disabled** — enable each one under Jobs before
+its Run button works. Then run **`Bootstrap NFV Data Model`** once (it is
+idempotent — re-run any time; re-running after a repo update adds only what is
+new). This creates every role, relationship, DeviceType, platform, status, and
+custom field the other jobs rely on. (Standing up the stack fresh with
+nautobot-composer? Use `./setup.sh -v 2.4` — these jobs target Nautobot 2.4.x,
+not 3.x, per the README requirements.)
 
 ## 2. Firmware/image server
 
@@ -29,6 +32,10 @@ at this server unless a specific image lives elsewhere.
 
 - **Console password** (cloud-init guests): create Secret
   `jumphost_console_password` (text-file provider or your backend).
+- **XCC/BMC credentials** (SE350 discovery + bare-metal track): Secrets named
+  exactly `xcc_username` and `xcc_password`. On a nautobot-composer stack:
+  `./add-secret.sh xcc_username` / `./add-secret.sh xcc_password`, then Secret
+  records with provider *Text File*, path `/opt/nautobot/secrets/<name>`.
 - **Proxmox API token(s)** — two ways:
   - **Single host (quickstart)**: create Secrets `proxmox_token_id`
     (value = `user@realm!tokenname`) and `proxmox_token_secret` (the UUID). The

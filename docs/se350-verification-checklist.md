@@ -40,6 +40,46 @@ Notes: only `EXT{N}` members are Redfish-insertable, via **PATCH** on the member
 POST InsertMedia) on XCC firmware "19A"+; ISO URLs must be **plain HTTP or credential-less
 NFS** — no authenticated HTTPS. Record whether FoD keys are transferable to spare units.
 
+### Runbook: vmedia write test + dress rehearsal (tester procedure)
+
+Prerequisites (once):
+
+1. Nautobot has this repo synced as a Git Repository (Provides: *jobs*) — then
+   **enable** `SE350 Platform Discovery` under Jobs (Git-synced jobs arrive
+   disabled).
+2. Secrets named exactly **`xcc_username`** and **`xcc_password`** holding the
+   XCC login. On a nautobot-composer stack: `./add-secret.sh xcc_username` and
+   `./add-secret.sh xcc_password` on the host, then two Secret records with
+   provider *Text File*, paths `/opt/nautobot/secrets/xcc_username` /
+   `…/xcc_password`. Use "Check Secret" to verify they resolve.
+3. A small **bootable, UEFI-capable ISO** at a **plain-HTTP** URL the XCC can
+   reach (netboot.xyz or a Debian netinst work well). On composer: upload via
+   Filebrowser (`http://<composer>:8088`, creds in `.env`), then verify
+   `curl -I http://<composer>/images/<file>.iso` returns 200. If
+   `FIRMWARE_ALLOWED_CIDRS` was tightened, the **BMC's subnet** must be in it —
+   the XCC, not the host, pulls the ISO. If §9 finds Secure Boot enabled, use a
+   signed ISO (or disable SB for the test).
+
+**Run 1 — write test (safe: touches only the BMC, never power or disks).**
+Run `SE350 Platform Discovery`: `BMC (XCC) IP Address` = the unit's XCC IP,
+tick **Run virtual-media WRITE test**, set **Test ISO URL** to your real URL
+(replace the placeholder). Pass = log shows
+`CHECKLIST §1 WRITE CHECK PASS: media shows Inserted=true` and
+`Eject verified — BMC left in its original media state.`
+
+**Run 2 — dress rehearsal (DISRUPTIVE: power-cycles the unit; lab machines
+only).** Open the XCC remote console first — the job cannot see the screen;
+you are the boot verifier. Re-run with **both** `Run virtual-media WRITE
+test` **and** `DISRUPTIVE: full dress rehearsal (boot the ISO)` ticked (the
+rehearsal box alone is refused). The job re-mounts, arms a one-shot CD boot
+override, and power-cycles. **Pass = the test ISO visibly boots on the
+console.** Media is deliberately left mounted.
+
+**Cleanup.** Re-run with only the write test ticked (that ejects — look for
+`Eject verified`); the boot override self-cleared after the one boot;
+power-cycle the unit back to its disk. Attach the JobResult JSON files
+(`virtual_media.json` etc.) and the console photo/screenshot to the findings.
+
 ## 2. XCC / UEFI firmware inventory
 
 Record XCC and UEFI build levels per unit (`GET /redfish/v1/UpdateService/FirmwareInventory`
