@@ -490,6 +490,14 @@ def _firstboot_credentials_impl(body: dict, client_host: str | None) -> dict:
 
     cf = dict(device.get("custom_fields") or {})
     cf["secrets_group"] = group_name
+    # Belt and suspenders with the webhook: firstboot running IS proof the
+    # install succeeded (it only executes on the installed OS), so advance
+    # the state here too. Field lesson (PXE NUC, 2026-08-09): the webhook
+    # can be lost, and on the PXE path no job is watching — a stuck
+    # awaiting_install leaves the reinstall gate open.
+    if cf.get("provisioning_state") == "awaiting_install":
+        cf["provisioning_state"] = "bm_installed"
+        log.info("state advanced to bm_installed via credentials phone-home (webhook missed?)")
     _nb("PATCH", f"/dcim/devices/{device['id']}/", json={"custom_fields": cf})
     # Everything durable — only now is the one-time key spent.
     consume_key(key, serial, "credentials")
