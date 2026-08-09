@@ -1,0 +1,28 @@
+# Install profile: "Nested Lab Node" DeviceType — a VM on an existing lab
+# Proxmox host standing in for a blank physical server. This is the delivery
+# adapter that lets the ENTIRE L0 loop (identity POST -> answer service ->
+# unattended install -> firstboot pveum bootstrap -> webhook state flip) be
+# proven without SE350 hardware. See docs/baremetal-install.md.
+device_type: "Nested Lab Node"
+
+install:
+  filesystem: ext4            # fleet standard (decision #27): ext4 + LVM-thin
+  network_source: from-answer # static mgmt from primary_ip4 + DefaultGW
+  # The nested VM's single virtio-scsi disk. QEMU disks enumerate with
+  # ID_MODEL "QEMU HARDDISK" — specific enough here because the build VM has
+  # exactly one disk.
+  disk_filter:
+    ID_MODEL: "*QEMU*"
+  # The prepared ISO auto-selects "Automated Installation" on every boot, so a
+  # nested VM that reboots with the ISO still attached would reinstall forever.
+  # power-off lets the install job detach the ISO and restart clean.
+  reboot_mode: power-off
+
+delivery:
+  method: pve-nested
+  vm:
+    memory_mb: 4096
+    cores: 2
+    disk_gb: 32
+    bridge: vmbr0
+    iso_storage: local        # storage with `iso` content on the carrier host
