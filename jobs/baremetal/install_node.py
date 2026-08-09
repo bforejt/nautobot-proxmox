@@ -251,6 +251,14 @@ class InstallProxmoxNode(Job):
                 self._install_nested(device, profile, image)
             elif method == "redfish-vmedia":
                 self._install_vmedia(device, image)
+            elif method == "pxe":
+                raise ContractViolation(
+                    f"{device.device_type.model} installs via PXE — there is no "
+                    "job step. Power the machine on (netboot); the answer "
+                    "service drives the install and the state machine. This "
+                    "job is only needed for deliveries that must push boot "
+                    "media (nested VM, BMC virtual media)."
+                )
             else:
                 raise ContractViolation(
                     f"Unknown delivery method {method!r} in the "

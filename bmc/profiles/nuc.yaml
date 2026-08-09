@@ -1,0 +1,25 @@
+# Install profile: Intel NUC — generic small x86 box used as a real-hardware
+# PXE test target (and a perfectly good standalone lab hypervisor).
+# Delivery is PXE: there is NO job step — set the Device to awaiting_install
+# and power the machine on; the boot server + answer service do the rest.
+device_type: "NUC"
+
+install:
+  filesystem: ext4            # fleet standard: ext4 + LVM-thin
+  network_source: from-answer # static when primary_ip4 set; DHCP otherwise
+  # Single-disk box: select by device name. NVMe models enumerate nvme0n1;
+  # change to /dev/sda for SATA-disk units.
+  disk_filter:
+    DEVNAME: "/dev/nvme0n1"
+  reboot_mode: reboot         # PXE was one-time (F12/boot order) — falls to disk
+  # Pin the layout if you want deterministic sizes (else installer defaults):
+  # lvm:
+  #   swapsize: 8             # GiB
+  #   maxroot: 32             # GiB cap for the root LV
+
+delivery:
+  method: pxe
+  # No adapter: the prepared PXE artifact set (scripts/prepare-install-iso.sh
+  # --pxe) is served by the lab boot server (dnsmasq proxyDHCP + TFTP ->
+  # iPXE -> HTTP). The serial allowlist makes the standing service safe —
+  # unknown machines that netboot get a 403 and install nothing.

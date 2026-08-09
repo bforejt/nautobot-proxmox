@@ -94,6 +94,9 @@ class BootstrapNfvSchema(Job):
             # L0 lab kit: a VM on a lab Proxmox host standing in for a blank
             # physical server (bmc/profiles/nested-lab-node.yaml).
             ("Proxmox", "Nested Lab Node", 0),
+            # Real-hardware PXE test target / small lab hypervisor
+            # (bmc/profiles/nuc.yaml).
+            ("Intel", "NUC", 1),
         ]
         for mfr_name, model, u_height in device_types:
             mfr, m_created = Manufacturer.objects.get_or_create(name=mfr_name)

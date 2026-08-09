@@ -117,6 +117,50 @@ text-file Secrets, creates SecretsGroup `<name>-proxmox`, and sets the
 Device's `secrets_group` CF. **The node is now deployable by the existing VM
 jobs with zero manual credential steps.**
 
+## The PXE path (real hardware, no BMC needed)
+
+Same loop, self-delivering: there is **no job run at all** — set the Device to
+`awaiting_install` and power the machine on. Blank disks fall through to
+netboot; the answer service does everything else. The serial allowlist is what
+makes a *standing* boot service safe: unknown machines get the installer menu,
+POST their identity, get a 403, and install nothing.
+
+One-time boot-server setup (any Debian box on the target L2 — a lab Proxmox
+host works; **no changes to the site's DHCP server**, dnsmasq answers only
+PXE-requesting clients in proxy mode):
+
+```bash
+apt-get install -y dnsmasq ipxe
+mkdir -p /srv/tftp && cp /usr/lib/ipxe/ipxe.efi /srv/tftp/
+cat > /etc/dnsmasq.d/nfv-pxe.conf <<'EOF'
+port=0
+interface=vmbr0
+bind-interfaces
+dhcp-range=10.40.2.0,proxy,255.255.254.0     # your subnet
+enable-tftp
+tftp-root=/srv/tftp
+dhcp-match=set:ipxe,175
+pxe-service=tag:!ipxe,X86-64_EFI,"Chainload iPXE",ipxe.efi
+dhcp-boot=tag:ipxe,http://<composer>/images/pxe/boot.ipxe
+pxe-prompt="NFV auto-install",3
+EOF
+systemctl restart dnsmasq
+```
+
+Artifacts: `prepare-install-iso.sh --pxe` emits `pxe/` (vmlinuz, initrd.img,
+the prepared ISO, `boot.ipxe` with relative paths — publish the whole
+directory to composer at `/images/pxe/`, no URL editing needed). The iPXE
+menu defaults to the automated target after 10 s.
+
+Target machine: UEFI boot mode, Secure Boot off for the netboot (the
+*installed* system is SB-signed regardless), ≥4 GB RAM (the whole installer
+runs from RAM on PXE), one-time boot menu (F12) or netboot-first order. Serial
+discovery trick: netboot the machine once *before* creating its Device — the
+answer service's `REFUSED: unknown serial '...'` log line is the exact string
+to put in the Device's serial field. After the install, the allowlist also
+prevents reinstall loops: a machine that netboots again in `bm_installed`
+state is refused and boots from disk.
+
 ## Physical servers (SE350 and beyond)
 
 Same loop; only delivery differs. The Device needs an `xcc` interface with the
