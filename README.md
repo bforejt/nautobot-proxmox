@@ -1,103 +1,169 @@
 # nautobot-proxmox
 
-Nautobot-driven lifecycle automation for Proxmox VE NFV hypervisors — Lenovo ThinkEdge
-SE350 pairs running edge VNF workloads (Palo Alto VM-Series, Cisco Catalyst 8000v,
-Catalyst 9800-CL, Cisco SD-WAN edges, Ubuntu jump hosts).
+**Nautobot-driven lifecycle automation for Proxmox VE NFV hypervisors.** Given
+site intent in Nautobot (devices, IPAM, relationships), the jobs in this repo
+deploy, verify, and decommission VNF virtual machines on standalone Proxmox
+hosts — golden-image based, checksum-verified end to end, with every input read
+from Nautobot and every outcome written back to it. It replaces a legacy
+interactive "robot" that built ESXi-based NFV edge servers, keeping the same
+operating pattern: hosts are built and networked first; these jobs own
+everything from the VM layer up.
 
-**Status: planning + first tooling.** This repo holds the project documentation set
-produced from the initial analysis and research pass (August 2026), plus the first
-Nautobot Job: a read-only SE350 platform discovery that answers the Phase 0 checklist's
-Redfish questions (see *Jobs* below). Implementation follows the phased plan.
+## What works today
 
-## What this project is
+- ✅ **Ubuntu jump-host track, end to end and proven live**: golden template
+  build (Ubuntu 24.04 cloud image + declarative seed) → publish to the firmware
+  server → version registration with a human Staged→Active promotion gate →
+  SoT-driven deploy (one input: the Device) → console credentials from Secrets
+  → SoT-true decommission. A v1→v2 template rollout has been exercised for real.
+- ✅ **The data model and contract**: bootstrapped idempotently by a job; every
+  value the deploy reads is documented in one place.
+- ✅ **SE350/XCC platform discovery** (read-only Redfish sweep + optional
+  virtual-media write checks) for the future bare-metal track.
+- 🚧 **Not yet built**: Palo Alto / Cisco VNF day-0 builders (the deploy engine
+  is pluggable and ready for them), bare-metal Proxmox install via XCC, host
+  network/tuning automation, audit/converge jobs. See
+  [docs/deployment-onboarding.md](docs/deployment-onboarding.md) for the honest
+  gap register.
 
-We operate pairs of standalone edge hypervisors (no shared storage; redundancy comes from
-redundant VM pairs across the two hosts) and today build them with an ESXi + Python-robot
-process. This project replicates and improves that process on Proxmox VE 9.x, driven from
-Nautobot as the source of truth: a design job turns three operator inputs (site code,
-subnets, server 1/2) into complete Nautobot intent, and layered deploy jobs converge real
-hardware toward that intent — bare-metal install, host baseline/tuning, LACP + VLAN-aware
-bridge networking, golden-image VM deploys with per-VNF day-0 bootstrap, autoboot
-ordering, and serial/OpenGear out-of-band access.
+## Who this is for
 
-A companion bare-metal starter (Nautobot Job that triggers unattended Proxmox installs
-via XCC Redfish virtual media, targeting SE455 V3) is being developed in parallel and
-merges into this repo per the plan's proposed layout.
+Network/automation engineers who run **Nautobot as their source of truth** and
+manage **Proxmox hosts serving as NFV edge compute** (virtual firewalls,
+routers, WLCs, jump hosts — not general datacenter virtualization). You should
+be comfortable with Nautobot's data model (Devices, Interfaces, IPAM, custom
+fields, Secrets, Git-synced jobs) and basic Proxmox administration. The target
+environment is pairs of *standalone* hosts with no shared storage, where
+redundancy comes from running VM pairs across two independent machines —
+deliberately **never clustered** (a two-node Proxmox cluster without shared
+storage blocks VM autostart when one node dies).
 
-## Documentation set
+## How it works — five ideas
 
-Start here:
+1. **Nautobot is the single source of truth.** Site intent (which VMs exist,
+   where, with what sizes, addresses, MACs, software) is created *in Nautobot*
+   by your layout process — Network to Code (NtC) Design Builder, your own
+   design job, or by hand. The jobs here never invent data; they read it and converge
+   infrastructure to it. The exact records they read are specified in
+   [docs/sot-data-contract.md](docs/sot-data-contract.md).
+2. **Device status drives lifecycle.** A VNF Device in status **Planned** is
+   intent-not-yet-deployed. The deploy job builds it, records the Proxmox VMID
+   on the device, and flips it to **Active**. Decommissioning reverses both.
+   The record never lies about reality.
+3. **Golden images are versioned artifacts with a promotion gate.** Templates
+   are built from vendor bases + a git-reviewed seed, published to a firmware
+   server with checksums, and registered as Nautobot SoftwareVersions in
+   **Staged** status. A human promotes Staged → **Active**; deploys refuse
+   anything else. Rollout and rollback are status flips, not file copies. See
+   [docs/image-lifecycle.md](docs/image-lifecycle.md).
+4. **Jobs fail closed.** Any missing contract datum (no sizing, no image, no
+   gateway, no credentials) is a precise refusal *before* anything is touched —
+   never a guess or a half-deploy.
+5. **Least privilege throughout.** Proxmox access uses a privilege-separated
+   API token with a documented custom role; images are checksum-verified at
+   every hop; passwords live in Nautobot Secrets and are hashed at rest on the
+   hypervisor.
 
-| Document | What it is |
+## Requirements
+
+| Component | Version / notes |
 |---|---|
-| [docs/plan-of-attack.md](docs/plan-of-attack.md) | **The main document.** Assessment & feedback, ESXi→Proxmox translation table, architecture spine, phased plan, proposed repo layout, and the consolidated `[lab-verify]` / `[decision-needed]` list (§6). |
-| [docs/getting-started.md](docs/getting-started.md) | **New-environment setup checklist** — the one-time steps to run the deploy jobs against an existing Proxmox host in a fresh lab. |
-| [docs/sot-data-contract.md](docs/sot-data-contract.md) | The exact Nautobot records the deploy jobs read (roster, sizing, networking, credentials, console login) — the interface your layout process fills. |
-| [docs/image-lifecycle.md](docs/image-lifecycle.md) | Golden-image build/publish/register/promote/deploy lifecycle. |
-| [docs/deployment-onboarding.md](docs/deployment-onboarding.md) | Portability assessment + gap register (what's turnkey, what isn't). |
-| [docs/decision-log.md](docs/decision-log.md) | Running log of decisions made and still open. |
-| [docs/site-reference-architecture.md](docs/site-reference-architecture.md) | The café-model site standard the automation reproduces: VLAN plan, switching/wiring, DIA model, the static→LACP port-channel flip, ESXi host-tweak translation, sizing policy. |
-| [docs/se350-verification-checklist.md](docs/se350-verification-checklist.md) | Actionable Phase 0 lab checklist for the SE350 platform (Redfish vmedia functional check, BIOS dump, M.2/AHCI, wiring/EtherChannel capture). |
+| **Nautobot** | 2.4.x (built and tested on 2.4.30). Needs core `SoftwareVersion`/`SoftwareImageFile` (2.2+). Nautobot 3.x is planned but not yet targeted. |
+| **Proxmox VE** | 9.x (validated on 9.2). Requires the `import` storage content type and API-token auth. Hosts are **standalone** (no cluster). |
+| **Firmware/image server** | Any HTTP(S) server the Proxmox nodes can reach at stable `/images/<file>` URLs. The [nautobot-composer](https://github.com/bforejt/nautobot-composer) project's `firmware` profile provides one (nginx + Filebrowser). |
+| **Git host** | Anywhere Nautobot can sync this repo from (GitHub today; any git remote works). |
+| **Network paths** | Nautobot worker → Proxmox API (`:8006`); Proxmox nodes → firmware server; Nautobot → git host. Nothing else. |
+| **Hypervisor hardware** | Any x86 Proxmox host for the VM track (developed against a small NUC). SE350-specific material (BIOS policy, Redfish/XCC, wiring) applies to the edge-hardware track only. |
+| **Guest images** | Ubuntu 24.04 cloud image (fetched at template build). Vendor VNF images (PAN-OS, IOS-XE) are entitlement-gated downloads you supply. |
 
-Reference research (dense, per-dimension findings backing the plan):
+## Getting started
 
-| Document | Dimension |
-|---|---|
-| [docs/research/esxi-to-proxmox-host-networking.md](docs/research/esxi-to-proxmox-host-networking.md) | Host networking & tuning: bonds, VLAN-aware bridges, trunk-to-VM, power/C-states, NIC offloads, serial console, autoboot |
-| [docs/research/proxmox-automation-surface.md](docs/research/proxmox-automation-surface.md) | Proxmox API coverage, image import without shared storage, auto-installer, cluster-vs-standalone, storage layout |
-| [docs/research/vnf-guest-requirements.md](docs/research/vnf-guest-requirements.md) | Per-guest requirements: PA-VM, C8000v (autonomous + SD-WAN), 9800-CL, Ubuntu; the common day-0 abstraction |
-| [docs/research/nautobot-modeling-and-jobs.md](docs/research/nautobot-modeling-and-jobs.md) | Data modeling (one-host Clusters, VNFs as VMs), job architecture, app ecosystem, 2.4-LTM vs 3.x |
-| [docs/research/se350-platform-notes.md](docs/research/se350-platform-notes.md) | SE350 hardware, XCC1 Redfish mechanics & licensing, BIOS attributes, Security Pack/ThinkShield, EOL |
-| [docs/research/nfv-lifecycle-process.md](docs/research/nfv-lifecycle-process.md) | Process design: intent-vs-imperative split, layering, orchestration placement, cutover strategy |
+The full one-time checklist is **[docs/getting-started.md](docs/getting-started.md)**.
+The minimum loop to prove it in a new lab:
+
+1. Add this repo as a Nautobot **Git Repository** (provides: *jobs*), sync, and
+   run **`Bootstrap NFV Data Model`** once. ⚠️ The repo-root
+   [`__init__.py`](__init__.py) is load-bearing — Nautobot imports the checkout
+   as a package; without it, sync reports "No jobs were registered".
+2. Create the Secrets: a Proxmox API token pair (or a per-host SecretsGroup)
+   and the jump-host console password.
+3. Build a golden image with
+   [vnf-profiles/ubuntu/build-template.sh](vnf-profiles/ubuntu/build-template.sh),
+   publish it to your firmware server, and register it (SoftwareVersion
+   **Staged** → promote to **Active**).
+4. Create one hypervisor Device + one VNF Device (status **Planned**) per the
+   [contract](docs/sot-data-contract.md) — the worked example in
+   getting-started shows every required field.
+5. Run **`Deploy VNF Device (SoT-driven)`**. Log in at the VM console with the
+   configured user and Secret-stored password.
 
 ## Jobs
 
 | Job | What it does |
 |---|---|
-| `Bootstrap NFV Data Model` ([jobs/design/bootstrap_schema.py](jobs/design/bootstrap_schema.py)) | Idempotently creates the data-model prerequisites (Hosted On relationship, roles, virtual DeviceTypes, platforms, custom fields, platform tunables). Run once per environment; safe to re-run. |
-| `Deploy VNF Device (SoT-driven)` ([jobs/proxmox/deploy_device.py](jobs/proxmox/deploy_device.py)) | Deploys one Planned VNF Device reading everything from Nautobot per the [data contract](docs/sot-data-contract.md) — hypervisor via Hosted On, Active-gated image, sizing/tunables, pinned-MAC NICs, console credentials. Writes back VMID + flips to Active. Fail-closed on any missing datum. |
-| `Decommission VNF Device (SoT-driven)` ([jobs/proxmox/decommission_device.py](jobs/proxmox/decommission_device.py)) | SoT-true teardown: verifies vmid+name match, destroys the VM, writes back Active→Planned. Deploy+decommission = the redeploy primitive. |
-| `Ingest Image onto Proxmox Node` ([jobs/proxmox/ingest_image.py](jobs/proxmox/ingest_image.py)) | Device-driven idempotent pre-stage of a SoftwareImageFile onto a hypervisor's import storage — warm nodes ahead of maintenance windows. |
-| `SE350 Platform Discovery` ([jobs/baremetal/discover_platform.py](jobs/baremetal/discover_platform.py)) | Redfish sweep of one XCC: full BIOS attribute list (+ registry of allowed values when published), VirtualMedia EXT-member check, XCC/UEFI/NIC firmware versions, Secure Boot state — read-only by default, with checklist §1/§3 verdicts logged and JSON dumps attached to the JobResult. Opt-in **write checks**: virtual-media mount/verify/eject test (auto-detects XCC1 PATCH-on-EXT vs XCC2 InsertMedia — the dual-mode client seed), and a clearly-marked DISRUPTIVE dress rehearsal that boot-once's the mounted ISO (lab units only). |
+| `Bootstrap NFV Data Model` ([jobs/design/bootstrap_schema.py](jobs/design/bootstrap_schema.py)) | Idempotently creates the data-model prerequisites (Hosted On relationship, roles, virtual DeviceTypes, platforms, custom fields, platform tunables, the Staged/Retired image statuses). Run once per environment; safe to re-run after every update. |
+| `Deploy VNF Device (SoT-driven)` ([jobs/proxmox/deploy_device.py](jobs/proxmox/deploy_device.py)) | Deploys one Planned VNF Device reading everything from Nautobot per the contract — hypervisor via Hosted On, Active-gated image, sizing, pinned-MAC NICs, console credentials. Writes back VMID + flips to Active. |
+| `Decommission VNF Device (SoT-driven)` ([jobs/proxmox/decommission_device.py](jobs/proxmox/decommission_device.py)) | SoT-true teardown: verifies VMID+name match, destroys the VM, writes back Active→Planned. Deploy + decommission = the redeploy primitive. |
+| `Ingest Image onto Proxmox Node` ([jobs/proxmox/ingest_image.py](jobs/proxmox/ingest_image.py)) | Idempotent, checksum-verified pre-stage of an image onto a hypervisor — warm nodes ahead of maintenance windows. |
+| `SE350 Platform Discovery` ([jobs/baremetal/discover_platform.py](jobs/baremetal/discover_platform.py)) | Read-only Redfish sweep of a Lenovo XCC (BIOS attributes, virtual-media capability, firmware); opt-in write checks incl. a lab-only boot dress rehearsal. Edge-hardware track. |
 
-Setup (Nautobot 2.4):
+## Documentation map
 
-1. Add this repo as a **Git Repository** (Extensibility → Git Repositories), provides:
-   **jobs**, then Sync. Note the repo-root [`__init__.py`](__init__.py) is load-bearing:
-   Nautobot imports the checkout as a package named after the repo slug, and job
-   discovery finds nothing without it (sync warns "No jobs were registered").
-2. Create two Secrets named `xcc_username` and `xcc_password` (any provider — e.g.
-   Environment Variable on the worker), matching the bare-metal starter's convention.
-3. Enable the job (Jobs are disabled on first sync), run it against one lab XCC IP.
+**Operate** (start here):
 
-The pure-Python client ([jobs/lib/redfish_discovery.py](jobs/lib/redfish_discovery.py))
-also runs standalone: `python redfish_discovery.py --bmc-ip <ip> --username <u>
---password <p> --insecure`.
+| Doc | What it answers |
+|---|---|
+| [getting-started.md](docs/getting-started.md) | One-time setup for a new environment, step by step, with a worked example |
+| [sot-data-contract.md](docs/sot-data-contract.md) | Exactly which Nautobot records the jobs read and write |
+| [deployment-onboarding.md](docs/deployment-onboarding.md) | What's portable vs. what's still manual — the gap register |
+| [image-lifecycle.md](docs/image-lifecycle.md) | How golden images are built, versioned, promoted, rolled back (notes which steps are scripted vs. jobs) |
 
-## Key decisions so far
+**Design record**:
 
-- **Standalone Proxmox nodes, never clustered** — pairing modeled in Nautobot only
-  (proposed; see plan §1).
-- **One LACP bond + one VLAN-aware bridge** per host; trunks to self-tagging VNFs via
-  untagged/`trunks=` vNICs (proposed).
-- **Build on Nautobot 2.4 LTM** (current environment); 3.x upgrade is its own later
-  effort, targeted before Phase 4 (decided).
-- **PA-VM management: standalone or SCM, no Panorama** (decided).
-- **SE350 fleet is the Security Pack variant** — ThinkShield claim/motion-detection steps
-  are mandatory in the ship and RMA runbooks (confirmed).
-- **XCC licenses are Enterprise fleet-wide** — the no-USB bare-metal track is unblocked
-  (confirmed; functional check at fleet firmware level remains in the
-  [checklist](docs/se350-verification-checklist.md)).
-- **Server-facing port-channels flip static→LACP at Proxmox conversion**, same
-  maintenance window — both mismatch directions black-hole (decided; see the
-  [site reference architecture](docs/site-reference-architecture.md)).
-- **Image repo = the existing nautobot-composer server** (decided).
-- **Reservation parity by policy, pinning as escalation** — KVM has no ESXi-style CPU
-  reservation; the no-oversubscription guardrail is the admission control, plus
-  `balloon=0`, KSM off, and host services/IRQs confined to housekeeping cores. Per-VM
-  CPU affinity is invoked only if the Phase 2 jitter soak demands it (proposed; VM
-  tuning table in the site reference architecture).
-- **Two-bridge layout mirrors the legacy vSwitch0/LAN-Trunk split** — mgmt `vmbr0` +
-  VLAN-aware `vmbr1` on the 10G LACP bond, jumbo MTU on the data path (proposed).
+| Doc | What it answers |
+|---|---|
+| [decision-log.md](docs/decision-log.md) | Every architectural decision, dated, with status and rationale |
+| [plan-of-attack.md](docs/plan-of-attack.md) | The full phased plan: assessment, ESXi→Proxmox translation, roadmap |
+| [site-reference-architecture.md](docs/site-reference-architecture.md) | The edge-site standard being reproduced (VLANs, wiring, LACP, tuning) |
+| [se350-verification-checklist.md](docs/se350-verification-checklist.md) | Hardware validation checklist for the SE350 edge platform |
+| [research/](docs/research/) | Deep per-dimension research backing the plan (six documents) |
 
-See the [decision log](docs/decision-log.md) for the full list with status.
+## Design rules (read before contributing)
+
+- **SSoT-first**: if Nautobot can hold it, Nautobot holds it — jobs take object
+  references, not free-form values.
+- **Desired state lives in the SoT, once**: fully materialized per-device
+  records; no runtime settings from files; standards defined in the layout
+  process that stamps them.
+- **Facts vs. tunables**: immutable guest-OS behavior lives in code
+  ([jobs/lib/platform_facts.py](jobs/lib/platform_facts.py)); operationally
+  adjustable values live on Nautobot objects.
+- **Never touch infrastructure without updating the record** — and write-backs
+  happen in the same job that made the change.
+
+## Repo layout
+
+```
+jobs/            Nautobot jobs (Git-synced) + pure-Python libs (lib/)
+bmc/             BIOS/firmware policy as data (SE350 edge track)
+vnf-profiles/    Golden-image build seeds + build script per guest platform
+docs/            The documentation set above
+tests/           Loader harness (validates job discovery pre-push)
+```
+
+## Contributing & testing
+
+Changes go through a branch + pull request; after merge, re-sync the Git
+Repository in Nautobot and re-run `Bootstrap NFV Data Model` (idempotent — it
+adds only what's new). Before pushing, run the loader harness — it drives this
+repo through Nautobot's *real* job-loading code without needing a Nautobot
+install, and catches the classic silent failure (a directory missing
+`__init__.py` loads zero jobs):
+
+```bash
+python3 tests/loader_harness.py
+```
+
+## License
+
+[Apache-2.0](LICENSE).

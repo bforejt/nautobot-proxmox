@@ -32,18 +32,21 @@ doesn't.
    at stable `/images/<file>` URLs (the composer `firmware` profile, or any
    equivalent nginx). `[gap: not automated]`
 3. **Create Secrets**: `proxmox_token_id`, `proxmox_token_secret`,
-   `jumphost_console_password`, and XCC creds — via the composer text-file
-   provider or your secrets backend.
+   `jumphost_console_password`, and XCC creds — via Nautobot's text-file
+   secrets provider (which the composer stack pre-wires) or your secrets
+   backend.
 4. **Create the Proxmox service account** per node (custom role `NFVAutomation`
    + privilege-separated token, granted to BOTH user and token), token value
    into the Secret. `[gap: manual today; firstboot-automated in the plan]`
 
 ### Phase B — Golden image (once per image version)
-5. **Build the template** (vendor cloud image + build seed → sealed qcow2),
-   publish the version set to the firmware server, register the
-   `SoftwareVersion` (Staged) + `SoftwareImageFile`, then **promote Staged →
-   Active** (human gate). `[gap: build is scripted, not yet a BuildTemplateJob;
-   registration currently hardcodes the download_url host]`
+5. **Build the template** with
+   [vnf-profiles/ubuntu/build-template.sh](../vnf-profiles/ubuntu/build-template.sh)
+   (vendor cloud image + build seed → sealed qcow2 + version set), copy the set
+   to the firmware server, register the `SoftwareVersion` (Staged) +
+   `SoftwareImageFile`, then **promote Staged → Active** (human gate).
+   `[gap: build is a shipped script, not yet a job; publish-copy and
+   registration are manual]`
 
 ### Phase C — Per site (the repeatable operation)
 6. **The layout engine creates intent** — the adopter's Design Builder design
@@ -51,8 +54,8 @@ doesn't.
    VNF Devices, `Hosted On` relationships, interfaces with pinned MACs and
    VLANs, IPAM with a `DefaultGW`-role gateway per prefix, sizing CFs,
    `software_version`, hypervisor target CFs, status **Planned**.
-   `[gap: no reference design shipped — the fixture site (NFV-Lab) is the only
-   worked example]`
+   `[gap: no reference design job shipped — the hand-built worked example in
+   getting-started.md documents the target shape field by field]`
 7. **Deploy**: run `DeployVnfDevice` per VNF (a `SiteBuildJob` wrapper is
    planned). It reads the contract, deploys, writes back vmid + Active.
    Teardown/redeploy via `DecommissionVnfDevice`. `[proven]`
@@ -64,9 +67,9 @@ doesn't.
 | **Bare-metal track unbuilt** (Phase 3: XCC → PVE install) | Can't go from a blank SE350 to a running node automatically; node must be hand-installed | Colleague's `xcc_deploy` + the plan's L0 |
 | **Host baseline + network jobs unbuilt** (L1/L2: bond/bridge/tuning) | Node networking (LACP, VLAN-aware bridge, MTU) is manual today | firstboot hook + `DeployHostNetworkJob` |
 | **Service-account bootstrap manual** | Every node's automation token created by hand | pveum in the firstboot hook (plan §3) |
-| **Template build is scripts, not a job** | Rebuilds need an operator running steps, not a button | `BuildTemplateJob` |
-| **`download_url` hardcoded at registration** (lab IP) | Registration is environment-specific; should derive from a firmware base URL | Registration helper / `BuildTemplateJob` |
-| **Layout engine has no reference implementation** | Each adopter must author their Design Builder design from the contract; only the fixture demonstrates it | Adopter responsibility; a reference design would help |
+| **Template build is a script, not a job** | Rebuilds need an operator with build-node SSH running [build-template.sh](../vnf-profiles/ubuntu/build-template.sh), not a button | A build-template job |
+| **Image registration is manual** | Version + image file + `download_url` entered by hand per environment | A registration helper / the build-template job |
+| **Layout engine has no reference implementation** | Each adopter must author their Design Builder design from the contract; the getting-started worked example demonstrates the shape by hand | Adopter responsibility; a reference design would help |
 | **Validated only on one x86 NUC** | LACP bonds, VLAN trunks, real SE350 firmware/BIOS/vmedia, jumbo, serial/OpenGear — all unproven on real hardware | The SE350 lab checklist |
 | **Setup is scattered, not one installer** | No single "new environment" runbook beyond this doc; several manual steps | A setup job/script + this doc maturing |
 
