@@ -3,12 +3,33 @@
 Governing rule (team, 2026-08-08): **always use the SSoT when possible; when not,
 keep data as normalized as possible.**
 
-Division of labor: a separate layout process (NtC Design Builder App or
-equivalent) creates all site intent **in Nautobot** — IPAM carve, devices,
-interfaces, IPs, Hosted On relationships, per-device specifics. The jobs in this
-repo never invent that data; they read it and converge infrastructure toward it.
-This document is the contract: the exact conventions consumers depend on.
-Items marked **PROPOSED** await team confirmation; everything else is settled.
+Division of labor: a separate layout process (Network to Code (NtC) Design
+Builder App or equivalent) creates all site intent **in Nautobot** — IPAM
+carve, devices, interfaces, IPs, Hosted On relationships, per-device specifics.
+The jobs in this repo never invent that data; they read it and converge
+infrastructure toward it. This document is the contract: the exact conventions
+consumers depend on. Dated "Settled" annotations record when each convention
+was ratified and why — the conventions themselves are all in force.
+
+## 0. Hard requirements enforced by the code (quick reference)
+
+Exact values the deploy job checks — get one wrong and it refuses with a
+precise error (fail-closed), so this table is the fast path when debugging a
+refusal. A hand-built worked example using all of them is in
+[getting-started.md](getting-started.md).
+
+| Requirement | Exact value(s) today |
+|---|---|
+| VNF `platform` name | Must have an entry in [jobs/lib/platform_facts.py](../jobs/lib/platform_facts.py) — today only **`ubuntu-jumphost`** deploys |
+| VNF interface names | Must match the platform's `nic_order` — for `ubuntu-jumphost`, exactly one interface named **`eth0`** (with a pinned MAC) |
+| VNF Status to deploy | **Planned** (deploy flips it to **Active**; decommission reverses) |
+| `software_version` | Set on the device, and its status must be **Active** (Staged is refused — that's the promotion gate) |
+| Sizing CFs | `vcpus`, `memory_mb`, `disk_gb` all set on the VNF device |
+| Hypervisor linkage | A **Hosted On** relationship from the hypervisor to the VNF |
+| Hypervisor record | `primary_ip4` set (API endpoint); CFs `vm_bridge`, `vm_storage`, `import_storage` set |
+| Credentials | Hypervisor CF `secrets_group` names a SecretsGroup, or global Secrets `proxmox_token_id`/`proxmox_token_secret` exist |
+| Console password | Secret `jumphost_console_password` (cloud-init platforms) |
+| Static-IP guests | Their prefix contains exactly one IP with role **DefaultGW** (DHCP guests don't need it) |
 
 ## 1. The roster — which VMs exist where
 
@@ -27,7 +48,7 @@ Items marked **PROPOSED** await team confirmation; everything else is settled.
 | VM name / guest hostname | `device.name` | Settled |
 | Image to deploy | `device.software_version` → its default `SoftwareImageFile` | **Settled (2026-08-08)**: the layout process — whatever creates the VNF Device records (the team's Design Builder design or equivalent) — sets the native `software_version` FK on each device. Deploy **refuses** if unset or if the version's status ≠ Active, keeping the Staged→Active promotion gate authoritative |
 | Sizing (vcpus / memory / disk) | The device's own CFs (`vcpus`, `memory_mb`, `disk_gb`) — **REQUIRED on every VNF device, set by the layout engine at creation**. There is no external sizing profile: the SoT record is complete, consumers read one place. Deploy **refuses** if any sizing CF is unset (same discipline as software_version) | **Settled (2026-08-08)** — team direction: fully materialized per-device values; the "define once" DRY lives in the layout engine's templates, not in runtime lookups. Fleet-wide change flow (SoT-first): bulk-update the CFs (Nautobot bulk edit or a small job) → run the converge job to resize actual VMs to the updated intent. Never the reverse |
-| Platform behavior (day-0 builder, machine type, serial console, NIC model) | `device.platform` → the platform profile (config context) | Settled pattern from the plan |
+| Platform behavior (day-0 builder, machine type, serial console, NIC model) | `device.platform` → facts in code ([jobs/lib/platform_facts.py](../jobs/lib/platform_facts.py)) + tunables as Platform CFs | Settled — see "Platform behavior" in §3. The platform *name* must have a facts entry or deploy refuses |
 | Proxmox VMID | CF `vmid` — **written back** by the deploy job after create | Settled (bootstrapped) |
 | Host lifecycle stage | CF `provisioning_state` (hypervisors) | Settled (bootstrapped) |
 
@@ -43,9 +64,11 @@ Items marked **PROPOSED** await team confirmation; everything else is settled.
   deterministic, and each guest OS assigns its interface *names* to that order
   by fixed, per-platform rules (PA: first NIC = `mgmt`, then `ethernet1/1…` in
   order; IOS-XE: `Gi1, Gi2…`; Ubuntu: predictable names by PCI slot). The
-  platform profile encodes that name↔index map once; the layout names the
-  device's Interfaces with the *guest's* names; deploy renders `netN` in the
-  profile's order. Three reinforcements:
+  platform facts table ([jobs/lib/platform_facts.py](../jobs/lib/platform_facts.py))
+  encodes that name↔index map once as `nic_order`; the layout names the
+  device's Interfaces with the *guest's* names; deploy renders `netN` in that
+  order. Concretely today: `ubuntu-jumphost` → `["eth0"]`, so a jump-host
+  device must have an interface named exactly `eth0`. Three reinforcements:
   1. **Pinned MACs** (below) make Linux-class guests order-proof outright —
      PVE's generated cloud-init network config matches by MAC, not name.
   2. The **audit job** is where "learning from the device" lives: it reads the
@@ -75,7 +98,10 @@ Items marked **PROPOSED** await team confirmation; everything else is settled.
   resolve gateway = the DefaultGW IP within the interface's prefix. The layout
   process applies the role per subnet; renaming legacy "Default Gateway"
   records is a team data-migration task.
-- **DNS/NTP and similar site services**: config context. *(Settled pattern.)*
+- **DNS/NTP and similar site services**: *not yet consumed by the deploy job* —
+  DHCP-addressed guests learn them from DHCP, which covers the jump-host track
+  today. When static-IP deploys need them, they will be read from Nautobot
+  records per the standing rule (never from files). Planned.
 
 ### Platform behavior — Settled (2026-08-08): facts in code, tunables as Platform CFs
 
@@ -145,7 +171,9 @@ Users reach the jump host at the **desktop/console, never SSH** (team,
   free-form strings, wherever the object exists in Nautobot.
 - Prefer **native fields** (Status, Role, primary_ip, interface VLANs) over
   custom fields; custom fields only where no native slot exists (`vmid`).
-- Standards (sizing, port maps, storage/bridge names) live in **Git-synced
-  config contexts** — one definition, many consumers, still inside the SoT.
+- Standards (sizing, port maps, storage/bridge names) are **stamped onto the
+  objects they describe** by the layout process — fully materialized per-device
+  and per-platform records, no runtime file or config-context lookups. The
+  "define once" DRY lives in the layout engine's templates.
 - Anything a consumer reads that is not in this document is a bug in this
   document.

@@ -27,6 +27,7 @@ from nautobot.extras.models import (
     CustomFieldChoice,
     Relationship,
     Role,
+    Status,
 )
 
 PROVISIONING_STATES = [
@@ -104,6 +105,20 @@ class BootstrapNfvSchema(Job):
         for platform_name in ("ubuntu-jumphost", "paloalto-panos", "cisco-iosxe"):
             _, created = Platform.objects.get_or_create(name=platform_name)
             self._log_result("Platform", platform_name, created)
+
+        # ---- Statuses for the image promotion gate ----
+        # Stock Nautobot doesn't scope "Staged" to the software models, and has
+        # no "Retired" — but the image lifecycle (Staged -> Active -> Retired)
+        # depends on both. Without this, registering a Staged SoftwareVersion
+        # fails in a fresh environment.
+        sv_ct = ContentType.objects.get(app_label="dcim", model="softwareversion")
+        sif_ct = ContentType.objects.get(app_label="dcim", model="softwareimagefile")
+        staged, created = Status.objects.get_or_create(name="Staged", defaults={"color": "2196f3"})
+        staged.content_types.add(sv_ct, sif_ct)
+        self._log_result("Status", "Staged (+softwareversion/imagefile)", created)
+        retired, created = Status.objects.get_or_create(name="Retired", defaults={"color": "9e9e9e"})
+        retired.content_types.add(sv_ct)
+        self._log_result("Status", "Retired (softwareversion)", created)
 
         # ---- Platform tunables (desired state: in the SoT, stored once) ----
         # Immutable platform FACTS (guest NIC-name order, cloud-init class)

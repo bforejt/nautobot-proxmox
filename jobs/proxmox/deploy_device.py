@@ -211,8 +211,9 @@ class DeployVnfDevice(Job):
 
         ci = {"ipconfig0": ipconfig0}
         if day0 == "native-cloudinit":
-            # Console login: username from the platform (must match the
-            # template's baked default_user), password from the fleet Secret.
+            # Console login: username from the platform CF (ciuser overrides
+            # only the NAME — the template's baked default_user groups/sudo
+            # still apply), password from the fleet Secret.
             console_user = _require(platform.cf.get("console_user"), f"console_user on platform {platform.name}")
             try:
                 console_password = Secret.objects.get(name=CONSOLE_PASSWORD_SECRET).get_value()

@@ -21,9 +21,9 @@ other jobs rely on.
 
 Stand up an HTTP(S) server the Proxmox nodes can reach at stable
 `/images/<file>` URLs (the nautobot-composer `firmware` profile, or any nginx).
-This is where golden images live; `SoftwareImageFile.download_url` points here.
-Default base URL = your composer firmware server; each registration can point
-elsewhere if preferred.
+This is where golden images live. Each `SoftwareImageFile` records its own
+full `download_url`, so the "default" is just a convention: point registrations
+at this server unless a specific image lives elsewhere.
 
 ## 3. Secrets
 
@@ -41,34 +41,91 @@ elsewhere if preferred.
 
 ## 4. Proxmox service account (per node)
 
-⚙️ On each Proxmox node, create the automation identity (privilege-separated
-token). Role privileges (validated): `VM.Allocate, VM.Clone, VM.Config.*,
-VM.PowerMgmt, VM.Audit, VM.Console, Datastore.AllocateSpace,
-Datastore.AllocateTemplate, Datastore.Audit, Sys.Audit, Sys.Modify, SDN.Use`.
-**Grant the role to BOTH the user and the token** (privsep tokens intersect
-user+token ACLs). Put the token where step 3 expects it.
+⚙️ On each Proxmox node, create the automation identity — a service user with
+a custom **`NFVAutomation`** role and a privilege-separated token. As root on
+the node:
+
+```bash
+pveum role add NFVAutomation --privs "VM.Allocate,VM.Clone,VM.Config.Disk,VM.Config.CDROM,VM.Config.CPU,VM.Config.Memory,VM.Config.Network,VM.Config.HWType,VM.Config.Options,VM.Config.Cloudinit,VM.PowerMgmt,VM.Audit,VM.Console,Datastore.AllocateSpace,Datastore.AllocateTemplate,Datastore.Audit,Sys.Audit,Sys.Modify,SDN.Use"
+pveum user add nfv-automation@pve --comment "Nautobot NFV jobs"
+pveum user token add nfv-automation@pve nautobot --privsep 1   # SAVE the printed UUID
+pveum acl modify / --users nfv-automation@pve --roles NFVAutomation
+pveum acl modify / --tokens 'nfv-automation@pve!nautobot' --roles NFVAutomation
+```
+
+The last two lines matter: a privilege-separated token's effective rights are
+the **intersection** of the user's ACLs and the token's ACLs, so the role must
+be granted to BOTH (validated the hard way — role on the user only = 403 on
+everything). Put the token id (`nfv-automation@pve!nautobot`) and the UUID
+where step 3 expects them.
 
 ## 5. A golden image
 
-Build/obtain a template qcow2, publish it to the firmware server, and register
-it in Nautobot: a **SoftwareVersion** (status **Staged**) + a
-**SoftwareImageFile** (filename, SHA256, size, `download_url`). Promote
-Staged → **Active** (the human gate) when validated. See
-[image-lifecycle.md](image-lifecycle.md). Platform tunables (day-0 builder,
-machine type, console user) are seeded by the bootstrap and adjustable per
-platform.
+Build the Ubuntu jump-host template with the shipped script — run it from your
+workstation against a **build node** (any lab Proxmox host you have root SSH
+to; never a field node):
+
+```bash
+vnf-profiles/ubuntu/build-template.sh root@<build-node> 24.04-v1
+```
+
+It pulls the vendor cloud image (checksum-verified), boots one unattended
+build with the seed
+([template-build.user-data.yaml](../vnf-profiles/ubuntu/template-build.user-data.yaml)),
+seals, and publishes the version set (qcow2 + sha256 + seed + manifest) on the
+node. Copy those files to the firmware server's image root, then register in
+Nautobot: a **SoftwareVersion** (status **Staged** — the bootstrap job
+provisioned this status for software models) + a **SoftwareImageFile**
+(filename, SHA256, size, `download_url`); the script prints the exact values.
+Validate a deploy from Staged, then promote Staged → **Active** (the human
+gate). Full lifecycle: [image-lifecycle.md](image-lifecycle.md). Platform
+tunables (day-0 builder, machine type, console user) are seeded by the
+bootstrap and adjustable per platform.
 
 ## 6. Site intent (your layout process)
 
-Create contract-conformant records — by NtC Design Builder, your own design, or
-by hand for a first test. The **NFV-Lab fixture** is a worked example. Per
-[sot-data-contract.md](sot-data-contract.md), each site needs:
+Create contract-conformant records — by Network to Code (NtC) Design Builder,
+your own design job, or by hand for a first test. Per
+[sot-data-contract.md](sot-data-contract.md) (its §0 quick-reference table
+lists every value the code enforces), each site needs:
 - a **Hypervisor** Device (role Hypervisor) with `primary_ip4`, the VM
   bridge/storage/import-storage CFs, and its credential reference (step 3);
 - **VNF** Devices (status **Planned**) with `software_version` (Active),
   sizing CFs (`vcpus`/`memory_mb`/`disk_gb`), a **Hosted On** relationship to
-  the hypervisor, interfaces with pinned MACs + VLANs, and a `DefaultGW`-role
-  gateway IP in each prefix.
+  the hypervisor, and interfaces named per the platform's NIC order with
+  pinned MACs (+ VLANs where used). Static-IP guests additionally need a
+  `DefaultGW`-role gateway IP in their prefix; DHCP guests don't.
+
+### Worked example — one hypervisor + one jump host, by hand
+
+This is the exact shape proven live in the dev lab. Prerequisite: a
+**Location** whose type allows devices (both devices need one).
+
+**Hypervisor device** (the already-built Proxmox host):
+
+| Field | Value |
+|---|---|
+| Name | `pve1` — must equal the Proxmox **node name** exactly |
+| Role / Status | `Hypervisor` / `Active` |
+| Device type | `ThinkSystem SE350` (bootstrap-created; any type works for a lab box) |
+| Interface | `mgmt` (type Virtual) with the node's management IP assigned, set as the device's **primary IPv4** — this is the API endpoint |
+| CF `vm_bridge` | `vmbr0` (SE350 standard: `vmbr1`) |
+| CF `vm_storage` | `local-lvm` |
+| CF `import_storage` | `local` — a storage with the **Import** content type enabled |
+| CF `secrets_group` | name of its SecretsGroup, or empty to use the global Secrets (step 3) |
+
+**VNF device** (the jump host to be deployed):
+
+| Field | Value |
+|---|---|
+| Name | `jump-01` — becomes the VM name and guest hostname |
+| Role / Status | `Jump Host` / **`Planned`** |
+| Device type | `Ubuntu Jump Host VM` (bootstrap-created) |
+| Platform | **`ubuntu-jumphost`** — exact name; deploy resolves guest facts by it |
+| Software version | the **Active** SoftwareVersion from step 5 |
+| CFs | `vcpus=2`, `memory_mb=4096`, `disk_gb=32` |
+| Interface | named exactly **`eth0`** (type Virtual, per the platform's NIC order) with a pinned MAC, e.g. `BC:24:11:AA:00:01`. No IP assigned → guest uses DHCP; assign an IP (in a Namespace'd prefix with a `DefaultGW`-role gateway) and set it primary for static |
+| Relationship | **Hosted On** → `pve1` |
 
 ## 7. Deploy
 

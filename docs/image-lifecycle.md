@@ -1,19 +1,29 @@
 # Image & Template Lifecycle
 
 How golden images are built, versioned, promoted, deployed, and retired. Core
-principle: **templates are build outputs, never pets.** The sources of truth are
-(1) the vendor's pristine base image (URL + upstream checksum), (2) the build seed
-in this repo (reviewed via PR), and (3) the platform profile (Git-synced config
-context). Every template is a derived, disposable artifact — if one were lost,
-rerunning the build job reproduces it.
+principle: **templates are build outputs, never pets.** The sources of truth
+are (1) the vendor's pristine base image (URL + upstream checksum) and (2) the
+build seed in this repo (reviewed via change control). Every template is a
+derived, disposable artifact — if one were lost, rerunning the build
+reproduces it.
 
-## Two jobs, two cadences, two blast radii
+The Staged/Active/Retired statuses this lifecycle uses on SoftwareVersion /
+SoftwareImageFile are provisioned by the **`Bootstrap NFV Data Model`** job.
 
-### `BuildTemplateJob` — runs rarely (new base release, seed change, CVE refresh)
+## Two processes, two cadences, two blast radii
+
+### Template build — runs rarely (new base release, seed change, CVE refresh)
+
+**Today this is scripted**:
+[vnf-profiles/ubuntu/build-template.sh](../vnf-profiles/ubuntu/build-template.sh)
+runs the whole sequence below plus verification; a Nautobot job form of it is
+planned (see the gap register in
+[deployment-onboarding.md](deployment-onboarding.md)).
 
 For image classes that need customization (today: the Ubuntu jump host). Runs
-against a **designated build node** (the lab NUC now, a lab SE350 later) — never
-a field node.
+against a **designated build node** (a lab box you have root SSH to — build
+SSH is a build-node-only privilege; field deploys use only the API token) —
+never a field node.
 
 1. **Pull the vendor base** via `download-url`: the Ubuntu Server *cloud image*
    (qcow2 — same maintainability property as "ISO from the vendor" but with no
@@ -22,15 +32,19 @@ a field node.
    at the vendor.
 2. **Create the build VM** from it (`import-from`), attach the build seed
    ([vnf-profiles/ubuntu/template-build.user-data.yaml](../vnf-profiles/ubuntu/template-build.user-data.yaml))
-   as a generated NoCloud ISO — the same `iso_builder` mechanism the VNF day-0
-   engine uses, so the build job exercises the deploy engine's own machinery.
+   as a cloud-init user-data snippet (`--cicustom`) with a fresh, ephemeral
+   build SSH key substituted for `__BUILD_SSH_KEY__`. Snippets require node
+   shell access — fine on the build node, and exactly why field deploys never
+   use them (they stay on Proxmox's native cloud-init keys, API-settable).
 3. **Boot once, unattended.** cloud-init installs the desktop, tooling, and
    settings. Completion is signaled (guest agent / cloud-init phone-home), not
    watched by a human.
 4. **Seal**: `cloud-init clean`, truncate `machine-id`, drop the build-only SSH
    key the seed injected, detach the seed ISO, power off.
 5. **Publish**: extract the disk as qcow2 and push a complete, immutable
-   **version set** to nautobot-composer:
+   **version set** to the firmware server (with the nautobot-composer
+   `firmware` profile, files go at the share's **root** — nginx serves that
+   root at `/images/<file>`):
    - `ubuntu-jumphost-24.04-v2.qcow2` — the template artifact
    - `ubuntu-jumphost-24.04-v2.qcow2.sha256` — its checksum sidecar
    - `ubuntu-jumphost-24.04-v2.user-data.yaml` — the exact seed used, copied
@@ -50,21 +64,25 @@ a field node.
    the seed's git commit — full provenance chain: running clone → version record
    → seed commit → vendor base.
 
-Vendor-qcow2 image classes (PAN-OS, C8000v, 9800-CL) skip steps 2–4: a lighter
-`RegisterVendorImageJob` ingests the manually-downloaded, entitlement-gated file
-onto composer and registers it. Both paths end in the same place: a **Staged**
-SoftwareVersion.
+Vendor-qcow2 image classes (PAN-OS, C8000v, 9800-CL) skip steps 2–4: the
+entitlement-gated file is downloaded manually, uploaded to the firmware
+server, and registered the same way (a register-vendor-image job is planned).
+Both paths end in the same place: a **Staged** SoftwareVersion.
 
-### `DeployVmJob` — runs constantly (every site build, every field redeploy)
+### `Deploy VNF Device (SoT-driven)` — runs constantly (every site build, every field redeploy)
 
 Consumes only Nautobot intent, never touches vendor sources or seeds:
 
-1. `IngestImageJob` pulls the published artifact to the target node
-   (`download-url` from composer, checksum from the `SoftwareImageFile`).
+1. The published artifact is pulled to the target node (`download-url` +
+   checksum from the `SoftwareImageFile`) — the deploy job does this itself,
+   idempotently; **`Ingest Image onto Proxmox Node`** does the same thing
+   standalone to warm nodes ahead of a window.
 2. VM created from it (`import-from` volume ID) with config generated from the
-   VM object + VMInterface/VLANs + platform profile.
-3. Per-VM cloud-init is **identity only**: hostname, IP/gateway, users/keys from
-   Nautobot. Seconds per clone, no package installs, no internet dependency at
+   Device record + its Interfaces/VLANs + platform facts and Platform CFs.
+3. Per-VM cloud-init is **identity only**: hostname from the device, IP/gateway
+   from Nautobot IPAM (or DHCP), console user from the Platform's
+   `console_user` CF with the password from the `jumphost_console_password`
+   Secret. Seconds per clone, no package installs, no internet dependency at
    deploy time — the gigabytes are already in the template.
 
 Deploy-time customization stays on Proxmox's *native* cloud-init keys (no
@@ -76,7 +94,7 @@ user-data files.
 ## The version lifecycle
 
 ```
-seed PR merged ──▶ BuildTemplateJob ──▶ SoftwareVersion: Staged
+seed change merged ─▶ template build ─▶ SoftwareVersion: Staged
                                               │  validate: deploy one from
                                               │  Staged in the lab, check it
                                               ▼
