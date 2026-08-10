@@ -226,6 +226,20 @@ class VerifySe350Host(Job):
             raise RuntimeError(str(exc))
         client = self._connect(str(host_ip))
         try:
+            # Sanity probe: an SE350 has TWO SSH-able faces, and the wrong one
+            # (the XCC's own CLI, prompt "system>") accepts logins but rejects
+            # every Linux command. Catch that with one precise error instead
+            # of six baffling per-check failures.
+            _, probe, _ = self._run(client, "uname -s")
+            if "Linux" not in probe:
+                raise RuntimeError(
+                    "This SSH endpoint is not a Linux host — it answers like a "
+                    f"BMC/XCC management CLI (got: {probe[:120]!r}). Use the "
+                    "HOST operating-system IP (the booted Proxmox/Linux "
+                    "management address), not the XCC IP; and the "
+                    f"{HOST_SSH_USERNAME_SECRET}/{HOST_SSH_PASSWORD_SECRET} "
+                    "Secrets must hold the HOST login, not the XCC login."
+                )
             checks = [
                 ("§4 disk inventory + install filter", lambda: self._check_disks(client, profile)),
                 ("§4 boot adapter topology", lambda: self._check_boot_adapter(client, profile)),
