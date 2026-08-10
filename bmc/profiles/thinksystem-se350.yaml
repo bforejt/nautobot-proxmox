@@ -7,18 +7,16 @@ device_type: "ThinkSystem SE350"
 install:
   filesystem: ext4            # decision #27: ext4 + LVM-thin on the RAID volume
   network_source: from-answer
-  # FLEET FACT (2026-08-09): the SE350s carry TWO volumes carved from the
-  # same RAID controller — 128G (boot) and 1.92T (data) — so BOTH present
-  # RAID-virtual-disk model strings. A model-glob alone is AMBIGUOUS and
-  # could match the data volume. The filter below is a deliberate sentinel
-  # that matches NOTHING: a premature real install fail-closes instead of
-  # gambling between volumes. Pin it from a real unit's udevadm dump of
-  # both volumes (checklist §1 runbook) — candidates that distinguish them,
-  # in preference order: a differing ID_MODEL suffix, ID_PATH (deterministic
-  # on fleet-uniform topology if the boot volume is always the first VD),
-  # ID_SERIAL pattern, DEVNAME as last resort.
+  # PINNED from a live fleet unit (nfvlabspt1, 2026-08-09). Both RAID volumes
+  # present the IDENTICAL model string "ThinkSystem_M.2_VD" — a model filter
+  # can never discriminate — but they ride SEPARATE M.2 adapters: boot 119.2G
+  # at PCI 05:00.0, data 1.7T at PCI 66:00.0. PCI topology is therefore the
+  # selector; fleet hardware is uniform (decision #27 notes / #17), so this
+  # path should hold on every unit. Verify on each new hardware revision:
+  #   proxmox-auto-install-assistant device-match disk ID_PATH=pci-0000:05:00.0-ata-1.0
+  # must list ONLY the ~119G boot volume.
   disk_filter:
-    ID_MODEL: "PENDING-LAB-VERIFY-DO-NOT-MATCH"
+    ID_PATH: "pci-0000:05:00.0-ata-1.0"
   reboot_mode: reboot         # boot-once CD override clears; falls to disk
   # LVM sizing (ext4/xfs options live under lvm.* in the answer schema):
   # lvm:

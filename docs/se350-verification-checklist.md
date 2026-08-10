@@ -80,20 +80,23 @@ console.** Media is deliberately left mounted.
 power-cycle the unit back to its disk. Attach the JobResult JSON files
 (`virtual_media.json` etc.) and the console photo/screenshot to the findings.
 
-**While you have a Linux console on the unit** (a live ISO booted via the
-rehearsal works): capture the udev identity of **both** RAID volumes — the
-fleet carves 128G (boot) and 1.92T (data) from the same controller, so their
-model strings likely collide and the install disk filter must be pinned on
-whatever property distinguishes them (`ID_MODEL` suffix, `ID_PATH`,
-`ID_SERIAL`):
+**Disk-filter identity — CAPTURED (nfvlabspt1, 2026-08-09).** Both RAID
+volumes present the identical `ID_MODEL=ThinkSystem_M.2_VD`; the
+discriminator is PCI topology: boot 119.2G = `ID_PATH=pci-0000:05:00.0-ata-1.0`,
+data 1.7T = `pci-0000:66:00.0-ata-1.0` (separate M.2 adapters). The
+[SE350 profile](../bmc/profiles/thinksystem-se350.yaml) pins
+`ID_PATH: "pci-0000:05:00.0-ata-1.0"`. **Per additional unit / hardware
+revision, verify the path holds** (any Linux on the box, incl. a live PVE):
 
 ```bash
-for d in /dev/sd?; do echo "== $d"; udevadm info --query=property $d | grep -E "ID_MODEL=|ID_SERIAL=|ID_PATH=|DEVNAME="; lsblk -dn -o SIZE $d; done
+apt-get install -y proxmox-auto-install-assistant   # PVE no-subscription repo
+proxmox-auto-install-assistant device-match disk ID_PATH=pci-0000:05:00.0-ata-1.0
 ```
 
-Until this is captured, the SE350 install profile deliberately carries a
-match-nothing sentinel filter — a real install attempt fail-closes rather
-than risk selecting the data volume.
+Pass = ONLY the ~119G boot volume is listed. If a unit lists nothing or the
+data volume, capture both volumes' properties
+(`udevadm info --query=property /dev/sdX`) and update the profile before any
+install on that hardware revision.
 
 ## 2. XCC / UEFI firmware inventory
 
