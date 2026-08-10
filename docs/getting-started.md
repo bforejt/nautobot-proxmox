@@ -36,6 +36,10 @@ at this server unless a specific image lives elsewhere.
   exactly `xcc_username` and `xcc_password`. On a nautobot-composer stack:
   `./add-secret.sh xcc_username` / `./add-secret.sh xcc_password`, then Secret
   records with provider *Text File*, path `/opt/nautobot/secrets/<name>`.
+- **Host SSH credentials** (the `SE350 Host Verification (SSH)` job): Secrets
+  named exactly `host_ssh_username` and `host_ssh_password` — root (or
+  sudo-capable) login of the Linux-booted verification unit. Same creation
+  mechanics as above.
 - **Proxmox API token(s)** — two ways:
   - **Single host (quickstart)**: create Secrets `proxmox_token_id`
     (value = `user@realm!tokenname`) and `proxmox_token_secret` (the UUID). The

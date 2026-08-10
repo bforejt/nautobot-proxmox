@@ -98,6 +98,15 @@ data volume, capture both volumes' properties
 (`udevadm info --query=property /dev/sdX`) and update the profile before any
 install on that hardware revision.
 
+> **Automated:** the **`SE350 Host Verification (SSH)`** job runs this
+> check — plus §5 (DMI serial vs SoT), §6 (X722 disable-fw-lldp), §9
+> (Secure Boot state), and BIOS-effect readbacks — in one read-only pass
+> against any Linux-booted SE350. Inputs: the host's IP (+ optionally its
+> Nautobot Device for the serial cross-check); Secrets `host_ssh_username`
+> / `host_ssh_password`. It evaluates the profile's disk filter with the
+> same glob semantics the installer uses and fails loudly on no-match or
+> ambiguity.
+
 ## 2. XCC / UEFI firmware inventory
 
 Record XCC and UEFI build levels per unit (`GET /redfish/v1/UpdateService/FirmwareInventory`

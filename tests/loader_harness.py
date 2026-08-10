@@ -45,6 +45,7 @@ EXPECTED_JOBS = {
     "IngestImage",
     "DiscoverSe350Platform",
     "InstallProxmoxNode",
+    "VerifySe350Host",
 }
 
 REGISTRY = []
