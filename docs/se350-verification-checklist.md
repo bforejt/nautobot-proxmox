@@ -80,6 +80,21 @@ console.** Media is deliberately left mounted.
 power-cycle the unit back to its disk. Attach the JobResult JSON files
 (`virtual_media.json` etc.) and the console photo/screenshot to the findings.
 
+**While you have a Linux console on the unit** (a live ISO booted via the
+rehearsal works): capture the udev identity of **both** RAID volumes — the
+fleet carves 128G (boot) and 1.92T (data) from the same controller, so their
+model strings likely collide and the install disk filter must be pinned on
+whatever property distinguishes them (`ID_MODEL` suffix, `ID_PATH`,
+`ID_SERIAL`):
+
+```bash
+for d in /dev/sd?; do echo "== $d"; udevadm info --query=property $d | grep -E "ID_MODEL=|ID_SERIAL=|ID_PATH=|DEVNAME="; lsblk -dn -o SIZE $d; done
+```
+
+Until this is captured, the SE350 install profile deliberately carries a
+match-nothing sentinel filter — a real install attempt fail-closes rather
+than risk selecting the data volume.
+
 ## 2. XCC / UEFI firmware inventory
 
 Record XCC and UEFI build levels per unit (`GET /redfish/v1/UpdateService/FirmwareInventory`
