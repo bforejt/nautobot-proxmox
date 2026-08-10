@@ -200,7 +200,10 @@ class InstallProxmoxNode(Job):
         )
         bmc_ip = str(xcc_iface.ip_addresses.first().address.ip)
         redfish = RedfishDiscovery(bmc_ip=bmc_ip, username=username, password=password)
-        RedfishVmediaDelivery(redfish, self.logger).boot_installer(image.download_url)
+        mount = RedfishVmediaDelivery(redfish, self.logger).boot_installer(image.download_url)
+        # Remember the mount so a confirmed install can eject it — otherwise
+        # stale media accumulates on the EXT slots across installs.
+        self._vmedia_mount = (redfish, mount)
         self.logger.info(
             "Node is booting the installer from virtual media — the answer service "
             "takes it from here"
@@ -268,6 +271,20 @@ class InstallProxmoxNode(Job):
             raise RuntimeError(f"Delivery failed: {exc}") from exc
 
         installed, credentials = self._watch_state_machine(device)
+        # vmedia cleanup: once the webhook has confirmed the install, the
+        # mounted installer media is spent — eject it (best-effort; the
+        # boot-once override already cleared, so a failed eject is cosmetic).
+        if installed and getattr(self, "_vmedia_mount", None):
+            redfish, mount = self._vmedia_mount
+            try:
+                redfish.eject_iso(mount["member_path"], mount["mode"])
+                self.logger.info("Installer media ejected from %s", mount["member_path"])
+            except Exception as exc:
+                self.logger.warning(
+                    "Could not eject installer media from %s (%s) — eject it via "
+                    "a discovery-job write-test run or the XCC UI",
+                    mount["member_path"], exc,
+                )
         if installed and credentials:
             return (
                 f"{device.name}: installed, state=bm_installed, per-node API token "

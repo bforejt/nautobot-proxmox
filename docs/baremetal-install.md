@@ -206,6 +206,53 @@ vendor licenses remote vmedia (XCC Enterprise FoD is fleet-confirmed for us);
 **PXE is the escape hatch for unlicensed BMCs** — same artifact, boot it from
 the lab netboot server instead.
 
+## The first real SE350 install (runbook)
+
+Every mechanism below is individually field-proven (nested, PXE, and the
+SE350 vmedia checks); this sequence just chains them. **The target's ~119G
+boot volume is wiped**; the 1.92T data volume cannot be selected (filter
+verified with the installer's own matcher).
+
+Pre-flight, one-time in the lab:
+
+1. **Answer service up in the lab composer** ([its README](../bmc/answer_service/)
+   / composer's Answer Service section): cert generated, fingerprint in
+   `.env`, root password hash written, profile in `COMPOSE_PROFILES`. Pull
+   this repo's current `main` in the sibling checkout and build with
+   `--build` — the install profiles bake into the image. Verify
+   `curl -k https://<svc>:8800/healthz` from the node's subnet.
+2. **Prepared ISO for THIS lab**: on any PVE box (the burn-in unit works),
+   `prepare-install-iso.sh --iso <stock PVE ISO> --url https://<svc>:8800/answer
+   --fingerprint <sha256>`; publish the output on the lab firmware server —
+   the mount URL must be **plain HTTP** (XCC1).
+3. **Nautobot**: re-run `Bootstrap NFV Data Model` (adds the `proxmox-ve`
+   platform + Staged/Retired statuses), then register the prepared ISO as a
+   SoftwareVersion (platform `proxmox-ve`, Staged → promote **Active**) +
+   SoftwareImageFile whose `download_url` is the plain-HTTP mount URL.
+4. **DHCP question**: the first install should run the DHCP path — confirm
+   the mgmt VLAN offers DHCP during install. (Static needs `primary_ip4` +
+   a `DefaultGW`-role IP in the prefix + the mgmt interface's MAC pinned so
+   the NIC filter is exact — do that on later installs, with real layout
+   data.)
+
+Device records for the target unit:
+
+- Device: DeviceType **ThinkSystem SE350**, role **Hypervisor**, the unit's
+  **DMI serial** (host-verification job reports it; the rehearsal unit's is
+  `J101YCEB`), `provisioning_state=awaiting_install`, `software_version` =
+  the Active prepared ISO, CFs `vm_bridge`/`vm_storage`/`import_storage` for
+  its post-install life.
+- Interface named **`xcc`** with the BMC IP assigned (contract §4) — the
+  delivery adapter reads it. Secrets `xcc_username`/`xcc_password` as before.
+
+Run **`Install Proxmox Node (SoT-driven)`** with Confirm ticked. Expected:
+mount via PATCH-EXT → one-shot CD → ForceRestart → `ANSWERED` in the service
+log → unattended install (**the ISO streams through the BMC NIC for the whole
+install — allow 20–40 min**, slower than PXE/nested) → webhook flips
+`bm_installed` → reboot to disk → firstboot creates the service account and
+phones the token home → SecretsGroup set → the job ejects the spent installer
+media. The node is then deployable by the VM jobs.
+
 ## Disk layout of an installed node
 
 The `ext4` profile (fleet standard, decision #27) produces this layout —
