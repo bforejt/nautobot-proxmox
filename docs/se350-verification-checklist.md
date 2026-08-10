@@ -20,9 +20,13 @@ and safe against in-service units.
 ## 1. XCC virtual media functional check (license question answered)
 
 **Answered 2026-08-06: fleet licenses are XCC Enterprise**, so virtual media is
-license-entitled everywhere. What remains is the functional check — confirm the EXT
-members actually appear at the fleet's XCC firmware level (and PATCH-insert works),
-since firmware minimums for reliable Redfish vmedia exist per XCC1 model.
+license-entitled everywhere.
+
+**✅ CLOSED 2026-08-10 — functional checks PASSED on a real unit (nfvlabspt1):**
+the write test mounted a composer-hosted ISO via XCC1 PATCH-on-EXT
+(`Inserted=true`, eject verified), and the dress rehearsal booted the mounted
+ISO via one-shot CD override + power cycle (confirmed on console). The no-USB
+install mechanism is fully proven end to end on fleet hardware.
 
 **Functional check** — list the VirtualMedia collection members:
 
