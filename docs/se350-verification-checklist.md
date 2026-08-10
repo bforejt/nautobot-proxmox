@@ -101,7 +101,11 @@ install on that hardware revision.
 > **Automated:** the **`SE350 Host Verification (SSH)`** job runs this
 > check — plus §5 (DMI serial vs SoT), §6 (X722 disable-fw-lldp), §9
 > (Secure Boot state), and BIOS-effect readbacks — in one read-only pass
-> against any Linux-booted SE350. Inputs: the host's IP (+ optionally its
+> against any Linux-booted SE350. **First full pass: nfvlabspt1,
+> 2026-08-10 — all checks green**; the filter selected exactly `/dev/sda`
+> (119.2G). Topology note from that run: the unit carries THREE Marvell
+> 88SE9230 adapters (`05:00.0` boot, `66:00.0` data, `65:00.0` with no
+> volume) — the ID_PATH pin stays unique regardless. Inputs: the host's IP (+ optionally its
 > Nautobot Device for the serial cross-check); Secrets `host_ssh_username`
 > / `host_ssh_password`. It evaluates the profile's disk filter with the
 > same glob semantics the installer uses and fails loudly on no-match or
@@ -166,6 +170,10 @@ proxmox-auto-install-assistant system-info
 matches the serial recorded in Nautobot for that device.
 
 ## 6. X722 firmware LLDP agent (breaks LLDP visibility on the 10G LAG ports)
+
+**Answered 2026-08-10 (nfvlabspt1, via `SE350 Host Verification (SSH)`)**: both
+X722 ports expose the `disable-fw-lldp` priv-flag at fleet NIC firmware — the
+firstboot LLDP step works. (On that unit the flag was already `on`.)
 
 From a live Linux boot, per SFP+ port:
 
