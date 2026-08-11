@@ -1,7 +1,7 @@
 """
 Nautobot Job: install Proxmox VE on a bare-metal (or nested-lab) node — L0.
 
-SoT-driven end to end: ONE input, the Hypervisor Device in
+SoT-driven end to end: ONE input, the NFV-role Device in
 provisioning_state=awaiting_install. Everything else resolves from Nautobot
 per the contract: target PVE version from device.software_version (Active-
 gated, like every other deploy), the prepared installer ISO from its
@@ -51,7 +51,7 @@ class InstallProxmoxNode(Job):
     class Meta:
         name = "Install Proxmox Node (SoT-driven)"
         description = (
-            "Boots the prepared auto-installer on a Hypervisor Device in "
+            "Boots the prepared auto-installer on an NFV-role Device in "
             "provisioning_state=awaiting_install (nested lab VM or Redfish "
             "virtual media per the DeviceType profile) and follows the state "
             "machine to bm_installed + stored credentials. Reinstalls the OS "
@@ -66,8 +66,8 @@ class InstallProxmoxNode(Job):
     device = ObjectVar(
         model=Device,
         label="Node to install",
-        description="Hypervisor Device in provisioning_state=awaiting_install",
-        query_params={"role": "Hypervisor"},
+        description="NFV-role Device in provisioning_state=awaiting_install",
+        query_params={"role": "NFV"},
     )
     confirm = BooleanVar(
         label="Confirm install",

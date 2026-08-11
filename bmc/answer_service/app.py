@@ -15,9 +15,10 @@ Endpoints (see docs/baremetal-install.md for the full flow):
   GET  /healthz
 
 Security model (defense in depth, smallest-possible trust):
-  - Serial allowlist: only Devices with role Hypervisor and
-    provisioning_state=awaiting_install get answers. Unknown machines that
-    boot the installer get a 403 and install nothing.
+  - Serial allowlist: only Devices with the NFV role (team convention;
+    NFV_ROLE env to override) and provisioning_state=awaiting_install get
+    answers. Unknown machines that boot the installer get a 403 and install
+    nothing.
   - Optional shared bearer token (ANSWER_AUTH_TOKEN) on /answer, matching
     `prepare-iso --answer-auth-token` (PVE 9.2+).
   - The firstboot URL, the credentials phone-home, and the webhook are all
@@ -107,6 +108,9 @@ PVE_ROLE_PRIVS = os.environ.get(
 )
 PVE_SERVICE_USER = os.environ.get("PVE_SERVICE_USER", "svc-nfv@pve")
 PVE_TOKEN_NAME = os.environ.get("PVE_TOKEN_NAME", "deploy")
+# Role a Device must carry to be answerable (team convention: "NFV" — the
+# role for the servers; "Hypervisor" was judged not specific enough).
+NFV_ROLE = os.environ.get("NFV_ROLE", "NFV")
 
 app = FastAPI(title="NFV Answer Service", docs_url=None, redoc_url=None)
 
@@ -275,7 +279,7 @@ def _answer_impl(identity: dict) -> PlainTextResponse:
         raise HTTPException(403, "unknown machine")
     role = (device.get("role") or {}).get("name", "")
     state = (device.get("custom_fields") or {}).get("provisioning_state")
-    if role != "Hypervisor" or state != "awaiting_install":
+    if role != NFV_ROLE or state != "awaiting_install":
         log.warning(
             "REFUSED: %s (serial %s) role=%r provisioning_state=%r",
             device["name"], serial, role, state,

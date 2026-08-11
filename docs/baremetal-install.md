@@ -39,7 +39,7 @@ How a blank server becomes a fully registered Proxmox node with **one job run**
 
 ## Security model
 
-- **Serial allowlist**: only Devices with role Hypervisor and
+- **Serial allowlist**: only Devices with role `NFV` and
   `provisioning_state=awaiting_install` get answers. Any other machine that
   boots the installer gets a 403 and installs nothing — which is also what
   makes a standing PXE boot service safe to run in the lab.
@@ -95,7 +95,7 @@ How a blank server becomes a fully registered Proxmox node with **one job run**
 
 Create the SoT intent for a pseudo-server:
 
-1. Device: DeviceType **Nested Lab Node**, role **Hypervisor**, any location,
+1. Device: DeviceType **Nested Lab Node**, role **NFV**, any location,
    **serial set** (e.g. `NESTED-0001` — identity matching key),
    `provisioning_state=awaiting_install`, `software_version` = the Active
    prepared-ISO version, and CFs `vm_storage`/`vm_bridge`/`import_storage`
@@ -237,7 +237,7 @@ Pre-flight, one-time in the lab:
 
 Device records for the target unit:
 
-- Device: DeviceType **ThinkSystem SE350**, role **Hypervisor**, the unit's
+- Device: DeviceType **ThinkSystem SE350**, role **NFV**, the unit's
   **DMI serial** (host-verification job reports it; the rehearsal unit's is
   `J101YCEB`), `provisioning_state=awaiting_install`, `software_version` =
   the Active prepared ISO, CFs `vm_bridge`/`vm_storage`/`import_storage` for

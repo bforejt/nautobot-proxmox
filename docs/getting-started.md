@@ -99,7 +99,7 @@ Create contract-conformant records — by Network to Code (NtC) Design Builder,
 your own design job, or by hand for a first test. Per
 [sot-data-contract.md](sot-data-contract.md) (its §0 quick-reference table
 lists every value the code enforces), each site needs:
-- a **Hypervisor** Device (role Hypervisor) with `primary_ip4`, the VM
+- an **NFV** Device (role `NFV` — the team's server role) with `primary_ip4`, the VM
   bridge/storage/import-storage CFs, and its credential reference (step 3);
 - **VNF** Devices (status **Planned**) with `software_version` (Active),
   sizing CFs (`vcpus`/`memory_mb`/`disk_gb`), a **Hosted On** relationship to
@@ -112,12 +112,12 @@ lists every value the code enforces), each site needs:
 This is the exact shape proven live in the dev lab. Prerequisite: a
 **Location** whose type allows devices (both devices need one).
 
-**Hypervisor device** (the already-built Proxmox host):
+**NFV device** (the already-built Proxmox host):
 
 | Field | Value |
 |---|---|
 | Name | `pve1` — must equal the Proxmox **node name** exactly |
-| Role / Status | `Hypervisor` / `Active` |
+| Role / Status | `NFV` / `Active` |
 | Device type | `ThinkSystem SE350` (bootstrap-created; any type works for a lab box) |
 | Interface | `mgmt` (type Virtual) with the node's management IP assigned, set as the device's **primary IPv4** — this is the API endpoint |
 | CF `vm_bridge` | `vmbr0` (SE350 standard: `vmbr1`) |

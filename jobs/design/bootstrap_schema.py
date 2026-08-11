@@ -71,7 +71,9 @@ class BootstrapNfvSchema(Job):
         self._log_result("Relationship", "Hosted On (hosted_on)", created)
 
         # ---- Roles ----
-        for role_name in ("Hypervisor", "Jump Host", "Firewall"):
+        # "NFV" = the team's role for the servers (their convention:
+        # "Hypervisor" is not specific enough and can mean other things).
+        for role_name in ("NFV", "Jump Host", "Firewall"):
             role, created = Role.objects.get_or_create(name=role_name)
             role.content_types.add(device_ct)
             self._log_result("Role", role_name, created)

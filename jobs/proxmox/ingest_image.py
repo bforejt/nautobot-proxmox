@@ -30,7 +30,7 @@ class IngestImage(Job):
         model=Device,
         label="Hypervisor",
         description="Target node (API host from primary_ip4, import storage from its CF)",
-        query_params={"role": "Hypervisor"},
+        query_params={"role": "NFV"},
     )
 
     def run(self, image_file, hypervisor):
