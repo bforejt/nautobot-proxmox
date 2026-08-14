@@ -52,11 +52,19 @@ How a blank server becomes a fully registered Proxmox node with **one job run**
 
 ## One-time setup
 
-1. **Answer service container** — copy
-   [docker-compose.answer-service.example.yml](../bmc/answer_service/docker-compose.answer-service.example.yml)
-   into your nautobot-composer project, set `NAUTOBOT_URL`/`NAUTOBOT_TOKEN`/
-   `PUBLIC_URL`, and share the `node_secrets` volume with the Nautobot and
-   worker containers (mounted at `/opt/nautobot/secrets`). Generate the TLS
+1. **Answer service container** — two supported paths:
+   - **nautobot-composer stacks**: the pre-wired `answer-service` profile
+     (see composer's README) or the
+     [example compose file](../bmc/answer_service/docker-compose.answer-service.example.yml).
+   - **Any other existing docker compose Nautobot**: the
+     **[nfv-helper](../nfv-helper/README.md)** directory — copied into your
+     project, it adds the service and the secrets mount via compose's
+     multi-file merge, without editing your `docker-compose.yaml` (two
+     activation modes, incl. zero-startup-change via the override filename).
+
+   Either way: set `NAUTOBOT_URL`/`NAUTOBOT_TOKEN`/`PUBLIC_URL`, and the
+   Nautobot + worker containers must share the secrets directory (mounted at
+   `/opt/nautobot/secrets`). Generate the TLS
    cert and root password hash into the shared volumes (from the compose
    project directory, service running):
 

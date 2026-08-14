@@ -1,0 +1,62 @@
+# NFV add-on overlay — merges into an EXISTING Nautobot docker compose project.
+#
+# This file is never run as its own project. Docker Compose merges multiple
+# compose files BY SERVICE NAME, so this overlay (a) adds the answer-service
+# container and (b) extends your existing nautobot service with the secrets
+# mount — without editing your docker-compose.yaml. Activation modes and full
+# instructions: nfv-helper/README.md.
+#
+# Values come from NFV_* variables in the project's .env — compose reads .env
+# for ${} interpolation even if your services get their container env from
+# env_file: entries (local.env / shared.env stay untouched).
+#
+# Relative paths below resolve against the BASE compose file's directory
+# (your project root), which is why the helper directory must be copied into
+# the project as ./nfv-helper.
+
+services:
+  # >>> RENAME this key if your Nautobot service is not called "nautobot"
+  # (check with: docker compose config --services). If a SEPARATE celery
+  # worker service exists, DUPLICATE this block under that name too — the
+  # worker resolves Secrets during job runs and needs the same mount.
+  nautobot:
+    volumes:
+      - ./nfv-helper/secrets:/opt/nautobot/secrets:ro
+
+  answer-service:
+    build:
+      context: ${NFV_PROXMOX_REPO:?set NFV_PROXMOX_REPO in .env to your nautobot-proxmox checkout}/bmc
+      dockerfile: answer_service/Dockerfile
+    container_name: answer-service
+    restart: unless-stopped
+    ports:
+      - "8800:8800"
+    # Deliberately NOT attached to local.env/shared.env — this service gets
+    # only what it needs, explicitly, and never sees your stack's secrets.
+    environment:
+      NAUTOBOT_URL: ${NFV_NAUTOBOT_URL:-http://nautobot:8080}
+      NAUTOBOT_TOKEN: ${NFV_NAUTOBOT_TOKEN:?set NFV_NAUTOBOT_TOKEN in .env (a Nautobot API token)}
+      PUBLIC_URL: ${NFV_PUBLIC_URL:?set NFV_PUBLIC_URL in .env (how installing NODES reach this service)}
+      CERT_FINGERPRINT: ${NFV_CERT_FINGERPRINT:-}
+      SSL_CERTFILE: /tls/answer-service.crt
+      SSL_KEYFILE: /tls/answer-service.key
+      ROOT_PASSWORD_HASH_FILE: /secrets/root_password_hash
+      SECRETS_DIR: /secrets/nodes
+      # Path as YOUR NAUTOBOT CONTAINER sees the same files (the ro mount above).
+      NAUTOBOT_SECRETS_PATH: /opt/nautobot/secrets/nodes
+      DOMAIN: ${NFV_DOMAIN:-nfv.lab}
+      TIMEZONE: ${NFV_TIMEZONE:-America/Chicago}
+    volumes:
+      - nfv_answer_data:/data
+      - ./nfv-helper/secrets:/secrets
+      - ./nfv-helper/tls:/tls
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import ssl,urllib.request as u; u.urlopen('https://localhost:8800/healthz', context=ssl._create_unverified_context(), timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
+
+volumes:
+  # One-time install keys + archived install reports (see backup notes in README).
+  nfv_answer_data:
