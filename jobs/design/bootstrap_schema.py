@@ -22,11 +22,19 @@ from django.contrib.contenttypes.models import ContentType
 
 from nautobot.apps.jobs import Job, register_jobs
 from nautobot.dcim.models import Device, DeviceType, Manufacturer, Platform
+from nautobot.extras.choices import (
+    SecretsGroupAccessTypeChoices,
+    SecretsGroupSecretTypeChoices,
+)
 from nautobot.extras.models import (
     CustomField,
     CustomFieldChoice,
+    ExternalIntegration,
     Relationship,
     Role,
+    Secret,
+    SecretsGroup,
+    SecretsGroupAssociation,
     Status,
 )
 
@@ -129,6 +137,42 @@ class BootstrapNfvSchema(Job):
         retired, created = Status.objects.get_or_create(name="Retired", defaults={"color": "9e9e9e"})
         retired.content_types.add(sv_ct)
         self._log_result("Status", "Retired (softwareversion)", created)
+
+        # ---- Media forge plumbing (decision #44): records, never values ----
+        # The PrepareInstallerMedia job resolves the answer service through
+        # the ExternalIntegration below. Bootstrap creates the resolvable
+        # SKELETON only — the admin bearer VALUE stays an operational secret
+        # (write it: ./add-secret.sh answer_service_admin_token). remote_url
+        # seeds the compose-network address (valid on composer AND nfv-helper
+        # stacks); CREATE-ONLY — an admin's corrected URL is never touched.
+        forge_secret, created = Secret.objects.get_or_create(
+            name="answer-service-admin-token",
+            defaults={
+                "provider": "text-file",
+                "parameters": {"path": "/opt/nautobot/secrets/answer_service_admin_token"},
+            },
+        )
+        self._log_result("Secret", "answer-service-admin-token (record only)", created)
+        forge_group, created = SecretsGroup.objects.get_or_create(name="nfv-answer-service-admin")
+        self._log_result("SecretsGroup", "nfv-answer-service-admin", created)
+        # Keyed on the slot (group + access/secret type): if an admin already
+        # bound a different secret there, leave their choice alone.
+        _, created = SecretsGroupAssociation.objects.get_or_create(
+            secrets_group=forge_group,
+            access_type=SecretsGroupAccessTypeChoices.TYPE_GENERIC,
+            secret_type=SecretsGroupSecretTypeChoices.TYPE_TOKEN,
+            defaults={"secret": forge_secret},
+        )
+        self._log_result("  association", "Generic/token", created)
+        _, created = ExternalIntegration.objects.get_or_create(
+            name="nfv-answer-service",
+            defaults={
+                "remote_url": "https://answer-service:8800",
+                "verify_ssl": False,
+                "secrets_group": forge_group,
+            },
+        )
+        self._log_result("ExternalIntegration", "nfv-answer-service", created)
 
         # ---- Platform tunables (desired state: in the SoT, stored once) ----
         # Immutable platform FACTS (guest NIC-name order, cloud-init class)

@@ -302,10 +302,15 @@ Setup (once):
    `ANSWER_FIRMWARE_BASE_URL=http://<host>/images` in `.env`, then
    `docker compose --profile answer-service up -d --build`. Field-deployed
    instances keep the default: they serve installs, nothing else.
-2. **ExternalIntegration** named `nfv-answer-service`: remote URL = the
-   service base (`https://<svc>:8800`), *verify SSL* off for a self-signed
-   cert, and a Secrets Group carrying the admin bearer as **Access type
-   Generic / Secret type Token**.
+2. **Integration records** — created by `Bootstrap NFV Data Model`
+   (re-run it after updating): the `nfv-answer-service` ExternalIntegration
+   (remote URL seeded `https://answer-service:8800`, the compose-network
+   address — correct on composer and nfv-helper stacks; edit it if your
+   layout differs, bootstrap never overwrites), its Secrets Group, and the
+   token Secret *record*. You supply only the **value**:
+   `./add-secret.sh answer_service_admin_token` (the same bearer as
+   `ANSWER_ADMIN_TOKEN`), then verify with the Secret's "Check Secret"
+   button.
 
 Then run the job: release (e.g. `9.2-1`), optional PXE artifact set,
 optional version override. Registration **fail-closes on an existing
