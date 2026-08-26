@@ -289,9 +289,63 @@ if exists user-class and option user-class = "iPXE" {
 }
 ```
 
-(Windows DHCP: the same branching via a *user class* named `iPXE` and a
-vendor/arch policy on options 66/67. Keep `snponly.efi`, not `ipxe.efi` —
-see the field lesson above.)
+### Windows Server DHCP, step by step
+
+The branching is done with **DHCP policies** (Server 2012+). Everything below
+is scope-level on the install VLAN's scope — smallest blast radius; nothing
+touches other scopes. PowerShell (elevated, on the DHCP server; substitute
+the scope, TFTP IP, and boot-server URL):
+
+```powershell
+# 1. Classes the conditions match on. iPXE identifies itself with user class
+#    "iPXE"; UEFI x64 PXE ROMs send vendor class PXEClient:Arch:00007 (some
+#    firmware: 00009) followed by a variable UNDI suffix — hence prefix match.
+Add-DhcpServerv4Class -Name "iPXE"                -Type User   -Data "iPXE"
+Add-DhcpServerv4Class -Name "PXEClient-UEFI-x64"  -Type Vendor -Data "PXEClient:Arch:00007"
+Add-DhcpServerv4Class -Name "PXEClient-UEFI-x64b" -Type Vendor -Data "PXEClient:Arch:00009"
+
+# 2. Policy 1 (must process FIRST): loaded iPXE gets its script URL. An iPXE
+#    client ALSO matches the vendor-class policy below — processing order is
+#    what guarantees it gets the URL, not the chainloader again (loop).
+Add-DhcpServerv4Policy -Name "NFV-iPXE" -ScopeId 10.96.112.0 `
+  -Condition OR -UserClass EQ,"iPXE" -ProcessingOrder 1
+Set-DhcpServerv4OptionValue -ScopeId 10.96.112.0 -PolicyName "NFV-iPXE" `
+  -OptionId 67 -Value "http://<boot-server>:8077/boot.ipxe"
+
+# 3. Policy 2: plain UEFI x64 PXE ROMs chainload snponly.efi over TFTP.
+#    Trailing * = prefix match against the variable UNDI suffix.
+Add-DhcpServerv4Policy -Name "NFV-PXE-UEFI64" -ScopeId 10.96.112.0 `
+  -Condition OR -VendorClass EQ,"PXEClient:Arch:00007*",EQ,"PXEClient:Arch:00009*" `
+  -ProcessingOrder 2
+Set-DhcpServerv4OptionValue -ScopeId 10.96.112.0 -PolicyName "NFV-PXE-UEFI64" `
+  -OptionId 66 -Value "<tftp-server-ip>"
+Set-DhcpServerv4OptionValue -ScopeId 10.96.112.0 -PolicyName "NFV-PXE-UEFI64" `
+  -OptionId 67 -Value "snponly.efi"
+
+# Verify
+Get-DhcpServerv4Policy -ScopeId 10.96.112.0
+Get-DhcpServerv4OptionValue -ScopeId 10.96.112.0 -PolicyName "NFV-iPXE","NFV-PXE-UEFI64"
+```
+
+GUI equivalent: DHCP console → IPv4 → *define the classes* under **User
+Classes** / **Vendor Classes** (right-click IPv4) with the exact ASCII values
+above → the scope → **Policies** → New Policy → condition *User Class equals
+iPXE* (policy 1) / *Vendor Class equals PXEClient-UEFI-x64 with "Append
+wildcard(*)" checked, OR'd with the 00009 class* (policy 2) → on the options
+page set 067 (and 066 for policy 2) → order the iPXE policy above the vendor
+policy.
+
+Windows-specific cautions:
+
+- **Do NOT set option 60 (`PXEClient`)** on the scope — that's only for
+  WDS-on-the-DHCP-host setups and makes clients solicit boot service from
+  the DHCP server itself.
+- Keep `snponly.efi`, not `ipxe.efi` (the field lesson above), and no
+  scope-level 66/67 — boot options must exist **only inside the policies**,
+  or every DHCP client on the VLAN sees them.
+- Machines that are *not* in the SoT still chainload and reach the installer
+  menu; the answer-service serial allowlist is what keeps that harmless
+  (they 403 and install nothing).
 
 **Routed segments / `ip helper-address` labs.** Only the client's DISCOVER
 broadcast cares about L2 adjacency — TFTP, the HTTP payloads, and the answer
