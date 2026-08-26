@@ -261,6 +261,54 @@ install — allow 20–40 min**, slower than PXE/nested) → webhook flips
 phones the token home → SecretsGroup set → the job ejects the spent installer
 media. The node is then deployable by the VM jobs.
 
+## DHCP options reference
+
+**Default posture: none.** The shipped design needs no options on the site's
+DHCP server — PXE bootstrap comes from the proxyDHCP sidecar (above), and the
+answer-service URL + cert fingerprint are baked into the prepared artifact
+(`prepare-iso --url --fingerprint`). This section exists for labs that
+*prefer* configuring their real DHCP server instead of running the proxy.
+
+**Layer 1 — PXE bootstrap** (replaces the proxyDHCP sidecar; a TFTP server
+for the ~100 KB chainload binary is still required):
+
+| Option | Value | Condition |
+|---|---|---|
+| 66 (next-server) | TFTP server IP | UEFI x64 PXE clients (option 93 client-arch = `0x0007` or `0x0009`) |
+| 67 (bootfile) | `snponly.efi` | same clients, **except** iPXE |
+| 67 (bootfile) | `http://<boot-server>:8077/boot.ipxe` | clients with user class `iPXE` (option 77) — breaks the chainload loop by handing the loaded iPXE its script URL |
+
+ISC dhcpd sketch:
+
+```
+if exists user-class and option user-class = "iPXE" {
+    filename "http://<boot-server>:8077/boot.ipxe";
+} elsif option arch = 00:07 or option arch = 00:09 {
+    next-server <tftp-server>;
+    filename "snponly.efi";
+}
+```
+
+(Windows DHCP: the same branching via a *user class* named `iPXE` and a
+vendor/arch policy on options 66/67. Keep `snponly.efi`, not `ipxe.efi` —
+see the field lesson above.)
+
+**Layer 2 — auto-installer answer discovery** (only if you deliberately stop
+baking the URL into the artifact; verified against the installer source):
+
+| Option | Name the installer defines | Value |
+|---|---|---|
+| 250 (text) | `proxmox-auto-installer-manifest-url` | the answer URL, e.g. `https://<svc>:8800/answer` |
+| 251 (text) | `proxmox-auto-installer-cert-fingerprint` | SHA256 of the answer service's TLS cert |
+
+DNS alternative to both: TXT records `proxmox-auto-installer.<search-domain>`
+/ `proxmox-auto-installer-cert-fingerprint.<search-domain>` (the search domain
+must come via DHCP). Trade-off to state before choosing this over baking: a
+DHCP/DNS-discovered URL makes one prepared artifact fully endpoint-agnostic,
+but ties installs to DHCP infrastructure the field design deliberately avoids
+depending on (decision #11 pairs baked-URL with the vmedia/field path, option
+250 with PXE/lab setups).
+
 ## Disk layout of an installed node
 
 The `ext4` profile (fleet standard, decision #27) produces this layout —
