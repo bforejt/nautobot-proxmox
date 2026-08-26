@@ -57,7 +57,7 @@ process:
 
 | Knob | What it does | Required? |
 |---|---|---|
-| **Prepare the installer media** ([the script](../scripts/prepare-install-iso.sh)) | Turns the stock PVE ISO into the auto-installer and sets *how* the answer is fetched (`--fetch-from http`) | **Always.** A stock ISO never auto-installs; every proven path (nested, PXE, vmedia) used a prepared artifact |
+| **Prepare the installer media** — the [Media Forge job](#preparing-media-from-nautobot-the-media-forge) (preferred) or [the script](../scripts/prepare-install-iso.sh) (manual) | Turns the stock PVE ISO into the auto-installer and sets *how* the answer is fetched (`--fetch-from http`) | **Always.** A stock ISO never auto-installs; every proven path (nested, PXE, vmedia) used a prepared artifact |
 | **Answer-URL discovery** | How the installer learns *where* the answer service is | A choice **within** the prepare step: **bake it** (`--url` + `--fingerprint` — the default, decision #11) so DHCP needs nothing; or prepare URL-less and publish **DHCP option 250/251** (or DNS TXT) — one endpoint-agnostic artifact, in exchange for a DHCP dependency |
 | **Boot delivery** (vmedia / PXE / nested) | How a machine boots the artifact at all | Per-DeviceType profile. Only **PXE** involves DHCP (options 66/67 or the proxyDHCP sidecar) — and that DHCP layer has nothing to do with the answer file |
 
@@ -278,6 +278,43 @@ install — allow 20–40 min**, slower than PXE/nested) → webhook flips
 `bm_installed` → reboot to disk → firstboot creates the service account and
 phones the token home → SecretsGroup set → the job ejects the spent installer
 media. The node is then deployable by the VM jobs.
+
+## Preparing media from Nautobot (the media forge)
+
+The **`Prepare Installer Media (Media Forge)`** job replaces the manual
+prepare→copy→register chain with one run. The job is a thin trigger — the
+**answer service does the work against its own identity** (decision #44): it
+downloads the stock ISO (SHA256SUMS-verified, cached in its volume), runs
+`proxmox-auto-install-assistant` with **its own** `PUBLIC_URL` and cert
+fingerprint (never job inputs — a stale-URL/fingerprint artifact is
+structurally impossible), publishes into the firmware storage, and registers
+a **Staged** SoftwareVersion + ImageFile. The human promotion gate is
+unchanged: validate one install from Staged, then flip to **Active**. Cert
+rotation therefore collapses to: rotate cert → run this job → validate →
+promote.
+
+Setup (once):
+
+1. **Enable the forge on the lab/build instance only** — it ships
+   **disabled** (`ADMIN_ENABLED=false`; the `/admin/*` surface answers 404).
+   Composer: `ANSWER_ADMIN_ENABLED=true`, `ANSWER_ADMIN_TOKEN=<random>`,
+   `ANSWER_FIRMWARE_PUBLISH_DIR=/firmware-publish`,
+   `ANSWER_FIRMWARE_BASE_URL=http://<host>/images` in `.env`, then
+   `docker compose --profile answer-service up -d --build`. Field-deployed
+   instances keep the default: they serve installs, nothing else.
+2. **ExternalIntegration** named `nfv-answer-service`: remote URL = the
+   service base (`https://<svc>:8800`), *verify SSL* off for a self-signed
+   cert, and a Secrets Group carrying the admin bearer as **Access type
+   Generic / Secret type Token**.
+
+Then run the job: release (e.g. `9.2-1`), optional PXE artifact set,
+optional version override. Registration **fail-closes on an existing
+SoftwareVersion** — a version already in devices' intent is never silently
+re-pointed at a new artifact; re-run with an explicit new version instead.
+Failure modes are precise: forge disabled → the job says which instance to
+enable; bad bearer → check the integration's Secrets Group; version exists →
+override. The manual script remains fully supported (and is what non-forge
+environments use).
 
 ## DHCP options reference
 

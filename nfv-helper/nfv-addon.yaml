@@ -46,6 +46,14 @@ services:
       NAUTOBOT_SECRETS_PATH: /opt/nautobot/secrets/nodes
       DOMAIN: ${NFV_DOMAIN:-nfv.lab}
       TIMEZONE: ${NFV_TIMEZONE:-America/Chicago}
+      # Media forge (OFF by default; enable only on the lab/build instance —
+      # see docs/baremetal-install.md "media forge"). Publishing here needs a
+      # writable mount of your firmware server's storage (add it under
+      # volumes: and point NFV_FIRMWARE_PUBLISH_DIR at the mount target).
+      ADMIN_ENABLED: ${NFV_ADMIN_ENABLED:-false}
+      ADMIN_TOKEN: ${NFV_ADMIN_TOKEN:-}
+      FIRMWARE_PUBLISH_DIR: ${NFV_FIRMWARE_PUBLISH_DIR:-}
+      FIRMWARE_BASE_URL: ${NFV_FIRMWARE_BASE_URL:-}
     volumes:
       - nfv_answer_data:/data
       - ./nfv-helper/secrets:/secrets

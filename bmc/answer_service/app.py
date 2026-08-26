@@ -112,6 +112,23 @@ PVE_TOKEN_NAME = os.environ.get("PVE_TOKEN_NAME", "deploy")
 # role for the servers; "Hypervisor" was judged not specific enough).
 NFV_ROLE = os.environ.get("NFV_ROLE", "NFV")
 
+# ---- media forge (admin surface; decision #44) ----
+# DISABLED BY DEFAULT: field-deployed instances serve installs only. Enable
+# (plus a bearer token) ONLY on the lab/build instance that prepares
+# installer media. While disabled the /admin/* endpoints answer 404 — the
+# surface does not exist. Post-Option-D this capability stays containerized
+# (the prepare tool is a native binary that cannot live in the Nautobot App).
+ADMIN_ENABLED = os.environ.get("ADMIN_ENABLED", "false").lower() == "true"
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
+PVE_ISO_BASE_URL = os.environ.get("PVE_ISO_BASE_URL", "https://enterprise.proxmox.com/iso").rstrip("/")
+# Publish adapter, "volume" mode: a writable mount of the firmware server's
+# storage — prepared artifacts are copied in (and served immediately). Empty:
+# artifacts stay under /data and the task result reports their paths.
+FIRMWARE_PUBLISH_DIR = os.environ.get("FIRMWARE_PUBLISH_DIR", "")
+# Device-facing base URL of the firmware server (plain HTTP for XCC1 mounts);
+# used to build download_url at registration. Empty disables auto-register.
+FIRMWARE_BASE_URL = os.environ.get("FIRMWARE_BASE_URL", "").rstrip("/")
+
 app = FastAPI(title="NFV Answer Service", docs_url=None, redoc_url=None)
 
 # ---- one-time keys ----
@@ -554,3 +571,249 @@ async def webhook(request: Request, serial: str, key: str) -> dict:
     except ValueError:
         raise HTTPException(400, "webhook payload is not JSON")
     return await run_in_threadpool(_webhook_impl, serial, key, body)
+
+
+# ---- media forge: prepare installer media against THIS service's identity ----
+# (admin surface — see the config block; everything here is inert unless
+# ADMIN_ENABLED. The point of preparing media HERE: the URL and cert
+# fingerprint are injected from this process's own runtime identity, so
+# mismatched media is structurally impossible.)
+
+import shutil
+import subprocess
+import uuid
+
+_prepare_tasks: dict[str, dict] = {}
+_prepare_lock = threading.Lock()
+PREPARE_TOOL = "proxmox-auto-install-assistant"
+
+
+def _check_admin(authorization: str | None) -> None:
+    if not ADMIN_ENABLED:
+        raise HTTPException(404, "not found")  # surface hidden when disabled
+    if not ADMIN_TOKEN or authorization != f"Bearer {ADMIN_TOKEN}":
+        raise HTTPException(401, "bad or missing admin token")
+
+
+@app.get("/info")
+def info() -> dict:
+    """Read-only identity — media MUST be prepared against these values, which
+    is exactly what /admin/prepare guarantees by injecting them itself."""
+    return {
+        "public_url": PUBLIC_URL,
+        "cert_fingerprint": CERT_FINGERPRINT,
+        "nfv_role": NFV_ROLE,
+        "admin_enabled": ADMIN_ENABLED,
+    }
+
+
+def _tlog(tid: str, message: str) -> None:
+    log.info("[prepare %s] %s", tid[:8], message)
+    with _prepare_lock:
+        task = _prepare_tasks.get(tid)
+        if task is not None:
+            task["progress"].append(message)
+
+
+def _sha256_file(path: Path) -> str:
+    import hashlib
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _download_iso(tid: str, url: str, expected_sha: str | None, dest: Path) -> None:
+    if dest.exists() and expected_sha and _sha256_file(dest) == expected_sha:
+        _tlog(tid, f"stock ISO already cached and checksum-verified: {dest.name}")
+        return
+    _tlog(tid, f"downloading {url} ...")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(".part")
+    with requests.get(url, stream=True, timeout=60) as resp:
+        resp.raise_for_status()
+        done = 0
+        with open(tmp, "wb") as fh:
+            for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                fh.write(chunk)
+                done += len(chunk)
+                if done % (200 * 1024 * 1024) < 1024 * 1024:
+                    _tlog(tid, f"  ... {done // (1024 * 1024)} MiB")
+    if expected_sha:
+        seen = _sha256_file(tmp)
+        if seen != expected_sha:
+            tmp.unlink(missing_ok=True)
+            raise RuntimeError(f"stock ISO checksum mismatch: {seen} != {expected_sha}")
+        _tlog(tid, "stock ISO checksum verified")
+    os.replace(tmp, dest)
+
+
+def _prepare_task(tid: str, release: str | None, iso_url: str | None,
+                  iso_sha256: str | None, pxe: bool, version: str | None) -> None:
+    try:
+        iso_name = (iso_url.rsplit("/", 1)[-1] if iso_url else f"proxmox-ve_{release}.iso")
+        src_url = iso_url or f"{PVE_ISO_BASE_URL}/{iso_name}"
+        expected = iso_sha256
+        if not expected and not iso_url:
+            # Official base URL: the published SHA256SUMS file is authoritative.
+            sums = requests.get(f"{PVE_ISO_BASE_URL}/SHA256SUMS", timeout=30)
+            sums.raise_for_status()
+            for line in sums.text.splitlines():
+                parts = line.split()
+                if len(parts) == 2 and parts[1].lstrip("*") == iso_name:
+                    expected = parts[0]
+                    break
+            if not expected:
+                raise RuntimeError(f"{iso_name} not found in SHA256SUMS — bad release string?")
+        if not expected:
+            raise RuntimeError("custom iso_url requires iso_sha256 (fail-closed on integrity)")
+
+        cached = DATA_DIR / "iso-cache" / iso_name
+        _download_iso(tid, src_url, expected, cached)
+
+        outdir = DATA_DIR / "prepared" / tid
+        outdir.mkdir(parents=True, exist_ok=True)
+        out_iso = outdir / f"{iso_name[:-4]}-auto.iso"
+        cmd = [PREPARE_TOOL, "prepare-iso", str(cached),
+               "--fetch-from", "http", "--url", f"{PUBLIC_URL}/answer",
+               "--output", str(out_iso)]
+        if CERT_FINGERPRINT:
+            cmd += ["--cert-fingerprint", CERT_FINGERPRINT]
+        if ANSWER_AUTH_TOKEN:
+            cmd += ["--answer-auth-token", ANSWER_AUTH_TOKEN]
+        _tlog(tid, f"preparing ISO against {PUBLIC_URL}/answer "
+                   f"(fingerprint {'pinned' if CERT_FINGERPRINT else 'NOT pinned'})")
+        run = subprocess.run(cmd, capture_output=True, text=True, timeout=1200)
+        if run.returncode != 0:
+            raise RuntimeError(f"prepare-iso failed: {(run.stderr or run.stdout)[-400:]}")
+        artifacts = [out_iso]
+
+        if pxe:
+            pxe_dir = outdir / "pxe"
+            pxe_dir.mkdir(exist_ok=True)
+            _tlog(tid, "preparing PXE/iPXE artifact set")
+            run = subprocess.run(
+                [PREPARE_TOOL, "prepare-iso", str(cached),
+                 "--fetch-from", "http", "--url", f"{PUBLIC_URL}/answer",
+                 *(["--cert-fingerprint", CERT_FINGERPRINT] if CERT_FINGERPRINT else []),
+                 *(["--answer-auth-token", ANSWER_AUTH_TOKEN] if ANSWER_AUTH_TOKEN else []),
+                 "--pxe", "--pxe-loader", "ipxe", "--output", str(pxe_dir)],
+                capture_output=True, text=True, timeout=1200)
+            if run.returncode != 0:
+                raise RuntimeError(f"prepare-iso --pxe failed: {(run.stderr or run.stdout)[-400:]}")
+            artifacts += sorted(p for p in pxe_dir.iterdir() if p.is_file())
+
+        files = []
+        for path in artifacts:
+            sha = _sha256_file(path)
+            files.append({"name": path.name, "sha256": sha, "size": path.stat().st_size,
+                          "pxe": path.parent.name == "pxe", "local_path": str(path)})
+            _tlog(tid, f"artifact {path.name}: sha256={sha}")
+
+        published = False
+        if FIRMWARE_PUBLISH_DIR:
+            pub_root = Path(FIRMWARE_PUBLISH_DIR)
+            for entry, path in zip(files, artifacts):
+                target = (pub_root / "pxe" / path.name) if entry["pxe"] else (pub_root / path.name)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, target)
+                (target.parent / f"{path.name}.sha256").write_text(
+                    f"{entry['sha256']}  {path.name}\n")
+                if FIRMWARE_BASE_URL:
+                    rel = f"pxe/{path.name}" if entry["pxe"] else path.name
+                    entry["download_url"] = f"{FIRMWARE_BASE_URL}/{rel}"
+            published = True
+            _tlog(tid, f"published {len(files)} artifact(s) to {FIRMWARE_PUBLISH_DIR}")
+
+        registered, register_note = False, ""
+        if published and FIRMWARE_BASE_URL and NAUTOBOT_URL and NAUTOBOT_TOKEN:
+            version_str = version or (f"{release}-auto" if release else f"{iso_name[:-4]}-auto")
+            try:
+                registered, register_note = _register_prepared(
+                    tid, version_str, files[0])
+            except Exception as exc:  # registration failure must not lose the prepare
+                register_note = f"registration failed: {exc}"
+                _tlog(tid, register_note)
+        elif not published:
+            register_note = "not published (FIRMWARE_PUBLISH_DIR unset) — artifacts left in /data"
+        else:
+            register_note = "auto-registration disabled (FIRMWARE_BASE_URL or Nautobot creds unset)"
+
+        with _prepare_lock:
+            _prepare_tasks[tid].update(state="success", result={
+                "files": [{k: v for k, v in f.items() if k != "local_path"} or f for f in files],
+                "published": published,
+                "registered": registered,
+                "register_note": register_note,
+                "answer_url": f"{PUBLIC_URL}/answer",
+                "cert_fingerprint": CERT_FINGERPRINT,
+            })
+        _tlog(tid, "prepare complete")
+    except Exception as exc:
+        log.error("[prepare %s] FAILED: %s", tid[:8], exc)
+        with _prepare_lock:
+            _prepare_tasks[tid].update(state="error", error=str(exc))
+
+
+def _register_prepared(tid: str, version_str: str, iso_entry: dict) -> tuple[bool, str]:
+    """SoftwareVersion (Staged) + ImageFile for the prepared ISO. Fail-closed
+    on version collision: an existing version is NEVER silently re-pointed at
+    a new artifact (it may be Active and in devices' intent)."""
+    plats = _nb("GET", "/dcim/platforms/", params={"name": "proxmox-ve"}).get("results", [])
+    if not plats:
+        return False, "platform proxmox-ve missing — run Bootstrap NFV Data Model first"
+    existing = _nb("GET", "/dcim/software-versions/",
+                   params={"version": version_str, "platform": plats[0]["id"]}).get("results", [])
+    if existing:
+        return False, (f"SoftwareVersion {version_str!r} already exists — refusing to "
+                       "re-point it; re-run with an explicit new version")
+    staged = _nb("GET", "/extras/statuses/", params={"name": "Staged"})["results"][0]
+    active = _nb("GET", "/extras/statuses/", params={"name": "Active"})["results"][0]
+    sv = _nb("POST", "/dcim/software-versions/", json={
+        "platform": plats[0]["id"], "version": version_str, "status": staged["id"]})
+    _nb("POST", "/dcim/software-image-files/", json={
+        "software_version": sv["id"], "image_file_name": iso_entry["name"],
+        "image_file_checksum": iso_entry["sha256"], "hashing_algorithm": "sha256",
+        "image_file_size": iso_entry["size"], "download_url": iso_entry["download_url"],
+        "default_image": True, "status": active["id"]})
+    _tlog(tid, f"registered SoftwareVersion {version_str} (Staged) + ImageFile "
+               f"{iso_entry['name']} — promote Staged->Active after a validation install")
+    return True, f"SoftwareVersion {version_str} registered as Staged"
+
+
+@app.post("/admin/prepare")
+async def admin_prepare(request: Request, authorization: str | None = Header(default=None)) -> dict:
+    _check_admin(authorization)
+    body = await request.json()
+    release = (body.get("release") or "").strip() or None
+    iso_url = (body.get("iso_url") or "").strip() or None
+    if release and not re.fullmatch(r"[0-9]+\.[0-9]+-[0-9]+", release):
+        raise HTTPException(400, "release must look like 9.2-1")
+    if iso_url and not iso_url.startswith(("http://", "https://")):
+        raise HTTPException(400, "iso_url must be http(s)")
+    if not (release or iso_url):
+        raise HTTPException(400, "provide release or iso_url")
+    tid = uuid.uuid4().hex
+    with _prepare_lock:
+        _prepare_tasks[tid] = {"state": "running", "progress": [], "result": None, "error": None}
+    threading.Thread(
+        target=_prepare_task,
+        args=(tid, release, iso_url, (body.get("iso_sha256") or "").strip() or None,
+              bool(body.get("pxe")), (body.get("version") or "").strip() or None),
+        daemon=True,
+    ).start()
+    log.info("prepare task %s started (release=%s iso_url=%s pxe=%s)",
+             tid[:8], release, iso_url, bool(body.get("pxe")))
+    return {"task": tid}
+
+
+@app.get("/admin/prepare/{task_id}")
+def admin_prepare_status(task_id: str, authorization: str | None = Header(default=None)) -> dict:
+    _check_admin(authorization)
+    with _prepare_lock:
+        task = _prepare_tasks.get(task_id)
+        if task is None:
+            raise HTTPException(404, "unknown task (tasks do not survive restarts)")
+        return {"state": task["state"], "progress": list(task["progress"]),
+                "result": task["result"], "error": task["error"]}
