@@ -50,6 +50,24 @@ How a blank server becomes a fully registered Proxmox node with **one job run**
 - The service holds the root password **hash** (never plaintext); per-node API
   tokens go straight into text-file Secrets; nothing secret is logged.
 
+## The three knobs: prepared media, answer discovery, boot delivery
+
+Keep these distinct — conflating them is the most common way to misread the
+process:
+
+| Knob | What it does | Required? |
+|---|---|---|
+| **Prepare the installer media** ([the script](../scripts/prepare-install-iso.sh)) | Turns the stock PVE ISO into the auto-installer and sets *how* the answer is fetched (`--fetch-from http`) | **Always.** A stock ISO never auto-installs; every proven path (nested, PXE, vmedia) used a prepared artifact |
+| **Answer-URL discovery** | How the installer learns *where* the answer service is | A choice **within** the prepare step: **bake it** (`--url` + `--fingerprint` — the default, decision #11) so DHCP needs nothing; or prepare URL-less and publish **DHCP option 250/251** (or DNS TXT) — one endpoint-agnostic artifact, in exchange for a DHCP dependency |
+| **Boot delivery** (vmedia / PXE / nested) | How a machine boots the artifact at all | Per-DeviceType profile. Only **PXE** involves DHCP (options 66/67 or the proxyDHCP sidecar) — and that DHCP layer has nothing to do with the answer file |
+
+Terminology guardrail for network-team conversations: DHCP never carries an
+answer *file* — at most the answer *URL*. The answer file itself is always
+rendered **per node by the answer service at install time**, keyed on the
+machine's serial, identically under every discovery and delivery combination.
+(The upstream tool can also embed a static answer file in the ISO or on a USB
+partition — per-node media, the opposite of this fleet design; unused here.)
+
 ## One-time setup
 
 1. **Answer service container** — two supported paths:
