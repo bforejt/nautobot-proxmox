@@ -669,12 +669,26 @@ def _prepare_task(tid: str, release: str | None, iso_url: str | None,
         if not expected:
             raise RuntimeError("custom iso_url requires iso_sha256 (fail-closed on integrity)")
 
+        # Version string decides the ARTIFACT NAME: one file per version, so a
+        # new prepare can never overwrite the artifact an existing (possibly
+        # Active) version's checksum points at. Fail fast on a collision
+        # BEFORE the heavy download/prepare work when auto-registration is on.
+        version_str = version or (f"{release}-auto" if release else f"{iso_name[:-4]}-auto")
+        if FIRMWARE_BASE_URL and NAUTOBOT_URL and NAUTOBOT_TOKEN:
+            plats = _nb("GET", "/dcim/platforms/", params={"name": "proxmox-ve"}).get("results", [])
+            if plats and _nb("GET", "/dcim/software-versions/",
+                             params={"version": version_str, "platform": plats[0]["id"]}
+                             ).get("results", []):
+                raise RuntimeError(
+                    f"SoftwareVersion {version_str!r} already exists — refusing to "
+                    "re-point it; re-run with an explicit new version")
+
         cached = DATA_DIR / "iso-cache" / iso_name
         _download_iso(tid, src_url, expected, cached)
 
         outdir = DATA_DIR / "prepared" / tid
         outdir.mkdir(parents=True, exist_ok=True)
-        out_iso = outdir / f"{iso_name[:-4]}-auto.iso"
+        out_iso = outdir / f"proxmox-ve_{version_str}.iso"
         cmd = [PREPARE_TOOL, "prepare-iso", str(cached),
                "--fetch-from", "http", "--url", f"{PUBLIC_URL}/answer",
                "--output", str(out_iso)]
@@ -685,8 +699,14 @@ def _prepare_task(tid: str, release: str | None, iso_url: str | None,
         _tlog(tid, f"preparing ISO against {PUBLIC_URL}/answer "
                    f"(fingerprint {'pinned' if CERT_FINGERPRINT else 'NOT pinned'})")
         run = subprocess.run(cmd, capture_output=True, text=True, timeout=1200)
-        if run.returncode != 0:
-            raise RuntimeError(f"prepare-iso failed: {(run.stderr or run.stdout)[-400:]}")
+        # The tool can print an error yet exit 0 (seen live: missing xorriso)
+        # — the artifact existing is the real success signal.
+        if run.returncode != 0 or not out_iso.exists():
+            raise RuntimeError(
+                f"prepare-iso failed (rc={run.returncode}, artifact "
+                f"{'missing' if not out_iso.exists() else 'present'}): "
+                f"{(run.stderr or run.stdout)[-400:]}"
+            )
         artifacts = [out_iso]
 
         if pxe:
@@ -700,9 +720,13 @@ def _prepare_task(tid: str, release: str | None, iso_url: str | None,
                  *(["--answer-auth-token", ANSWER_AUTH_TOKEN] if ANSWER_AUTH_TOKEN else []),
                  "--pxe", "--pxe-loader", "ipxe", "--output", str(pxe_dir)],
                 capture_output=True, text=True, timeout=1200)
-            if run.returncode != 0:
-                raise RuntimeError(f"prepare-iso --pxe failed: {(run.stderr or run.stdout)[-400:]}")
-            artifacts += sorted(p for p in pxe_dir.iterdir() if p.is_file())
+            pxe_files = sorted(p for p in pxe_dir.iterdir() if p.is_file())
+            if run.returncode != 0 or not pxe_files:
+                raise RuntimeError(
+                    f"prepare-iso --pxe failed (rc={run.returncode}, "
+                    f"{len(pxe_files)} artifacts): {(run.stderr or run.stdout)[-400:]}"
+                )
+            artifacts += pxe_files
 
         files = []
         for path in artifacts:
@@ -715,20 +739,21 @@ def _prepare_task(tid: str, release: str | None, iso_url: str | None,
         if FIRMWARE_PUBLISH_DIR:
             pub_root = Path(FIRMWARE_PUBLISH_DIR)
             for entry, path in zip(files, artifacts):
-                target = (pub_root / "pxe" / path.name) if entry["pxe"] else (pub_root / path.name)
+                # PXE artifacts keep tool-given names -> per-version subdir so
+                # versions never collide there either.
+                rel = f"pxe/{version_str}/{path.name}" if entry["pxe"] else path.name
+                target = pub_root / rel
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(path, target)
                 (target.parent / f"{path.name}.sha256").write_text(
                     f"{entry['sha256']}  {path.name}\n")
                 if FIRMWARE_BASE_URL:
-                    rel = f"pxe/{path.name}" if entry["pxe"] else path.name
                     entry["download_url"] = f"{FIRMWARE_BASE_URL}/{rel}"
             published = True
             _tlog(tid, f"published {len(files)} artifact(s) to {FIRMWARE_PUBLISH_DIR}")
 
         registered, register_note = False, ""
         if published and FIRMWARE_BASE_URL and NAUTOBOT_URL and NAUTOBOT_TOKEN:
-            version_str = version or (f"{release}-auto" if release else f"{iso_name[:-4]}-auto")
             try:
                 registered, register_note = _register_prepared(
                     tid, version_str, files[0])
@@ -790,6 +815,9 @@ async def admin_prepare(request: Request, authorization: str | None = Header(def
     iso_url = (body.get("iso_url") or "").strip() or None
     if release and not re.fullmatch(r"[0-9]+\.[0-9]+-[0-9]+", release):
         raise HTTPException(400, "release must look like 9.2-1")
+    version = (body.get("version") or "").strip()
+    if version and not re.fullmatch(r"[A-Za-z0-9._-]{1,60}", version):
+        raise HTTPException(400, "version may only contain letters, digits, . _ -")
     if iso_url and not iso_url.startswith(("http://", "https://")):
         raise HTTPException(400, "iso_url must be http(s)")
     if not (release or iso_url):
@@ -800,7 +828,7 @@ async def admin_prepare(request: Request, authorization: str | None = Header(def
     threading.Thread(
         target=_prepare_task,
         args=(tid, release, iso_url, (body.get("iso_sha256") or "").strip() or None,
-              bool(body.get("pxe")), (body.get("version") or "").strip() or None),
+              bool(body.get("pxe")), version or None),
         daemon=True,
     ).start()
     log.info("prepare task %s started (release=%s iso_url=%s pxe=%s)",
