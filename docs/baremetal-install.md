@@ -293,6 +293,23 @@ if exists user-class and option user-class = "iPXE" {
 vendor/arch policy on options 66/67. Keep `snponly.efi`, not `ipxe.efi` —
 see the field lesson above.)
 
+**Routed segments / `ip helper-address` labs.** Only the client's DISCOVER
+broadcast cares about L2 adjacency — TFTP, the HTTP payloads, and the answer
+fetch are all unicast and route normally. Decision guide:
+
+- proxyDHCP box **on the install VLAN**: works unchanged — helpers relay the
+  lease request to central DHCP while the on-link proxy answers boot info
+  from the same broadcast. No helper changes.
+- proxyDHCP box **on another subnet**: possible by adding a second
+  `ip helper-address` pointing at it (dnsmasq serves relayed proxy requests,
+  inferring the subnet from `giaddr`), but this is the least reliable
+  variant — PXE firmware handling of *relayed* proxy offers varies. Avoid
+  for anything you depend on.
+- **You run the central DHCP server** (which a helper-based lab does): skip
+  proxyDHCP entirely and configure the options above on it. The proxy
+  exists for networks you *don't* control; when you do, real options are
+  simpler and firmware-proof.
+
 **Layer 2 — auto-installer answer discovery** (only if you deliberately stop
 baking the URL into the artifact; verified against the installer source):
 
