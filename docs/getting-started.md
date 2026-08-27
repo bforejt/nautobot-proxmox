@@ -18,7 +18,9 @@ idempotent — re-run any time; re-running after a repo update adds only what is
 new). This creates every role, relationship, DeviceType, platform, status, and
 custom field the other jobs rely on. (Standing up the stack fresh with
 nautobot-composer? Use `./setup.sh -v 2.4` — these jobs target Nautobot 2.4.x,
-not 3.x, per the README requirements.)
+not 3.x, per the README requirements. Composer can also do this **whole step**
+for you: `./setup.sh --with-nfv-jobs` registers this repo, syncs, enables the
+jobs, and runs the bootstrap against a healthy stack.)
 
 ## 2. Firmware/image server
 
@@ -30,16 +32,17 @@ at this server unless a specific image lives elsewhere.
 
 ## 3. Secrets
 
-- **Console password** (cloud-init guests): create Secret
-  `jumphost_console_password` (text-file provider or your backend).
-- **XCC/BMC credentials** (SE350 discovery + bare-metal track): Secrets named
-  exactly `xcc_username` and `xcc_password`. On a nautobot-composer stack:
-  `./add-secret.sh xcc_username` / `./add-secret.sh xcc_password`, then Secret
-  records with provider *Text File*, path `/opt/nautobot/secrets/<name>`.
-- **Host SSH credentials** (the `SE350 Host Verification (SSH)` job): Secrets
-  named exactly `host_ssh_username` and `host_ssh_password` — root (or
-  sudo-capable) login of the Linux-booted verification unit. Same creation
-  mechanics as above.
+**The Secret records are created by the bootstrap job** (text-file provider,
+standard paths — records only, never values; an existing record you've
+repointed at another provider is left alone). You supply the VALUES — on a
+nautobot-composer stack, one `./add-secret.sh <name>` per credential
+(`./setup.sh --nfv-secrets` prompts through all of them in one pass):
+
+- `jumphost_console_password` — console login for deployed cloud-init guests.
+- `xcc_username` / `xcc_password` — SE350 BMC login (discovery + vmedia
+  install delivery).
+- `host_ssh_username` / `host_ssh_password` — root (or sudo-capable) login
+  the `SE350 Host Verification (SSH)` job uses against a Linux-booted unit.
 - **Proxmox API token(s)** — two ways:
   - **Single host (quickstart)**: create Secrets `proxmox_token_id`
     (value = `user@realm!tokenname`) and `proxmox_token_secret` (the UUID). The

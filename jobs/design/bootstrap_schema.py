@@ -174,6 +174,29 @@ class BootstrapNfvSchema(Job):
         )
         self._log_result("ExternalIntegration", "nfv-answer-service", created)
 
+        # ---- Standard operational Secret RECORDS (values never; #44 rule) ----
+        # Every credential the jobs resolve gets its record pre-created
+        # (text-file provider, standard path) so operators only supply VALUES
+        # (./add-secret.sh <name> on composer stacks). Create-only: a record
+        # an admin repointed (e.g. to the env-var provider) is never touched.
+        for secret_name in (
+            "jumphost_console_password",
+            "xcc_username",
+            "xcc_password",
+            "host_ssh_username",
+            "host_ssh_password",
+            "proxmox_token_id",
+            "proxmox_token_secret",
+        ):
+            _, created = Secret.objects.get_or_create(
+                name=secret_name,
+                defaults={
+                    "provider": "text-file",
+                    "parameters": {"path": f"/opt/nautobot/secrets/{secret_name}"},
+                },
+            )
+            self._log_result("Secret", f"{secret_name} (record only)", created)
+
         # ---- Platform tunables (desired state: in the SoT, stored once) ----
         # Immutable platform FACTS (guest NIC-name order, cloud-init class)
         # live in code. TUNABLES live here as Platform custom fields
