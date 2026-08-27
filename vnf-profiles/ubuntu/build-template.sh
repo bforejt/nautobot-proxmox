@@ -170,8 +170,13 @@ Published on $NODE:$PUBLISH_DIR :
 
 Next (docs/image-lifecycle.md):
   1. Copy all four files to your firmware server's image root.
-  2. Register in Nautobot: SoftwareVersion "${VER}" (status STAGED) +
+  2. Register in Nautobot: run the "Register Image from Published Set" job
+     with Artifact URL = https://<firmware-server>/images/${NAME}.qcow2
+     (supply platform + version "${VER}" — template manifests don't carry
+     them; checksum/size come from the set). Manual fallback:
+     SoftwareVersion "${VER}" (status STAGED) +
      SoftwareImageFile: image_file_name=${NAME}.qcow2, sha256 above,
      size ${SIZE}, download_url=https://<firmware-server>/images/${NAME}.qcow2
-  3. Validate a Staged deploy, then promote the version Staged -> Active.
+  3. Promote Staged -> Active in the lab and validate one deploy — the
+     deploy job refuses non-Active versions (that IS the gate).
 EOF

@@ -40,6 +40,7 @@ CACHE = pathlib.Path(__file__).resolve().parent / ".cache" / "module_loading.py"
 
 EXPECTED_JOBS = {
     "BootstrapNfvSchema",
+    "RegisterVendorImage",
     "DeployVnfDevice",
     "DecommissionVnfDevice",
     "IngestImage",
