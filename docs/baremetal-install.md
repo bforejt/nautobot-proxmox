@@ -297,10 +297,11 @@ Setup (once):
 
 1. **Enable the forge on the lab/build instance only** — it ships
    **disabled** (`ADMIN_ENABLED=false`; the `/admin/*` surface answers 404).
-   Composer: `ANSWER_ADMIN_ENABLED=true`, `ANSWER_ADMIN_TOKEN=<random>`,
-   `ANSWER_FIRMWARE_PUBLISH_DIR=/firmware-publish`,
-   `ANSWER_FIRMWARE_BASE_URL=http://<host>/images` in `.env`, then
-   `docker compose --profile answer-service up -d --build`. Field-deployed
+   Composer: **`./setup.sh --enable-forge`** does it all (generates the
+   admin token once, mirrors it into the secrets file for the job, defaults
+   the publish dir and base URL), then
+   `docker compose --profile answer-service up -d --build`. Manual
+   equivalent: the four `ANSWER_*` values in `env.example`. Field-deployed
    instances keep the default: they serve installs, nothing else.
 2. **Integration records** — created by `Bootstrap NFV Data Model`
    (re-run it after updating): the `nfv-answer-service` ExternalIntegration
