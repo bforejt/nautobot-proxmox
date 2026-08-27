@@ -43,5 +43,9 @@ the canonical list.
 
 The forge's Nautobot-side plumbing (ExternalIntegration `nfv-answer-service`,
 its SecretsGroup, the token Secret record) is created by
-`Bootstrap NFV Data Model`; the bearer **value** is yours to supply
-(`./add-secret.sh answer_service_admin_token` on composer stacks).
+`Bootstrap NFV Data Model`. On composer stacks, **`./setup.sh --enable-forge`
+supplies everything else in one command** — generates the bearer once, sets
+the four `ANSWER_*` values, and mirrors the token into the secrets file the
+job reads (`--disable-forge` reverses the enable, keeping credentials).
+Elsewhere, supply the bearer value by hand into
+`secrets/answer_service_admin_token` and set the variables above.

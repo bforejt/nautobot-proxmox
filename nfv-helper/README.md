@@ -79,6 +79,17 @@ docker compose up -d --build     # (with the -f pair if mode B)
 This recreates the Nautobot service once (to pick up the mount) and builds +
 starts the answer service.
 
+## Media forge (optional)
+
+The service can also prepare installer media (see
+[docs/baremetal-install.md](../docs/baremetal-install.md), "media forge") —
+**off by default**. To enable on a lab/build instance: set the
+`NFV_ADMIN_*` values in the project `.env` (see
+[nfv-addon.env.example](nfv-addon.env.example)), add a writable mount of
+your firmware storage for publishing, write the same bearer to
+`secrets/answer_service_admin_token`, and rebuild. (nautobot-composer
+stacks get all of this via `./setup.sh --enable-forge`.)
+
 ## Verify
 
 ```bash

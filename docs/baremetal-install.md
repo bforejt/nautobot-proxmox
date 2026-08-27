@@ -80,20 +80,20 @@ partition — per-node media, the opposite of this fleet design; unused here.)
      multi-file merge, without editing your `docker-compose.yaml` (two
      activation modes, incl. zero-startup-change via the override filename).
 
-   Either way: set `NAUTOBOT_URL`/`NAUTOBOT_TOKEN`/`PUBLIC_URL`, and the
-   Nautobot + worker containers must share the secrets directory (mounted at
-   `/opt/nautobot/secrets`). Generate the TLS
-   cert and root password hash into the shared volumes (from the compose
-   project directory, service running):
+   Either way the requirements are the same: `NAUTOBOT_URL`/`NAUTOBOT_TOKEN`/
+   `PUBLIC_URL` set, the Nautobot + worker containers sharing the secrets
+   directory (`/opt/nautobot/secrets`), a TLS keypair whose SHA256
+   fingerprint is recorded, and the node root-password hash. **Both wrapper
+   setups automate all of that**: composer's `./setup.sh` (with the
+   answer-service profile — add `--enable-forge` on the lab/build instance
+   to also enable and credential the media forge in the same run) generates
+   the cert, seeds `ANSWER_CERT_FINGERPRINT` and `ANSWER_PUBLIC_URL`, and
+   creates the root hash; nfv-helper's `setup.sh` does the cert/fingerprint/
+   hash equivalents. Manual fallback (example-compose path, service
+   running):
 
    ```bash
-   docker compose exec -T answer-service sh -c 'apt-get -qq update && apt-get -qq install -y openssl >/dev/null; openssl req -x509 -newkey rsa:2048 -nodes -days 730 -subj "/CN=answer-service" -keyout /tls/answer-service.key -out /tls/answer-service.crt && openssl x509 -in /tls/answer-service.crt -outform der | sha256sum'
-   ```
-
-   Put the printed SHA256 in `ANSWER_CERT_FINGERPRINT` (compose `.env`) and
-   restart the service. Then the root hash (generated on any Linux box):
-
-   ```bash
+   docker compose exec -T answer-service sh -c 'apt-get -qq update && apt-get -qq install -y openssl >/dev/null; openssl req -x509 -newkey rsa:2048 -nodes -days 730 -subj "/CN=answer-service" -keyout /tls/answer-service.key -out /tls/answer-service.crt && openssl x509 -in /tls/answer-service.crt -outform der | sha256sum'   # SHA256 -> ANSWER_CERT_FINGERPRINT
    mkpasswd -m sha-512 | docker compose exec -T answer-service sh -c 'umask 077; cat > /secrets/root_password_hash'
    ```
 
