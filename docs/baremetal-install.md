@@ -87,7 +87,15 @@ partition — per-node media, the opposite of this fleet design; unused here.)
    durable answer for non-composer portability is the planned native
    Nautobot App.)
 
-2. **Prepared artifact** — on any PVE 9.x box (the lab NUC works):
+2. **Bootstrap** — re-run `Bootstrap NFV Data Model` (creates the
+   `proxmox-ve` platform, the promotion statuses, the standard Secret
+   records, and the forge's integration records — everything the next step
+   registers against).
+3. **Prepared artifact** — preferred: with the forge enabled, run the
+   **`Prepare Installer Media (Media Forge)`** job (see the media forge
+   section below) — it prepares, publishes, and registers the Staged version
+   in one run. Manual alternative (and the only path on non-forge
+   instances) — on any PVE 9.x box (the lab NUC works):
 
    ```bash
    ./scripts/prepare-install-iso.sh --iso proxmox-ve_9.2-1.iso --url https://<svc>:8800/answer --fingerprint <sha256-from-step-1>
@@ -104,8 +112,6 @@ partition — per-node media, the opposite of this fleet design; unused here.)
    SoftwareImageFile with filename, SHA256, `download_url`. Promote to
    **Active** — installer images ride the same promotion gate as golden VM
    images.
-3. **Bootstrap** — re-run `Bootstrap NFV Data Model` (adds the `Nested Lab
-   Node` DeviceType and `proxmox-ve` platform).
 
 ## The nested lab loop (no hardware needed)
 
@@ -207,7 +213,9 @@ state is refused and boots from disk.
 ## Physical servers (SE350 and beyond)
 
 Same loop; only delivery differs. The Device needs an `xcc` interface with the
-BMC IP (contract §4) and Secrets `xcc_username`/`xcc_password`. The
+BMC IP (contract §4) and Secrets `xcc_username`/`xcc_password` (records
+pre-created by the bootstrap; supply values via `./add-secret.sh` or
+composer's `./setup.sh --nfv-secrets` — see getting-started §3). The
 `redfish-vmedia` adapter auto-detects XCC1 (PATCH-on-EXT, plain-HTTP ISO) vs
 XCC2 (standard InsertMedia), arms a one-shot CD boot, and powers on.
 Remaining `[lab-verify]` on a real SE350: the vmedia write test + boot dress
@@ -233,9 +241,11 @@ Pre-flight, one-time in the lab:
 
 1. **Answer service up in the lab composer** ([its README](../bmc/answer_service/)
    / composer's Answer Service section): cert generated, fingerprint in
-   `.env`, root password hash written, profile in `COMPOSE_PROFILES`. Pull
-   this repo's current `main` in the sibling checkout and build with
-   `--build` — the install profiles bake into the image. Verify
+   `.env`, root password hash written, profile in `COMPOSE_PROFILES`. Rebuild
+   with `--build` — the default git build context fetches this repo's current
+   `main` automatically (the install profiles bake into the image); if
+   `ANSWER_SERVICE_BUILD_CONTEXT` points at a local checkout, pull that
+   checkout first. Verify
    `curl -k https://<svc>:8800/healthz` from the node's subnet.
 2. **Prepared ISO for THIS lab**: on any PVE box (the burn-in unit works),
    `prepare-install-iso.sh --iso <stock PVE ISO> --url https://<svc>:8800/answer
@@ -279,29 +289,37 @@ downloads the stock ISO (SHA256SUMS-verified, cached in its volume), runs
 fingerprint (never job inputs — a stale-URL/fingerprint artifact is
 structurally impossible), publishes into the firmware storage, and registers
 a **Staged** SoftwareVersion + ImageFile. The human promotion gate is
-unchanged: validate one install from Staged, then flip to **Active**. Cert
-rotation therefore collapses to: rotate cert → run this job → validate →
-promote.
+unchanged: promote Staged → **Active** in the lab, validate one install (the
+install job refuses non-Active versions), and roll back by flipping the
+previous version back if needed. Cert rotation therefore collapses to:
+rotate cert → run this job → promote in the lab → validate.
 
 Setup (once):
 
 1. **Enable the forge on the lab/build instance only** — it ships
-   **disabled** (`ADMIN_ENABLED=false`; the `/admin/*` surface answers 404).
+   **disabled** (composer: `ANSWER_ADMIN_ENABLED=false`, the service-internal
+   name is `ADMIN_ENABLED` — see the service README for the mapping; the
+   `/admin/*` surface answers 404 while off). The forge publishes into the
+   composer **firmware server's** storage — enable that profile too
+   (`--with-firmware`), or point the publish dir/base URL at your own server.
    Composer: **`./setup.sh --enable-forge`** does it all (generates the
    admin token once, mirrors it into the secrets file for the job, defaults
    the publish dir and base URL), then
    `docker compose --profile answer-service up -d --build`. Manual
-   equivalent: the four `ANSWER_*` values in `env.example`. Field-deployed
+   equivalent: the forge variables in
+   [the service README's media-forge table](../bmc/answer_service/README.md)
+   (`ANSWER_`-prefixed in composer's `env.example`). Field-deployed
    instances keep the default: they serve installs, nothing else.
 2. **Integration records** — created by `Bootstrap NFV Data Model`
    (re-run it after updating): the `nfv-answer-service` ExternalIntegration
    (remote URL seeded `https://answer-service:8800`, the compose-network
-   address — correct on compose networks; edit it if your
-   layout differs, bootstrap never overwrites), its Secrets Group, and the
-   token Secret *record*. You supply only the **value**:
-   `./add-secret.sh answer_service_admin_token` (the same bearer as
-   `ANSWER_ADMIN_TOKEN`), then verify with the Secret's "Check Secret"
-   button.
+   address — edit it if your layout differs, bootstrap never overwrites),
+   its Secrets Group, and the token Secret *record*. The token **value**:
+   if step 1 used `--enable-forge`, it is **already in
+   `secrets/answer_service_admin_token`** — do NOT overwrite it; just verify
+   with the Secret's "Check Secret" button. Only on a manually-configured
+   forge do you write it yourself (`./add-secret.sh
+   answer_service_admin_token`, same bearer as `ANSWER_ADMIN_TOKEN`).
 
 Then run the job: release (e.g. `9.2-1`), optional PXE artifact set,
 optional version override. Registration **fail-closes on an existing
@@ -472,7 +490,7 @@ Consequences worth knowing:
 | Symptom | Look at |
 |---|---|
 | Installer sits at answer fetch | Answer service log (`docker compose logs answer-service`): `REFUSED` lines say exactly why (unknown serial, wrong state, missing DefaultGW, no profile) |
-| `500 root password hash not provisioned` in the log | Step 1's `mkpasswd` command wasn't run — the hash file is per-request, the service starts without it |
+| `500 root password hash not provisioned` in the log | `secrets/root_password_hash` missing/empty — composer's `./setup.sh` generates it when the answer-service profile is enabled (re-run it), or create manually: `openssl passwd -6 > secrets/root_password_hash` |
 | Install finished but state didn't flip | `docker compose logs answer-service` — webhook arrives before reboot/power-off; payload archived in `/data/install-<serial>.json` |
 | No credentials after first boot | Node's journal: `journalctl -u proxmox-first-boot`; the phone-home retries for ~10 min, and its one-time key stays valid until success — but a consumed key needs a fresh install (by design) |
 | Phone-home 403 `source does not match` | The node reached the service from an IP other than its SoT primary_ip4 (NAT?) — fix the record or set `VERIFY_PHONE_HOME_SOURCE=false` |

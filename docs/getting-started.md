@@ -43,6 +43,11 @@ nautobot-composer stack, one `./add-secret.sh <name>` per credential
   install delivery).
 - `host_ssh_username` / `host_ssh_password` — root (or sudo-capable) login
   the `SE350 Host Verification (SSH)` job uses against a Linux-booted unit.
+
+Not on composer? Write each value to the file the record's path names
+(`/opt/nautobot/secrets/<name>`, readable by the Nautobot web and worker
+processes), or repoint the record at your own secrets provider — jobs resolve
+by record name, not provider.
 - **Proxmox API token(s)** — two ways:
   - **Single host (quickstart)**: create Secrets `proxmox_token_id`
     (value = `user@realm!tokenname`) and `proxmox_token_secret` (the UUID). The
@@ -91,8 +96,9 @@ node. Copy those files to the firmware server's image root, then register in
 Nautobot: a **SoftwareVersion** (status **Staged** — the bootstrap job
 provisioned this status for software models) + a **SoftwareImageFile**
 (filename, SHA256, size, `download_url`); the script prints the exact values.
-Validate a deploy from Staged, then promote Staged → **Active** (the human
-gate). Full lifecycle: [image-lifecycle.md](image-lifecycle.md). Platform
+Promote Staged → **Active** in the lab and validate one deploy (the deploy
+job refuses non-Active versions — that IS the gate); rollback is flipping the
+previous version back to Active, its artifact never left the server. Full lifecycle: [image-lifecycle.md](image-lifecycle.md). Platform
 tunables (day-0 builder, machine type, console user) are seeded by the
 bootstrap and adjustable per platform.
 

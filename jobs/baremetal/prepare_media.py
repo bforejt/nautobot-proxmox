@@ -131,8 +131,9 @@ class PrepareInstallerMedia(Job):
                 note = result.get("register_note", "")
                 if result.get("registered"):
                     return (
-                        f"{note}. Validate one install from Staged, then "
-                        "promote Staged -> Active (the human gate)."
+                        f"{note}. Promote Staged -> Active in the lab and "
+                        "validate one install (rollback = flip the previous "
+                        "version back to Active)."
                     )
                 self.logger.warning("Not auto-registered: %s", note)
                 return (

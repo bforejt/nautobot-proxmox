@@ -18,11 +18,17 @@ everything from the VM layer up.
   → SoT-true decommission. A v1→v2 template rollout has been exercised for real.
 - ✅ **The data model and contract**: bootstrapped idempotently by a job; every
   value the deploy reads is documented in one place.
-- ✅ **SE350/XCC platform discovery** (read-only Redfish sweep + optional
-  virtual-media write checks) for the future bare-metal track.
+- ✅ **Bare-metal install loop (L0), every mechanism field-proven**: a blank
+  server boots a prepared installer, identifies itself to the SoT-backed
+  answer service, installs unattended, and registers its own API credentials
+  — proven live via nested VM, PXE on a physical NUC, and the SE350's XCC
+  virtual-media checks. Installer media is prepared by the **media forge**
+  from a Nautobot job. See [docs/baremetal-install.md](docs/baremetal-install.md).
+- ✅ **SE350/XCC platform discovery + host verification** (read-only Redfish
+  sweep, opt-in vmedia write checks, SSH host checks) for the bare-metal track.
 - 🚧 **Not yet built**: Palo Alto / Cisco VNF day-0 builders (the deploy engine
-  is pluggable and ready for them), bare-metal Proxmox install via XCC, host
-  network/tuning automation, audit/converge jobs. See
+  is pluggable and ready for them), host network/tuning automation,
+  audit/converge jobs. See
   [docs/deployment-onboarding.md](docs/deployment-onboarding.md) for the honest
   gap register.
 
@@ -106,6 +112,9 @@ The minimum loop to prove it in a new lab:
 | `Decommission VNF Device (SoT-driven)` ([jobs/proxmox/decommission_device.py](jobs/proxmox/decommission_device.py)) | SoT-true teardown: verifies VMID+name match, destroys the VM, writes back Active→Planned. Deploy + decommission = the redeploy primitive. |
 | `Ingest Image onto Proxmox Node` ([jobs/proxmox/ingest_image.py](jobs/proxmox/ingest_image.py)) | Idempotent, checksum-verified pre-stage of an image onto a hypervisor — warm nodes ahead of maintenance windows. |
 | `SE350 Platform Discovery` ([jobs/baremetal/discover_platform.py](jobs/baremetal/discover_platform.py)) | Read-only Redfish sweep of a Lenovo XCC (BIOS attributes, virtual-media capability, firmware); opt-in write checks incl. a lab-only boot dress rehearsal. Edge-hardware track. |
+| `Install Proxmox Node (SoT-driven)` ([jobs/baremetal/install_node.py](jobs/baremetal/install_node.py)) | One-input bare-metal install: boots the prepared installer (nested VM or XCC virtual media per the DeviceType profile) and follows the state machine to an installed, self-credentialed node. |
+| `Prepare Installer Media (Media Forge)` ([jobs/baremetal/prepare_media.py](jobs/baremetal/prepare_media.py)) | Asks the answer service to prepare, publish, and register (Staged) installer media bound to its own URL/cert identity — decision #44. |
+| `SE350 Host Verification (SSH)` ([jobs/baremetal/verify_host.py](jobs/baremetal/verify_host.py)) | Read-only SSH pass over a Linux-booted SE350: disk-filter validation with the installer's own matching, DMI serial vs SoT, X722 LLDP flag, Secure Boot, BIOS-effect readbacks. |
 
 ## Documentation map
 
@@ -115,6 +124,7 @@ The minimum loop to prove it in a new lab:
 |---|---|
 | [getting-started.md](docs/getting-started.md) | One-time setup for a new environment, step by step, with a worked example |
 | [sot-data-contract.md](docs/sot-data-contract.md) | Exactly which Nautobot records the jobs read and write |
+| [baremetal-install.md](docs/baremetal-install.md) | How a blank server becomes a registered Proxmox node — answer service, media forge, nested/PXE/vmedia delivery, runbooks |
 | [deployment-onboarding.md](docs/deployment-onboarding.md) | What's portable vs. what's still manual — the gap register |
 | [image-lifecycle.md](docs/image-lifecycle.md) | How golden images are built, versioned, promoted, rolled back (notes which steps are scripted vs. jobs) |
 

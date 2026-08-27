@@ -1,19 +1,19 @@
 # Deployment & Onboarding — Standing Up a New Environment
 
-Honest status (2026-08-08): the **data model, deploy engine, and image
-lifecycle are portable and proven** — the jobs read everything from the SoT and
-carry no environment-specific logic. But the project is **not yet turnkey**:
-environment setup is still manual, several layers are unbuilt, the layout/intent
-engine is the adopter's responsibility, and everything has been validated only
-against a single x86 NUC — never a real SE350 pair. This document is both the
-onboarding runbook for what works today and the honest gap register for what
-doesn't.
+Honest status (2026-08-26): the **data model, deploy engine, image lifecycle,
+and bare-metal install loop are portable and field-proven** — the jobs read
+everything from the SoT and carry no environment-specific logic, and composer's
+setup flags (`--with-nfv-jobs`, `--nfv-secrets`, `--enable-forge`) automate most
+environment setup. Still short of turnkey: the layout/intent engine is the
+adopter's responsibility, the host network/tuning layers are unbuilt, and the
+first *real* SE350 install (plus LACP/jumbo/serial validation on a real pair)
+hasn't run. This document is both the onboarding runbook for what works today
+and the honest gap register for what doesn't.
 
 ## What is portable and proven
 
-- **The jobs** (Git-synced): `BootstrapNfvSchema`, `DeployVnfDevice`,
-  `DecommissionVnfDevice`, `IngestImage`, `DiscoverSe350Platform`. No hardcoded
-  environment logic — targets and values come from Nautobot.
+- **The jobs** (Git-synced): the eight jobs in the README's Jobs table. No
+  hardcoded environment logic — targets and values come from Nautobot.
 - **The data model**: created idempotently by `BootstrapNfvSchema` in any
   Nautobot 2.4 instance. Run once, re-run safely.
 - **The image lifecycle**: vendor base → sealed template → firmware server →
@@ -26,15 +26,18 @@ doesn't.
 
 ### Phase A — Environment setup (once per company)
 1. **Connect this repo** as a Nautobot Git Repository (provides: jobs), sync,
-   run **`BootstrapNfvSchema`** → creates roles, relationship, DeviceTypes,
-   platforms, custom fields, platform tunables.
+   enable the jobs, run **`BootstrapNfvSchema`** → creates roles, relationship,
+   DeviceTypes, platforms, statuses, custom fields, Secret records, forge
+   integration records. (Composer: `./setup.sh --with-nfv-jobs` performs this
+   whole step against a healthy stack.)
 2. **Stand up a firmware server** reachable by the Proxmox nodes over HTTP(S)
    at stable `/images/<file>` URLs (the composer `firmware` profile, or any
    equivalent nginx). `[gap: not automated]`
-3. **Create Secrets**: `proxmox_token_id`, `proxmox_token_secret`,
-   `jumphost_console_password`, and XCC creds — via Nautobot's text-file
-   secrets provider (which the composer stack pre-wires) or your secrets
-   backend.
+3. **Supply Secret VALUES** — the records themselves are pre-created by
+   `BootstrapNfvSchema` (text-file provider, `/opt/nautobot/secrets/<name>`).
+   On a composer stack: `./add-secret.sh <name>` per credential, or
+   `./setup.sh --nfv-secrets` for all seven in one pass; elsewhere, write the
+   files the records' paths name, or repoint records at your backend.
 4. **Create the Proxmox service account** per node (custom role `NFVAutomation`
    + privilege-separated token, granted to BOTH user and token), token value
    into the Secret. `[gap: manual today; firstboot-automated in the plan]`
@@ -44,9 +47,11 @@ doesn't.
    [vnf-profiles/ubuntu/build-template.sh](../vnf-profiles/ubuntu/build-template.sh)
    (vendor cloud image + build seed → sealed qcow2 + version set), copy the set
    to the firmware server, register the `SoftwareVersion` (Staged) +
-   `SoftwareImageFile`, then **promote Staged → Active** (human gate).
+   `SoftwareImageFile`, then **promote Staged → Active** in the lab and
+   validate one deploy (human gate; rollback = flip back).
    `[gap: build is a shipped script, not yet a job; publish-copy and
-   registration are manual]`
+   registration are manual for TEMPLATE images — installer media has the
+   media forge job]`
 
 ### Phase C — Per site (the repeatable operation)
 6. **The layout engine creates intent** — the adopter's Design Builder design
@@ -70,8 +75,8 @@ doesn't.
 | **Template build is a script, not a job** | Rebuilds need an operator with build-node SSH running [build-template.sh](../vnf-profiles/ubuntu/build-template.sh), not a button | A build-template job |
 | **Image registration is manual** | Version + image file + `download_url` entered by hand per environment | A registration helper / the build-template job |
 | **Layout engine has no reference implementation** | Each adopter must author their Design Builder design from the contract; the getting-started worked example demonstrates the shape by hand | Adopter responsibility; a reference design would help |
-| **Validated only on one x86 NUC** | LACP bonds, VLAN trunks, real SE350 firmware/BIOS/vmedia, jumbo, serial/OpenGear — all unproven on real hardware | The SE350 lab checklist |
-| **Setup is scattered, not one installer** | No single "new environment" runbook beyond this doc; several manual steps | A setup job/script + this doc maturing |
+| **Real-pair validation incomplete** | SE350 discovery, vmedia checks, disk identity, and host verification are green on a real unit — but LACP bonds, VLAN trunks, jumbo, serial/OpenGear, and the first real SE350 install remain unproven | The SE350 lab checklist + scheduling the first install |
+| **Setup mostly automated, not fully** | Composer's `setup.sh` flags cover stack, jobs, bootstrap, secrets values, and the forge; remaining manual: per-node service accounts on pre-built hosts, template-image registration, site intent | Firstboot covers new installs; a build-template job; the layout engine |
 
 ## Verdict
 

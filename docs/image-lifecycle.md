@@ -95,8 +95,8 @@ user-data files.
 
 ```
 seed change merged ─▶ template build ─▶ SoftwareVersion: Staged
-                                              │  validate: deploy one from
-                                              │  Staged in the lab, check it
+                                              │  lab: flip to Active,
+                                              │  validate one deploy
                                               ▼
                                         human flips ──▶ Active   ◀── rollback is
                                               │                      flipping back

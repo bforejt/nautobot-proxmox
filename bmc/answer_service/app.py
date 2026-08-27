@@ -803,7 +803,7 @@ def _register_prepared(tid: str, version_str: str, iso_entry: dict) -> tuple[boo
         "image_file_size": iso_entry["size"], "download_url": iso_entry["download_url"],
         "default_image": True, "status": active["id"]})
     _tlog(tid, f"registered SoftwareVersion {version_str} (Staged) + ImageFile "
-               f"{iso_entry['name']} — promote Staged->Active after a validation install")
+               f"{iso_entry['name']} — promote to Active in the lab, then validate one install")
     return True, f"SoftwareVersion {version_str} registered as Staged"
 
 
