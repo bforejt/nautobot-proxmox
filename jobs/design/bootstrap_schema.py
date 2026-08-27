@@ -10,12 +10,16 @@ already-present per object.
 Created here (decision log #8, Device-only modeling):
   - Relationship "Hosted On": hypervisor Device (source, one) -> VNF Devices
     (destination, many)
-  - Roles: Hypervisor, Jump Host (Firewall is assumed to exist / is ensured)
+  - Roles: NFV, Jump Host, Firewall (dcim.device); DefaultGW, DNS
+    (ipam.ipaddress)
   - 0U virtual DeviceTypes: VM-Series, C8000v, C9800-CL, Ubuntu Jump Host VM
-    (+ SE350 for the hypervisors themselves)
-  - Platforms: paloalto-panos, cisco-iosxe (ubuntu-jumphost ensured)
-  - Custom fields on dcim.device: provisioning_state (select w/ lifecycle
-    choices), vmid (integer), vcpus/memory_mb/disk_gb overrides (integers)
+    (+ SE350/NUC/Nested Lab Node for the server side)
+  - Platforms: ubuntu-jumphost, paloalto-panos, cisco-iosxe, proxmox-ve
+  - Statuses Staged/Retired (image promotion gate), forge integration
+    records, and every standard Secret RECORD (values never)
+  - Custom fields: platform tunables (day0_builder/machine_type/console_user)
+    and dcim.device fields (provisioning_state, vmid, sizing, hypervisor
+    targets incl. mgmt_bridge, secrets_group, pa_mgmt_mode)
 """
 
 from django.contrib.contenttypes.models import ContentType
@@ -93,6 +97,13 @@ class BootstrapNfvSchema(Job):
         role, created = Role.objects.get_or_create(name="DefaultGW")
         role.content_types.add(ipaddress_ct)
         self._log_result("Role", "DefaultGW (ipam.ipaddress)", created)
+
+        # DNS servers per prefix (same pattern as DefaultGW): consumers that
+        # need resolvers (PA static init-cfg) read the DNS-role IPs inside the
+        # mgmt interface's prefix — first = dns-primary, second = dns-secondary.
+        role, created = Role.objects.get_or_create(name="DNS")
+        role.content_types.add(ipaddress_ct)
+        self._log_result("Role", "DNS (ipam.ipaddress)", created)
 
         # ---- Manufacturers + 0U virtual DeviceTypes ----
         device_types = [
@@ -187,6 +198,13 @@ class BootstrapNfvSchema(Job):
             "host_ssh_password",
             "proxmox_token_id",
             "proxmox_token_secret",
+            # PA-VM day-0 (pa-bootstrap builder): admin password ships as a
+            # phash in bootstrap.xml; authcode is optional BYOL; the SCM PIN
+            # pair is read only when a device sets pa_mgmt_mode=scm.
+            "pa_admin_password",
+            "pa_authcode",
+            "scm_registration_pin_id",
+            "scm_registration_pin_value",
         ):
             _, created = Secret.objects.get_or_create(
                 name=secret_name,
@@ -211,7 +229,7 @@ class BootstrapNfvSchema(Job):
         )
         cf_day0.content_types.add(platform_ct)
         self._log_result("CustomField", "day0_builder (platform)", created)
-        for i, builder in enumerate(("native-cloudinit",)):  # extend as builders ship
+        for i, builder in enumerate(("native-cloudinit", "pa-bootstrap")):  # extend as builders ship
             _, ch_created = CustomFieldChoice.objects.get_or_create(
                 custom_field=cf_day0, value=builder, defaults={"weight": (i + 1) * 10}
             )
@@ -240,7 +258,10 @@ class BootstrapNfvSchema(Job):
         # never overwritten by a re-run.
         platform_seeds = {
             "ubuntu-jumphost": {"day0_builder": "native-cloudinit", "machine_type": "q35", "console_user": "manager"},
-            "paloalto-panos": {"machine_type": "q35"},
+            # machine_type: pin the exact q35 version (e.g. pc-q35-9.0) after
+            # the first successful lab boot — PAN-OS maps NICs by PCI-ID with
+            # no MAC fallback, so machine-version drift can rewire ethernet1/x.
+            "paloalto-panos": {"day0_builder": "pa-bootstrap", "machine_type": "q35"},
             "cisco-iosxe": {"machine_type": "q35"},
         }
         for plat_name, values in platform_seeds.items():
@@ -265,8 +286,15 @@ class BootstrapNfvSchema(Job):
             ("disk_gb", "integer", "Disk GB"),
             # Hypervisor-side deployment targets (set by the layout engine):
             ("vm_bridge", "text", "VM Bridge"),
+            # Optional: two-bridge hosts (decision #20 — vmbr0 mgmt / vmbr1
+            # data). Position-0 (mgmt) NICs land here when set; empty = every
+            # NIC on vm_bridge (single-bridge behavior unchanged).
+            ("mgmt_bridge", "text", "Mgmt Bridge"),
             ("vm_storage", "text", "VM Disk Storage"),
             ("import_storage", "text", "Import Storage"),
+            # PA-VM management mode (decision #2: per-VM attribute, not a code
+            # branch): standalone (default when empty) or scm.
+            ("pa_mgmt_mode", "select", "PA Mgmt Mode"),
             # Per-hypervisor Proxmox API credentials: names a SecretsGroup
             # (Generic/Username = token id, Generic/Secret = token UUID). Empty
             # = fall back to the global proxmox_token_id/secret pair (single-host
@@ -287,6 +315,13 @@ class BootstrapNfvSchema(Job):
                     )
                     if ch_created:
                         self._log_result("  choice", state, True)
+            if key == "pa_mgmt_mode":
+                for i, mode in enumerate(("standalone", "scm")):
+                    _, ch_created = CustomFieldChoice.objects.get_or_create(
+                        custom_field=cf, value=mode, defaults={"weight": (i + 1) * 10}
+                    )
+                    if ch_created:
+                        self._log_result("  choice", mode, True)
 
         return "NFV data model bootstrapped (idempotent — safe to re-run)."
 

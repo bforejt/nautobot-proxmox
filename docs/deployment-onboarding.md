@@ -1,6 +1,6 @@
 # Deployment & Onboarding — Standing Up a New Environment
 
-Honest status (2026-08-26): the **data model, deploy engine, image lifecycle,
+Honest status (2026-08-27): the **data model, deploy engine, image lifecycle,
 and bare-metal install loop are portable and field-proven** — the jobs read
 everything from the SoT and carry no environment-specific logic, and composer's
 setup flags (`--with-nfv-jobs`, `--nfv-secrets`, `--enable-forge`) automate most
@@ -12,7 +12,7 @@ and the honest gap register for what doesn't.
 
 ## What is portable and proven
 
-- **The jobs** (Git-synced): the eight jobs in the README's Jobs table. No
+- **The jobs** (Git-synced): the nine jobs in the README's Jobs table. No
   hardcoded environment logic — targets and values come from Nautobot.
 - **The data model**: created idempotently by `BootstrapNfvSchema` in any
   Nautobot 2.4 or 3.x instance (validated on 2.4.30 and 3.2). Run once,
@@ -37,7 +37,7 @@ and the honest gap register for what doesn't.
 3. **Supply Secret VALUES** — the records themselves are pre-created by
    `BootstrapNfvSchema` (text-file provider, `/opt/nautobot/secrets/<name>`).
    On a composer stack: `./add-secret.sh <name>` per credential, or
-   `./setup.sh --nfv-secrets` for all seven in one pass; elsewhere, write the
+   `./setup.sh --nfv-secrets` for all of them in one pass; elsewhere, write the
    files the records' paths name, or repoint records at your backend.
 4. **Create the Proxmox service account** per node (custom role `NFVAutomation`
    + privilege-separated token, granted to BOTH user and token), token value
@@ -50,9 +50,13 @@ and the honest gap register for what doesn't.
    to the firmware server, register the `SoftwareVersion` (Staged) +
    `SoftwareImageFile`, then **promote Staged → Active** in the lab and
    validate one deploy (human gate; rollback = flip back).
-   `[gap: build is a shipped script, not yet a job; publish-copy and
-   registration are manual for TEMPLATE images — installer media has the
-   media forge job]`
+   `[gap: build is a shipped script, not yet a job; publish-copy is manual —
+   registration is job-driven via Register Image from Published Set, and
+   installer media has the media forge job]` Vendor-sealed appliance images
+   (PA-VM) skip the build entirely:
+   [vnf-profiles/paloalto/register-vendor-image.sh](../vnf-profiles/paloalto/register-vendor-image.sh)
+   verifies, emits the version set, and prints the registration recipe
+   (see image-lifecycle.md's register-only track).
 
 ### Phase C — Per site (the repeatable operation)
 6. **The layout engine creates intent** — the adopter's Design Builder design
@@ -74,10 +78,11 @@ and the honest gap register for what doesn't.
 | **Host baseline + network jobs unbuilt** (L1/L2: bond/bridge/tuning) | Node networking (LACP, VLAN-aware bridge, MTU) is manual today | firstboot hook + `DeployHostNetworkJob` |
 | **Service-account bootstrap manual** *(closed for installed-by-us nodes)* | Nodes installed via the L0 loop get `svc-nfv@pve!deploy` + role + SecretsGroup automatically (firstboot → phone-home); hand-built hosts still follow the manual pveum steps | [baremetal-install.md](baremetal-install.md); manual path in getting-started §4 |
 | **Template build is a script, not a job** | Rebuilds need an operator with build-node SSH running [build-template.sh](../vnf-profiles/ubuntu/build-template.sh), not a button | A build-template job |
-| **Image registration is manual** | Version + image file + `download_url` entered by hand per environment | A registration helper / the build-template job |
+| **PA-VM deploy path BUILT, lab validation pending** | The full track shipped 2026-08-27: register-only image process (script live-tested against the real 11.2.8 image; the registration job's fetch/verify path proven in a live HTTP harness — first run against a real stack pending), `pa-bootstrap` day-0 builder (init-cfg + bootstrap.xml phash + optional authcodes → per-device ISO uploaded to the node), pattern NIC ordering, `mgmt_bridge`, smbios-pinned serial, tcp-mgmt readiness, decommission ISO sweep + delicense warning. Not yet run against a live PA-VM (#45 bar); needs a composer image rebuild (pycdlib) and the `Datastore.Allocate` role update | First validation: static-mgmt standalone, unlicensed, lab node — decision #46's checklist |
+| **Image registration** *(closed — job-driven)* | `Register Image from Published Set` reads a published version set (either track) and creates the Staged records — checksum/size come from the set, never hand-typed. Manual entry from the scripts' printed recipes remains the fallback | Remaining manual: publish-copy to the firmware server; the build itself (see the build-template row) |
 | **Layout engine has no reference implementation** | Each adopter must author their Design Builder design from the contract; the getting-started worked example demonstrates the shape by hand | Adopter responsibility; a reference design would help |
 | **Real-pair validation incomplete** | SE350 discovery, vmedia checks, disk identity, and host verification are green on a real unit — but LACP bonds, VLAN trunks, jumbo, serial/OpenGear, and the first real SE350 install remain unproven | The SE350 lab checklist + scheduling the first install |
-| **Setup mostly automated, not fully** | Composer's `setup.sh` flags cover stack, jobs, bootstrap, secrets values, and the forge; remaining manual: per-node service accounts on pre-built hosts, template-image registration, site intent | Firstboot covers new installs; a build-template job; the layout engine |
+| **Setup mostly automated, not fully** | Composer's `setup.sh` flags cover stack, jobs, bootstrap, secrets values, and the forge; remaining manual: per-node service accounts on pre-built hosts, image publish-copy, site intent | Firstboot covers new installs; a build-template job; the layout engine |
 
 ## Verdict
 

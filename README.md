@@ -94,7 +94,9 @@ The minimum loop to prove it in a new lab:
 2. Create the Secrets: a Proxmox API token pair (or a per-host SecretsGroup)
    and the jump-host console password.
 3. Build a golden image with
-   [vnf-profiles/ubuntu/build-template.sh](vnf-profiles/ubuntu/build-template.sh),
+   [vnf-profiles/ubuntu/build-template.sh](vnf-profiles/ubuntu/build-template.sh)
+   (vendor-sealed appliance images like PA-VM skip the build:
+   [vnf-profiles/paloalto/register-vendor-image.sh](vnf-profiles/paloalto/register-vendor-image.sh)),
    publish it to your firmware server, and register it (SoftwareVersion
    **Staged** → promote to **Active**).
 4. Create one hypervisor Device + one VNF Device (status **Planned**) per the
@@ -108,9 +110,10 @@ The minimum loop to prove it in a new lab:
 | Job | What it does |
 |---|---|
 | `Bootstrap NFV Data Model` ([jobs/design/bootstrap_schema.py](jobs/design/bootstrap_schema.py)) | Idempotently creates the data-model prerequisites (Hosted On relationship, roles, virtual DeviceTypes, platforms, custom fields, platform tunables, the Staged/Retired image statuses). Run once per environment; safe to re-run after every update. |
-| `Deploy VNF Device (SoT-driven)` ([jobs/proxmox/deploy_device.py](jobs/proxmox/deploy_device.py)) | Deploys one Planned VNF Device reading everything from Nautobot per the contract — hypervisor via Hosted On, Active-gated image, sizing, pinned-MAC NICs, console credentials. Writes back VMID + flips to Active. |
+| `Deploy VNF Device (SoT-driven)` ([jobs/proxmox/deploy_device.py](jobs/proxmox/deploy_device.py)) | Deploys one Planned VNF Device reading everything from Nautobot per the contract — hypervisor via Hosted On, Active-gated image, sizing, pinned-MAC NICs; day-0 = console credentials (cloud-init guests) or a per-device bootstrap ISO (PA firewalls). Writes back VMID + flips to Active. |
 | `Decommission VNF Device (SoT-driven)` ([jobs/proxmox/decommission_device.py](jobs/proxmox/decommission_device.py)) | SoT-true teardown: verifies VMID+name match, destroys the VM, writes back Active→Planned. Deploy + decommission = the redeploy primitive. |
 | `Ingest Image onto Proxmox Node` ([jobs/proxmox/ingest_image.py](jobs/proxmox/ingest_image.py)) | Idempotent, checksum-verified pre-stage of an image onto a hypervisor — warm nodes ahead of maintenance windows. |
+| `Register Image from Published Set` ([jobs/design/register_image.py](jobs/design/register_image.py)) | Point it at a published qcow2 URL: reads the `.sha256` + `manifest.json` siblings, verifies the served artifact (optional full re-hash), and registers the Staged SoftwareVersion + SoftwareImageFile — checksum/size never hand-typed. Create-only; refuses checksum collisions. |
 | `SE350 Platform Discovery` ([jobs/baremetal/discover_platform.py](jobs/baremetal/discover_platform.py)) | Read-only Redfish sweep of a Lenovo XCC (BIOS attributes, virtual-media capability, firmware); opt-in write checks incl. a lab-only boot dress rehearsal. Edge-hardware track. |
 | `Install Proxmox Node (SoT-driven)` ([jobs/baremetal/install_node.py](jobs/baremetal/install_node.py)) | One-input bare-metal install: boots the prepared installer (nested VM or XCC virtual media per the DeviceType profile) and follows the state machine to an installed, self-credentialed node. |
 | `Prepare Installer Media (Media Forge)` ([jobs/baremetal/prepare_media.py](jobs/baremetal/prepare_media.py)) | Asks the answer service to prepare, publish, and register (Staged) installer media bound to its own URL/cert identity — decision #44. |
@@ -156,7 +159,8 @@ The minimum loop to prove it in a new lab:
 ```
 jobs/            Nautobot jobs (Git-synced) + pure-Python libs (lib/)
 bmc/             BIOS/firmware policy as data (SE350 edge track)
-vnf-profiles/    Golden-image build seeds + build script per guest platform
+vnf-profiles/    Per-guest-platform image tooling: build seeds + build script
+                 (ubuntu), vendor-image register script (paloalto)
 docs/            The documentation set above
 tests/           Loader harness (validates job discovery pre-push)
 ```

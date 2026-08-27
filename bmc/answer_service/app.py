@@ -103,7 +103,7 @@ PVE_ROLE_PRIVS = os.environ.get(
     "VM.Allocate,VM.Clone,VM.Config.CDROM,VM.Config.CPU,VM.Config.Cloudinit,"
     "VM.Config.Disk,VM.Config.HWType,VM.Config.Memory,VM.Config.Network,"
     "VM.Config.Options,VM.PowerMgmt,VM.Audit,VM.Console,"
-    "Datastore.AllocateSpace,Datastore.AllocateTemplate,Datastore.Audit,"
+    "Datastore.Allocate,Datastore.AllocateSpace,Datastore.AllocateTemplate,Datastore.Audit,"
     "Sys.Audit,Sys.Modify,SDN.Use",
 )
 PVE_SERVICE_USER = os.environ.get("PVE_SERVICE_USER", "svc-nfv@pve")
