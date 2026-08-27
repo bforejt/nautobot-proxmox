@@ -5,12 +5,15 @@ principle: **templates are build outputs, never pets.** The sources of truth
 are (1) the vendor's pristine base image (URL + upstream checksum) and (2) the
 build seed in this repo (reviewed via change control). Every template is a
 derived, disposable artifact — if one were lost, rerunning the build
-reproduces it.
+reproduces it. Vendor-sealed appliance images (PA-VM, C8000v) are the one
+exception: no seed, no rebuild, and vendor portals delist old versions — for
+those the published firmware-server copy IS the durable artifact, so
+retention matters more there, not less.
 
 The Staged/Active/Retired statuses this lifecycle uses on SoftwareVersion /
 SoftwareImageFile are provisioned by the **`Bootstrap NFV Data Model`** job.
 
-## Two processes, two cadences, two blast radii
+## Three tracks, three cadences, three blast radii
 
 ### Template build — runs rarely (new base release, seed change, CVE refresh)
 
@@ -62,12 +65,51 @@ never a field node.
 6. **Register**: create the `SoftwareVersion` (status **Staged**) +
    `SoftwareImageFile` (composer URL, checksum, size) in Nautobot, stamped with
    the seed's git commit — full provenance chain: running clone → version record
-   → seed commit → vendor base.
+   → seed commit → vendor base. The **`Register Image from Published Set`**
+   job does this from the artifact URL (template manifests don't carry
+   platform/version, so supply those two inputs; checksum and size come from
+   the published set).
 
-Vendor-qcow2 image classes (PAN-OS, C8000v, 9800-CL) skip steps 2–4: the
-entitlement-gated file is downloaded manually, uploaded to the firmware
-server, and registered the same way (a register-vendor-image job is planned).
-Both paths end in the same place: a **Staged** SoftwareVersion.
+### Vendor-sealed appliance images — runs per vendor release (register-only)
+
+Vendor-qcow2 image classes (PAN-OS, C8000v, 9800-CL) have **no build, no
+seal, no seed**: the vendor image must be deployed exactly as shipped. For
+PA-VM this is a hard vendor rule — each firewall must run its own independent
+copy of the image, and cloning a *booted* instance invalidates its license
+(the serial number derives from VM UUID + CPU ID). So the pipeline reduces to
+**acquire → verify → publish → register**, scripted by
+[vnf-profiles/paloalto/register-vendor-image.sh](../vnf-profiles/paloalto/register-vendor-image.sh)
+(PA defaults; vendor identity env-overridable for the other classes — runs on
+your workstation, no node SSH):
+
+1. **Acquire** manually from the vendor's entitlement-gated portal (the one
+   step that can't be automated), and capture the portal's published SHA256.
+2. **Verify + emit the version set** — the script checks the qcow2 magic,
+   verifies against the portal checksum when provided (`VENDOR_SHA256=…`,
+   recorded in the manifest as `vendor-portal-verified` vs `computed-local`),
+   and writes the set next to the image. Three files, not four — there is no
+   seed: the **untouched** vendor qcow2 (never re-converted; the shipped
+   bytes ARE the artifact), the `.sha256` sidecar, and a `manifest.json`
+   with vendor-shaped provenance (vendor, product, platform, version label,
+   source, checksums, sizes) in place of the build-shaped one.
+3. **Publish** the three files to the firmware server image root (the script
+   scp's them when given a target) and **register** with the
+   **`Register Image from Published Set`** job — give it the artifact URL
+   and it reads checksum, size, platform, and version from the published set
+   itself (vendor-track manifests carry all four), verifies the artifact is
+   actually served (optional full re-hash), and creates the Staged
+   SoftwareVersion + SoftwareImageFile. Manual entry from the script's
+   printed recipe remains the fallback.
+
+Lifecycle differences from templates: **refresh = register a new vendor
+version** (there is nothing to rebuild — the CVE story is the vendor's
+release cadence), and the published artifact is never booted directly — a
+checksum-verified copy is pulled per node (**`Ingest Image onto Proxmox
+Node`** pre-warms; **`Deploy VNF Device`** pulls at deploy). PAN-OS's
+`pa-bootstrap` day-0 builder shipped 2026-08-27 (lab validation pending —
+decision #46); IOS-XE remains Phase 2c and registers-but-cannot-deploy until
+its builder ships. Both tracks end in the same place: a **Staged**
+SoftwareVersion, promoted through the same Staged → Active gate below.
 
 ### `Deploy VNF Device (SoT-driven)` — runs constantly (every site build, every field redeploy)
 
@@ -79,11 +121,13 @@ Consumes only Nautobot intent, never touches vendor sources or seeds:
    standalone to warm nodes ahead of a window.
 2. VM created from it (`import-from` volume ID) with config generated from the
    Device record + its Interfaces/VLANs + platform facts and Platform CFs.
-3. Per-VM cloud-init is **identity only**: hostname from the device, IP/gateway
-   from Nautobot IPAM (or DHCP), console user from the Platform's
-   `console_user` CF with the password from the `jumphost_console_password`
-   Secret. Seconds per clone, no package installs, no internet dependency at
-   deploy time — the gigabytes are already in the template.
+3. Per-VM day-0 is **identity only**. Cloud-init platforms: hostname from the
+   device, IP/gateway from Nautobot IPAM (or DHCP), console user from the
+   Platform's `console_user` CF with the password from the
+   `jumphost_console_password` Secret. pa-bootstrap platforms get a per-device
+   bootstrap ISO instead (contract §4a) — no cloud-init at all. Seconds per
+   clone, no package installs, no internet dependency at deploy time — the
+   gigabytes are already in the template.
 
 Deploy-time customization stays on Proxmox's *native* cloud-init keys (no
 snippet uploads, which the API can't do). Anything richer — like default users

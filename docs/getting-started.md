@@ -43,6 +43,12 @@ nautobot-composer stack, one `./add-secret.sh <name>` per credential
   install delivery).
 - `host_ssh_username` / `host_ssh_password` — root (or sudo-capable) login
   the `SE350 Host Verification (SSH)` job uses against a Linux-booted unit.
+- `pa_admin_password` — PA-VM admin password (REQUIRED before a PA deploy;
+  it ships in bootstrap.xml as a hash so firewalls never come up admin/admin).
+- `pa_authcode` — optional BYOL auth code; leave valueless for unlicensed
+  lab boots.
+- `scm_registration_pin_id` / `scm_registration_pin_value` — only needed for
+  devices with `pa_mgmt_mode=scm` (Strata Cloud Manager registration).
 
 Not on composer? Write each value to the file the record's path names
 (`/opt/nautobot/secrets/<name>`, readable by the Nautobot web and worker
@@ -65,7 +71,7 @@ a custom **`NFVAutomation`** role and a privilege-separated token. As root on
 the node:
 
 ```bash
-pveum role add NFVAutomation --privs "VM.Allocate,VM.Clone,VM.Config.Disk,VM.Config.CDROM,VM.Config.CPU,VM.Config.Memory,VM.Config.Network,VM.Config.HWType,VM.Config.Options,VM.Config.Cloudinit,VM.PowerMgmt,VM.Audit,VM.Console,Datastore.AllocateSpace,Datastore.AllocateTemplate,Datastore.Audit,Sys.Audit,Sys.Modify,SDN.Use"
+pveum role add NFVAutomation --privs "VM.Allocate,VM.Clone,VM.Config.Disk,VM.Config.CDROM,VM.Config.CPU,VM.Config.Memory,VM.Config.Network,VM.Config.HWType,VM.Config.Options,VM.Config.Cloudinit,VM.PowerMgmt,VM.Audit,VM.Console,Datastore.Allocate,Datastore.AllocateSpace,Datastore.AllocateTemplate,Datastore.Audit,Sys.Audit,Sys.Modify,SDN.Use"
 pveum user add nfv-automation@pve --comment "Nautobot NFV jobs"
 pveum user token add nfv-automation@pve nautobot --privsep 1   # SAVE the printed UUID
 pveum acl modify / --users nfv-automation@pve --roles NFVAutomation
@@ -77,6 +83,17 @@ the **intersection** of the user's ACLs and the token's ACLs, so the role must
 be granted to BOTH (validated the hard way — role on the user only = 403 on
 everything). Put the token id (`nfv-automation@pve!nautobot`) and the UUID
 where step 3 expects them.
+
+**Upgrading an existing install**: `Datastore.Allocate` joined the role
+2026-08-27 (the PA deploy path deletes its own bootstrap ISO after first
+boot — content deletion needs it; the deliberate gap noted in decision #35 is
+now closed). The answer service's firstboot role default was updated in the
+same change, so freshly L0-installed nodes get it automatically — nodes
+installed before that update, and hand-built nodes, re-run:
+
+```bash
+pveum role modify NFVAutomation --privs "VM.Allocate,VM.Clone,VM.Config.Disk,VM.Config.CDROM,VM.Config.CPU,VM.Config.Memory,VM.Config.Network,VM.Config.HWType,VM.Config.Options,VM.Config.Cloudinit,VM.PowerMgmt,VM.Audit,VM.Console,Datastore.Allocate,Datastore.AllocateSpace,Datastore.AllocateTemplate,Datastore.Audit,Sys.Audit,Sys.Modify,SDN.Use"
+```
 
 ## 5. A golden image
 
@@ -95,12 +112,19 @@ seals, and publishes the version set (qcow2 + sha256 + seed + manifest) on the
 node. Copy those files to the firmware server's image root, then register in
 Nautobot: a **SoftwareVersion** (status **Staged** — the bootstrap job
 provisioned this status for software models) + a **SoftwareImageFile**
-(filename, SHA256, size, `download_url`); the script prints the exact values.
+(filename, SHA256, size, `download_url`) — the **`Register Image from
+Published Set`** job does this from the artifact URL (supply platform +
+version for template sets), or enter the values the script prints by hand.
 Promote Staged → **Active** in the lab and validate one deploy (the deploy
 job refuses non-Active versions — that IS the gate); rollback is flipping the
 previous version back to Active, its artifact never left the server. Full lifecycle: [image-lifecycle.md](image-lifecycle.md). Platform
 tunables (day-0 builder, machine type, console user) are seeded by the
 bootstrap and adjustable per platform.
+
+Vendor-sealed appliance images (PA-VM) skip the build entirely:
+[vnf-profiles/paloalto/register-vendor-image.sh](../vnf-profiles/paloalto/register-vendor-image.sh)
+verifies the vendor qcow2, publishes the version set, and prints the same
+registration recipe (see image-lifecycle.md's register-only track).
 
 ## 6. Site intent (your layout process)
 

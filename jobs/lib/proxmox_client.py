@@ -138,6 +138,42 @@ class ProxmoxClient:
         return self.download_url(node, storage, url, filename,
                                  checksum=checksum, checksum_algorithm=checksum_algorithm)
 
+    def find_iso_volume(self, node: str, storage: str, filename: str) -> Optional[str]:
+        for item in self.storage_content(node, storage, "iso"):
+            if item.get("volid", "").endswith(f"/{filename}"):
+                return item["volid"]
+        return None
+
+    def upload_file(self, node: str, storage: str, local_path: str,
+                    content: str = "iso", filename: Optional[str] = None,
+                    timeout: int = 600) -> str:
+        """Multipart upload to node storage (API-accepted content types only:
+        iso/vztmpl/import — snippets are NOT uploadable, a PVE limitation).
+        Overwrites an existing same-named file. Returns the volid."""
+        import os
+        filename = filename or os.path.basename(local_path)
+        with open(local_path, "rb") as fh:
+            r = self.session.post(
+                f"{self.base_url}/nodes/{node}/storage/{storage}/upload",
+                data={"content": content}, files={"filename": (filename, fh)},
+                timeout=timeout,
+            )
+        if r.status_code >= 400:
+            raise ProxmoxError(f"upload {filename} -> {r.status_code}: {r.text[:300]}")
+        upid = r.json().get("data")
+        if isinstance(upid, str) and upid.startswith("UPID"):
+            self.wait_task(node, upid, timeout=timeout)
+        return f"{storage}:{content}/{filename}"
+
+    def delete_volume(self, node: str, storage: str, volid: str, timeout: int = 300) -> None:
+        """Delete loose storage content (e.g. a bootstrap ISO). Needs
+        Datastore.Allocate on the storage — see the NFVAutomation role."""
+        result = self.delete(
+            f"/nodes/{node}/storage/{storage}/content/{urllib.parse.quote(volid, safe='')}"
+        )
+        if isinstance(result, str) and result.startswith("UPID"):
+            self.wait_task(node, result, timeout=timeout)
+
     # ---------- VM lifecycle ----------
 
     def create_vm(self, node: str, params: dict, timeout: int = 900) -> None:

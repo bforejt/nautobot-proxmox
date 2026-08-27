@@ -14,7 +14,7 @@ from nautobot.dcim.models import Device
 from nautobot.extras.models import RelationshipAssociation, Status
 
 from ..lib.nautobot_helpers import resolve_proxmox_credentials
-from ..lib.proxmox_client import ProxmoxClient
+from ..lib.proxmox_client import ProxmoxClient, ProxmoxError
 
 
 class DecommissionVnfDevice(Job):
@@ -56,6 +56,16 @@ class DecommissionVnfDevice(Job):
         client = ProxmoxClient(host=str(hyp.primary_ip4.address.ip), token_id=token_id, token_secret=token_secret)
 
         node = hyp.name
+        pa_platform = bool(
+            device.platform and device.platform.cf.get("day0_builder") == "pa-bootstrap"
+        )
+        if pa_platform:
+            self.logger.warning(
+                "PA-VM licensing: if %s carries a capacity license, DEACTIVATE it before "
+                "destroy (Device > Licenses > Deactivate VM, or the Licensing API) — "
+                "destroying without deactivation strands the license against the dead "
+                "serial number. Unlicensed lab units: proceed.", device.name,
+            )
         vm = next((v for v in client.list_vms(node) if v.get("vmid") == int(vmid)), None)
         if vm is None:
             self.logger.warning(
@@ -73,6 +83,26 @@ class DecommissionVnfDevice(Job):
                 client.stop_vm(node, int(vmid))
             self.logger.info("Destroying VM %s (%s) on %s", vmid, device.name, node)
             client.destroy_vm(node, int(vmid))
+
+        if pa_platform:
+            # destroy_vm purges only VM-owned volumes — a bootstrap ISO left
+            # attached (unverifiable/failed deploy) is loose storage content
+            # carrying credentials; sweep it.
+            iso_storage = hyp.cf.get("import_storage")
+            if iso_storage:
+                # Best-effort sweep: the destroy has already happened, so a
+                # storage error here must never abort before the SoT write-back.
+                try:
+                    orphan = client.find_iso_volume(node, str(iso_storage), f"{device.name}-bootstrap.iso")
+                    if orphan:
+                        client.delete_volume(node, str(iso_storage), orphan)
+                        self.logger.info("Swept orphaned bootstrap ISO %s", orphan)
+                except ProxmoxError as exc:
+                    self.logger.warning(
+                        "Bootstrap-ISO sweep failed — check for %s-bootstrap.iso on %s "
+                        "manually (delete needs Datastore.Allocate; getting-started §4): %s",
+                        device.name, iso_storage, exc,
+                    )
 
         device._custom_field_data["vmid"] = None
         device.status = Status.objects.get(name="Planned")
