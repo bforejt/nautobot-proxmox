@@ -74,7 +74,7 @@ storage blocks VM autostart when one node dies).
 
 | Component | Version / notes |
 |---|---|
-| **Nautobot** | 2.4.x (built and tested on 2.4.30). Needs core `SoftwareVersion`/`SoftwareImageFile` (2.2+). Nautobot 3.x is planned but not yet targeted. |
+| **Nautobot** | 2.4.x and 3.x (built on 2.4.30; validated on 3.2). Needs core `SoftwareVersion`/`SoftwareImageFile` (2.2+). |
 | **Proxmox VE** | 9.x (validated on 9.2). Requires the `import` storage content type and API-token auth. Hosts are **standalone** (no cluster). |
 | **Firmware/image server** | Any HTTP(S) server the Proxmox nodes can reach at stable `/images/<file>` URLs. The [nautobot-composer](https://github.com/bforejt/nautobot-composer) project's `firmware` profile provides one (nginx + Filebrowser). |
 | **Git host** | Anywhere Nautobot can sync this repo from (GitHub today; any git remote works). |

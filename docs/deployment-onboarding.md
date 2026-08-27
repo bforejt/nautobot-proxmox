@@ -15,7 +15,8 @@ and the honest gap register for what doesn't.
 - **The jobs** (Git-synced): the eight jobs in the README's Jobs table. No
   hardcoded environment logic — targets and values come from Nautobot.
 - **The data model**: created idempotently by `BootstrapNfvSchema` in any
-  Nautobot 2.4 instance. Run once, re-run safely.
+  Nautobot 2.4 or 3.x instance (validated on 2.4.30 and 3.2). Run once,
+  re-run safely.
 - **The image lifecycle**: vendor base → sealed template → firmware server →
   `SoftwareVersion`/`SoftwareImageFile` → checksum-verified node pull. Every
   step reproducible; every artifact self-describing (manifest + seed alongside).

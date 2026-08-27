@@ -16,11 +16,11 @@ Sync. Git-synced jobs arrive **disabled** — enable each one under Jobs before
 its Run button works. Then run **`Bootstrap NFV Data Model`** once (it is
 idempotent — re-run any time; re-running after a repo update adds only what is
 new). This creates every role, relationship, DeviceType, platform, status, and
-custom field the other jobs rely on. (Standing up the stack fresh with
-nautobot-composer? Use `./setup.sh -v 2.4` — these jobs target Nautobot 2.4.x,
-not 3.x, per the README requirements. Composer can also do this **whole step**
-for you: `./setup.sh --with-nfv-jobs` registers this repo, syncs, enables the
-jobs, and runs the bootstrap against a healthy stack.)
+custom field the other jobs rely on. (These jobs run on Nautobot
+2.4 and 3.x — validated on 2.4.30 and 3.2. Standing up the stack fresh with
+nautobot-composer? Composer can do this **whole step** for you:
+`./setup.sh --with-nfv-jobs` registers this repo, syncs, enables the jobs,
+and runs the bootstrap against a healthy stack.)
 
 ## 2. Firmware/image server
 
