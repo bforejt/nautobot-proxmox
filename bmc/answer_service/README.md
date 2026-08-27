@@ -2,10 +2,9 @@
 
 The SoT-backed engine of the bare-metal install loop (architecture and
 runbook: [docs/baremetal-install.md](../../docs/baremetal-install.md)).
-Deployment wrappers set these variables: nautobot-composer's
-`answer-service` profile maps them from `ANSWER_*` names in its `.env`;
-[nfv-helper](../../nfv-helper/) maps them from `NFV_*` names. This table is
-the canonical list.
+nautobot-composer's `answer-service` profile (the supported deployment)
+maps these from `ANSWER_*` names in its `.env`. This table is the canonical
+list.
 
 ## Core (every instance)
 

@@ -70,32 +70,22 @@ partition — per-node media, the opposite of this fleet design; unused here.)
 
 ## One-time setup
 
-1. **Answer service container** — two supported paths:
-   - **nautobot-composer stacks**: the pre-wired `answer-service` profile
-     (see composer's README) or the
-     [example compose file](../bmc/answer_service/docker-compose.answer-service.example.yml).
-   - **Any other existing docker compose Nautobot**: the
-     **[nfv-helper](../nfv-helper/README.md)** directory — copied into your
-     project, it adds the service and the secrets mount via compose's
-     multi-file merge, without editing your `docker-compose.yaml` (two
-     activation modes, incl. zero-startup-change via the override filename).
+1. **Answer service container** — the supported deployment is
+   **nautobot-composer's `answer-service` profile** (see composer's README):
+   `./setup.sh` with the profile enabled generates the TLS keypair, seeds
+   `ANSWER_CERT_FINGERPRINT` and `ANSWER_PUBLIC_URL`, and creates the node
+   root-password hash — add `--enable-forge` on the lab/build instance to
+   also enable and credential the media forge in the same run. Then
+   `docker compose --profile answer-service up -d --build`.
 
-   Either way the requirements are the same: `NAUTOBOT_URL`/`NAUTOBOT_TOKEN`/
-   `PUBLIC_URL` set, the Nautobot + worker containers sharing the secrets
-   directory (`/opt/nautobot/secrets`), a TLS keypair whose SHA256
-   fingerprint is recorded, and the node root-password hash. **Both wrapper
-   setups automate all of that**: composer's `./setup.sh` (with the
-   answer-service profile — add `--enable-forge` on the lab/build instance
-   to also enable and credential the media forge in the same run) generates
-   the cert, seeds `ANSWER_CERT_FINGERPRINT` and `ANSWER_PUBLIC_URL`, and
-   creates the root hash; nfv-helper's `setup.sh` does the cert/fingerprint/
-   hash equivalents. Manual fallback (example-compose path, service
-   running):
-
-   ```bash
-   docker compose exec -T answer-service sh -c 'apt-get -qq update && apt-get -qq install -y openssl >/dev/null; openssl req -x509 -newkey rsa:2048 -nodes -days 730 -subj "/CN=answer-service" -keyout /tls/answer-service.key -out /tls/answer-service.crt && openssl x509 -in /tls/answer-service.crt -outform der | sha256sum'   # SHA256 -> ANSWER_CERT_FINGERPRINT
-   mkpasswd -m sha-512 | docker compose exec -T answer-service sh -c 'umask 077; cat > /secrets/root_password_hash'
-   ```
+   Running the service on some other stack is unsupported-but-possible:
+   it is one container with documented requirements — every environment
+   variable in [the service README](../bmc/answer_service/README.md), plus a
+   secrets directory shared read-only into the Nautobot + worker containers
+   at `/opt/nautobot/secrets`. (An overlay kit for arbitrary compose
+   projects existed briefly but was removed untested — decision #45; the
+   durable answer for non-composer portability is the planned native
+   Nautobot App.)
 
 2. **Prepared artifact** — on any PVE 9.x box (the lab NUC works):
 
@@ -306,7 +296,7 @@ Setup (once):
 2. **Integration records** — created by `Bootstrap NFV Data Model`
    (re-run it after updating): the `nfv-answer-service` ExternalIntegration
    (remote URL seeded `https://answer-service:8800`, the compose-network
-   address — correct on composer and nfv-helper stacks; edit it if your
+   address — correct on compose networks; edit it if your
    layout differs, bootstrap never overwrites), its Secrets Group, and the
    token Secret *record*. You supply only the **value**:
    `./add-secret.sh answer_service_admin_token` (the same bearer as
