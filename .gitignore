@@ -223,3 +223,18 @@ __marimo__/
 /bios_registry.json
 /virtual_media.json
 /chassis.json
+
+# Nautobot job-log exports dropped locally for analysis (contain lab hostnames/serials)
+nautobot_joblogentry_data*.csv
+
+# Scaffolding archive from initial repo setup — local convenience only
+/repo-layout.zip
+
+# Vendor/OS images staged locally for the image pipeline — never in git
+# (the .sha256/.manifest.json sidecars register-vendor-image.sh writes next
+# to a locally staged image are publish output, not source)
+*.qcow2
+*.iso
+*.img
+*.qcow2.sha256
+*.manifest.json
