@@ -30,6 +30,26 @@ list.
 | `PVE_ROLE_NAME` / `PVE_ROLE_PRIVS` / `PVE_SERVICE_USER` / `PVE_TOKEN_NAME` | `NFVAutomation` / validated set / `svc-nfv@pve` / `deploy` | What the firstboot `pveum` bootstrap creates on each node |
 | `PROFILE_DIR` / `DATA_DIR` | `/app/profiles` / `/data` | Install profiles (baked at build; bind-mount to override) / key store + ISO cache + archives |
 
+## Install profiles (`PROFILE_DIR`)
+
+One YAML per Nautobot DeviceType, named by the slugified model
+(`ThinkEdge SE455 V3` → `thinkedge-se455-v3.yaml`); no profile = the
+DeviceType is not installable (403). The service reads the `install`
+section; the jobs read `delivery` and `storage`. Full semantics and the
+runbooks: [docs/baremetal-install.md](../../docs/baremetal-install.md).
+
+| Key | Purpose |
+|---|---|
+| `install.filesystem`, `install.lvm` / `.zfs` / `.btrfs` | `[disk-setup]` filesystem and its option family (`lvm.*` for ext4/xfs) |
+| `install.disk_filter`, `install.filter_match` | udev-property globs selecting the installer's target disk(s); `any` (default) / `all` |
+| `install.network_source` | `from-answer` (static from `primary_ip4` + DefaultGW; NIC filter from the pinned mgmt MAC) or `from-dhcp` |
+| `install.interface_name_pinning` | PVE ≥ 9.1 name pinning; Device interfaces with a MAC supply the Linux names, the rest get `nic<N>` (decision #51) |
+| `install.reboot_mode` | `reboot` / `power-off` after install |
+| `install.data_pool` | Firstboot: ZFS mirror over the largest unused disk pair → zfspool storage (JBOD boxes) |
+| `install.data_volume` | Firstboot: LVM-thin on the largest unused disk → lvmthin storage (RAID-adapter boxes, e.g. the SE455 V3's data volume) |
+| `delivery.method`, `delivery.iso_url_schemes`, `delivery.vm` | Jobs: `pve-nested` / `redfish-vmedia` / `pxe`; ISO URL schemes the BMC can mount; nested VM sizing |
+| `storage.controller`, `storage.volumes` | Jobs: out-of-band RAID volumes to ensure via the BMC before the installer boots (decision #50) |
+
 ## Media forge (decision #44 — **off by default**, lab/build instances only)
 
 | Variable | Default | Purpose |

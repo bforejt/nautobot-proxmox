@@ -204,6 +204,13 @@ design. Where a function has no equivalent, the reason is given.
 
 - Fleet is uniform: SE350, 16-core Xeon D-2183IT (32 threads), 256 GB RAM. (Uniformity
   also neutralizes the PA-VM CPUID licensing concern for RMA swaps.)
+- Successor units are **ThinkEdge SE455 V3** (AMD EPYC 8004, XCC2, RAID 540-8i with
+  2 × 480 GB + 2 × 1.92 TB SATA SSDs, E810 25G OCP + Broadcom 1G ports). Their
+  differences live in the per-DeviceType profile, not in the jobs: two RAID1 volumes
+  created out-of-band at install (decision #50), `datastore` LVM-thin as `vm_storage`,
+  MAC-pinned interface names from the SoT (#51), no built-in serial port (COM bracket
+  or XCC2 SOL). See [research/se455-v3-platform-notes.md](research/se455-v3-platform-notes.md);
+  the per-node sizing policy below applies unchanged (core counts differ per SKU).
 - Written policy: *oversubscription strictly forbidden — used CPU/RAM must not exceed
   actuals; storage may be thin-provisioned.*
 - Interpretation for the guardrail jobs (per verified NFV practice): count **physical

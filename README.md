@@ -121,7 +121,7 @@ The minimum loop to prove it in a new lab:
 | `Apply Storage Layout (SoT-driven)` ([jobs/baremetal/apply_storage_layout.py](jobs/baremetal/apply_storage_layout.py)) | Out-of-band RAID layout from the DeviceType profile's `storage` section via the BMC (Lenovo XCC/XCC2 Redfish): dry-run plan by default, creates the missing boot/data virtual drives with Confirm, never deletes. The install job runs the same step itself. Edge-hardware track (SE455 V3). |
 | `Install Proxmox Node (SoT-driven)` ([jobs/baremetal/install_node.py](jobs/baremetal/install_node.py)) | One-input bare-metal install: ensures the profile's RAID layout (when declared), boots the prepared installer (nested VM or XCC virtual media per the DeviceType profile) and follows the state machine to an installed, self-credentialed node. |
 | `Prepare Installer Media (Media Forge)` ([jobs/baremetal/prepare_media.py](jobs/baremetal/prepare_media.py)) | Asks the answer service to prepare, publish, and register (Staged) installer media bound to its own URL/cert identity — decision #44. |
-| `SE350 Host Verification (SSH)` ([jobs/baremetal/verify_host.py](jobs/baremetal/verify_host.py)) | Read-only SSH pass over a Linux-booted edge node (SE350 / SE455 V3): disk-filter validation with the installer's own matching (incl. ZFS-mirror pair counts and the data-pool preflight), DMI serial vs SoT, X722 LLDP flag, Secure Boot, BIOS-effect readbacks. |
+| `SE350 Host Verification (SSH)` ([jobs/baremetal/verify_host.py](jobs/baremetal/verify_host.py)) | Read-only SSH pass over a Linux-booted edge node (SE350 / SE455 V3): disk-filter validation with the installer's own matching (incl. ZFS-mirror pair counts and the data-pool preflight), DMI serial vs SoT, firmware LLDP flags (i40e/ice), Secure Boot, BIOS-effect readbacks. |
 
 ## Documentation map
 
@@ -168,7 +168,7 @@ bmc/             BIOS/firmware policy + per-DeviceType install profiles as data
 vnf-profiles/    Per-guest-platform image tooling: build seeds + build script
                  (ubuntu), vendor-image register script (paloalto)
 docs/            The documentation set above
-tests/           Loader harness (validates job discovery pre-push)
+tests/           Loader harness (validates job discovery pre-push) + stdlib unit tests
 ```
 
 ## Contributing & testing
