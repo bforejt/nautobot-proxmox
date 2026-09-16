@@ -1,0 +1,109 @@
+# SE455 V3 UEFI/BIOS policy — SKELETON, NOT YET VERIFIED. Same shape as
+# se350_bios.yaml (the data ApplyBiosPolicyJob will apply via Redfish
+# PATCH /redfish/v1/Systems/{id}/Bios/Settings, applied at next reboot,
+# readback-verified).
+#
+# The SE455 V3 is an AMD EPYC 8004 (Siena) platform: NONE of the SE350's
+# Intel attribute names (Processors_CStates, Processors_C1EnhancedMode,
+# Processors_MONITORMWAIT, Power_PowerPerformanceBias ...) exist here. The
+# candidate names below come from Lenovo's AMD tuning guide for ThinkSystem
+# V3 (LP2210, which covers SR635/SR655/SR665 V3 — NOT the SE455 V3), so every
+# entry is verified: false until the platform discovery job has dumped this
+# unit's attributes (bios_attributes.json) and registry (bios_registry.json).
+# Procedure: run the discovery job against the XCC2, then for each row set
+# redfish_attribute/redfish_value/allowed from the dump and flip verified.
+#
+# Intent carried over from the legacy standard: maximum, deterministic
+# performance (no deep idle states, no power-saving bias), console redirect
+# on COM1 (only if the optional COM Port Upgrade Kit is fitted), Secure Boot
+# off for the netboot path.
+
+platform: SE455 V3
+machine_types: [7DBY]
+verified_against: null   # set to "SE455 V3 discovery dump <date> (<registry id>)"
+
+legacy_standard:
+  - menu: "Operating Modes -> Choose Operating Mode"
+    value: "Custom Mode"
+    redfish_attribute: "OperatingModes_ChooseOperatingMode"
+    redfish_value: "CustomMode"
+    allowed: [MaximumEfficiency, MaximumPerformance, CustomMode]   # LP2210 (AMD V3)
+    verified: false
+    note: "Presets lock the individual knobs below — Custom Mode is required, as on the SE350."
+  - menu: "Processors -> Global C-state Control"
+    value: "Disabled"
+    redfish_attribute: "Processors_GlobalC_stateControl"
+    redfish_value: "Disabled"
+    allowed: [Enabled, Disabled]
+    verified: false
+    note: "AMD equivalent of the SE350's Processors_CStates=Disable."
+  - menu: "Processors -> DF C-States"
+    value: "Disabled"
+    redfish_attribute: "Processors_DFC_States"
+    redfish_value: "Disabled"
+    allowed: [Enabled, Disabled]
+    verified: false
+  - menu: "Processors -> Core Performance Boost"
+    value: "Enabled"
+    redfish_attribute: "Processors_CorePerformanceBoost"
+    redfish_value: "Enabled"
+    allowed: [Enabled, Disabled]
+    verified: false
+    note: "Turbo equivalent. The SE350 standard disables ENERGY-EFFICIENT turbo, not turbo itself."
+  - menu: "Processors -> Determinism Slider"
+    value: "Performance"
+    redfish_attribute: "Processors_DeterminismSlider"
+    redfish_value: "Performance"
+    allowed: [Power, Performance]
+    verified: false
+  - menu: "Processors -> CPPC"
+    value: "Enabled"
+    redfish_attribute: "Processors_CPPC"
+    redfish_value: "Enabled"
+    allowed: [Enabled, Disabled]
+    verified: false
+    note: "Keeps OS-visible frequency control (amd-pstate) — decide at the lab tuning pass."
+  - menu: "Processors -> SMT Mode"
+    value: "Enabled"
+    redfish_attribute: "Processors_SMTMode"
+    redfish_value: "Enabled"
+    allowed: [Enabled, Disabled]
+    verified: false
+    note: "Matches the SE350 sizing model (HyperThreading on)."
+  - menu: "Memory -> NUMA Nodes per Socket"
+    value: "NPS1"
+    redfish_attribute: "Memory_NUMANodesperSocket"
+    redfish_value: "NPS1"
+    allowed: [NPS0, NPS1, NPS2, NPS4]
+    verified: false
+    note: "Single NUMA node keeps VM pinning simple; revisit if the datapath soak (§6 #31) wants NPS2."
+  - menu: "Thermal Mode"
+    value: "Performance"
+    redfish_attribute: null
+    method: "xcc-ssh-cli"
+    command: "thermal performance"
+    verified: false
+    note: "XCC2 may expose this via Redfish OEM — the discovery job's chassis/OEM probe reports thermal hits; keep the SSH step until it does."
+
+proposed_additions:
+  - menu: "Devices and I/O Ports -> Console Redirection Settings -> COM Port 1"
+    redfish_attribute: "DevicesandIOPorts_COMPort1"
+    redfish_value: "Enable"
+    verified: false
+    note: "Only meaningful with the optional ThinkSystem COM Port Upgrade Kit v2 (4Z17A80446, slot 5); XCC2 SOL is the default console path otherwise."
+  - menu: "Secure Boot"
+    redfish_attribute: "SecureBootConfiguration_SecureBootSetting"
+    redfish_value: "Disabled"
+    verified: false
+    note: >
+      PXE delivery (iPXE snponly.efi) needs Secure Boot OFF. Product guide:
+      once Secure Boot is enabled on the SE455 V3 it cannot be disabled —
+      confirm the factory state (feature BPKR = disabled) BEFORE any
+      first-boot experiments. Virtual-media ISO boots work either way (PVE's
+      signed shim).
+
+notes:
+  - IOMMU/SR-IOV attribute names are not in LP2210 — take them from the dump
+    (SR-IOV must stay enabled for the VF-based VNF datapath options).
+  - The SE455 V3 does not support power capping (product guide) — no
+    Power_* capping rows.

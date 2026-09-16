@@ -1,5 +1,6 @@
 """
-Read-only Redfish discovery client for Lenovo XCC BMCs (SE350 / XCC1 era and later).
+Read-only Redfish discovery client for Lenovo XCC BMCs (SE350 / XCC1 and
+SE455 V3 / XCC2).
 
 Collects the platform facts the nautobot-proxmox project needs before writing
 BIOS policy YAML and installer templates:
@@ -13,6 +14,10 @@ BIOS policy YAML and installer templates:
   (EXT* = Redfish-insertable, RDOC*/Remote* = not usable for network ISO mount)
 - Secure Boot state
 - Firmware inventory (XCC/UEFI/NIC versions)
+- Feature licenses (XCC2 LicenseService; XCC1 has none) — remote media on
+  XCC2 needs XCC2_Platinum Enabled
+- Physical drives (standard Storage resource) — model/serial/capacity feed a
+  profile's disk filter before the box ever boots Linux
 
 Every section is best-effort: a failure is captured as an "error" string in
 that section's dict instead of aborting the whole discovery, so partial data
@@ -161,7 +166,17 @@ class RedfishDiscovery:
             if not self._manager_path:
                 self.discover_paths()
             manager = self._get(self._manager_path)
-            collection = self._get(manager["VirtualMedia"]["@odata.id"])
+            link = (manager.get("VirtualMedia") or {}).get("@odata.id")
+            if not link:
+                # XCC2 documents the collection on the ComputerSystem
+                # (/redfish/v1/Systems/1/VirtualMedia); fall back to it when
+                # the Manager carries no link.
+                if not self._system_path:
+                    self.discover_paths()
+                link = (self._get(self._system_path).get("VirtualMedia") or {}).get("@odata.id")
+            if not link:
+                return {"error": "no VirtualMedia link on the Manager or the ComputerSystem"}
+            collection = self._get(link)
             members = []
             for ref in collection.get("Members", []):
                 detail = self._get(ref["@odata.id"])
@@ -185,6 +200,179 @@ class RedfishDiscovery:
             }
         except Exception as exc:  # noqa: BLE001
             return self._section_error(exc)
+
+    def licenses(self) -> dict:
+        """Installed feature licenses (XCC2 LicenseService). XCC1 has no such
+        service — there the EXT-member check is the only license proxy. On
+        XCC2, remote media needs Id XCC2_Platinum with Status.State Enabled."""
+        try:
+            root = self._get("/redfish/v1/")
+            link = (root.get("LicenseService") or {}).get("@odata.id")
+            if not link:
+                return {"supported": False, "items": [], "platinum_enabled": None}
+            service = self._get(link)
+            col_link = (service.get("Licenses") or {}).get("@odata.id") or f"{link.rstrip('/')}/Licenses"
+            items = []
+            for ref in self._get(col_link).get("Members", []):
+                detail = self._get(ref["@odata.id"])
+                items.append(
+                    {
+                        "id": detail.get("Id"),
+                        "name": detail.get("Name"),
+                        "state": (detail.get("Status") or {}).get("State"),
+                        "origin": detail.get("LicenseOrigin"),
+                        "expiration": detail.get("ExpirationDate"),
+                    }
+                )
+            platinum = any(
+                "platinum" in str(item["id"]).lower() and item["state"] == "Enabled"
+                for item in items
+            )
+            return {"supported": True, "items": items, "platinum_enabled": platinum}
+        except Exception as exc:  # noqa: BLE001
+            return self._section_error(exc)
+
+    def storage_drives(self) -> dict:
+        """Physical drives via the standard Storage resource
+        (Systems/{id}/Storage/*/Drives/*), smallest first. `udev_id_model` is
+        the Model string the way udev's ID_MODEL renders it (spaces ->
+        underscores) — the value a profile's disk filter globs against."""
+        try:
+            if not self._system_path:
+                self.discover_paths()
+            system = self._get(self._system_path)
+            link = (system.get("Storage") or {}).get("@odata.id")
+            if not link:
+                return {"drives": [], "note": "no Storage link on the ComputerSystem"}
+            drives = []
+            for ref in self._get(link).get("Members", []):
+                controller = self._get(ref["@odata.id"])
+                for dref in controller.get("Drives", []):
+                    drive = self._get(dref["@odata.id"])
+                    location = (drive.get("PhysicalLocation") or {}).get("PartLocation") or {}
+                    model = (drive.get("Model") or "").strip()
+                    drives.append(
+                        {
+                            "controller": controller.get("Id") or controller.get("Name"),
+                            "id": drive.get("Id"),
+                            "name": drive.get("Name"),
+                            "model": model or None,
+                            "serial": drive.get("SerialNumber"),
+                            "capacity_bytes": drive.get("CapacityBytes"),
+                            "media_type": drive.get("MediaType"),
+                            "protocol": drive.get("Protocol"),
+                            "location": location.get("ServiceLabel")
+                            or location.get("LocationOrdinalValue"),
+                            "udev_id_model": model.replace(" ", "_") or None,
+                        }
+                    )
+            drives.sort(key=lambda d: (d["capacity_bytes"] or 0, str(d["id"])))
+            return {"drives": drives}
+        except Exception as exc:  # noqa: BLE001
+            return self._section_error(exc)
+
+    # ---------- RAID adapter surface (consumed by jobs.lib.storage_layout) ----------
+
+    def storage_controllers(self) -> list:
+        """Storage members of the ComputerSystem: [{path, id, name, model,
+        drive_count, volumes_path}]. Empty while the host is powered off — the
+        XCC reports RAID inventory only with the host on."""
+        if not self._system_path:
+            self.discover_paths()
+        system = self._get(self._system_path)
+        link = (system.get("Storage") or {}).get("@odata.id")
+        if not link:
+            return []
+        members = []
+        for ref in self._get(link).get("Members", []):
+            ctrl = self._get(ref["@odata.id"])
+            controllers = ctrl.get("StorageControllers") or []
+            first = controllers[0] if controllers else {}
+            members.append(
+                {
+                    "path": ref["@odata.id"],
+                    "id": ctrl.get("Id"),
+                    "name": ctrl.get("Name"),
+                    "model": first.get("Model") or first.get("Name"),
+                    "drive_count": len(ctrl.get("Drives") or []),
+                    "volumes_path": (ctrl.get("Volumes") or {}).get("@odata.id"),
+                }
+            )
+        return members
+
+    def controller_drives(self, controller_path: str) -> list:
+        """Drives behind one Storage member, with Lenovo's drive state
+        (Oem.Lenovo.DriveStatus: 'Unconfigured good', 'Online', 'JBOD', ...)
+        and the volumes each already belongs to."""
+        ctrl = self._get(controller_path)
+        drives = []
+        for dref in ctrl.get("Drives") or []:
+            d = self._get(dref["@odata.id"])
+            oem = (d.get("Oem") or {}).get("Lenovo") or {}
+            drives.append(
+                {
+                    "path": dref["@odata.id"],
+                    "id": d.get("Id"),
+                    "name": d.get("Name"),
+                    "model": (d.get("Model") or "").strip() or None,
+                    "serial": d.get("SerialNumber"),
+                    "capacity_bytes": d.get("CapacityBytes"),
+                    "media_type": d.get("MediaType"),
+                    "protocol": d.get("Protocol"),
+                    "status": oem.get("DriveStatus"),
+                    "state": (d.get("Status") or {}).get("State"),
+                    "volumes": [
+                        v.get("@odata.id")
+                        for v in ((d.get("Links") or {}).get("Volumes") or [])
+                    ],
+                }
+            )
+        return drives
+
+    def controller_volumes(self, controller_path: str) -> list:
+        """Volumes (virtual drives) of one Storage member, in adapter order."""
+        ctrl = self._get(controller_path)
+        link = (ctrl.get("Volumes") or {}).get("@odata.id")
+        if not link:
+            return []
+        volumes = []
+        for vref in self._get(link).get("Members", []):
+            v = self._get(vref["@odata.id"])
+            oem = (v.get("Oem") or {}).get("Lenovo") or {}
+            volumes.append(
+                {
+                    "path": vref["@odata.id"],
+                    "id": v.get("Id"),
+                    "name": v.get("Name"),
+                    "raid_type": v.get("RAIDType")
+                    or str(oem.get("RaidLevel") or "").replace(" ", ""),
+                    "capacity_bytes": v.get("CapacityBytes"),
+                    "drives": [
+                        d.get("@odata.id")
+                        for d in ((v.get("Links") or {}).get("Drives") or [])
+                    ],
+                    "state": (v.get("Status") or {}).get("State"),
+                    "health": (v.get("Status") or {}).get("Health"),
+                    "bootable": oem.get("Bootable"),
+                }
+            )
+        return volumes
+
+    def create_volume(
+        self, controller_path: str, name: str, raid_type: str, drive_paths: list
+    ) -> dict:
+        """POST Storage/{id}/Volumes (Lenovo XCC/XCC2): Name (<= 15 chars),
+        RAIDType, Links.Drives. No CapacityBytes = the whole drive set; no
+        StripSizeBytes / cache policies = adapter defaults (the cacheless 540
+        series only accepts its own defaults anyway)."""
+        ctrl = self._get(controller_path)
+        link = (ctrl.get("Volumes") or {}).get("@odata.id") or f"{controller_path.rstrip('/')}/Volumes"
+        body = {
+            "Name": name,
+            "RAIDType": raid_type,
+            "Links": {"Drives": [{"@odata.id": p} for p in drive_paths]},
+        }
+        return self._post(link, body)
 
     def secure_boot(self) -> dict:
         try:
@@ -265,19 +453,26 @@ class RedfishDiscovery:
         if r.status_code not in (200, 202, 204):
             raise RedfishDiscoveryError(f"PATCH {path} failed: {r.status_code} {r.text}")
 
-    def _post(self, path: str, body: dict) -> None:
+    def _post(self, path: str, body: dict) -> dict:
         r = self.session.post(f"{self.base_url}{path}", json=body, timeout=self.timeout)
-        if r.status_code not in (200, 202, 204):
+        if r.status_code not in (200, 201, 202, 204):
             raise RedfishDiscoveryError(f"POST {path} failed: {r.status_code} {r.text}")
+        try:
+            return r.json() if r.text else {}
+        except ValueError:
+            return {}
 
     def mount_iso(self, iso_url: str) -> dict:
         """Mount an ISO via the platform-correct virtual media method.
 
-        XCC1 (SE350, firmware "19A"+): PATCH on a free EXT member — the only
-        Redfish-insertable members on that generation; ISO URL must be plain
-        HTTP or credential-less NFS. XCC2 (SE455 V3+): standard POST
-        InsertMedia on a CD/DVD-capable member. Mode is auto-detected from the
-        collection contents. Returns {"mode": ..., "member_path": ...}.
+        EXT members present (XCC1 "19A"+ with Enterprise FoD, and XCC2 with
+        Platinum — Lenovo documents PATCH on /VirtualMedia/EXT{N} for BOTH
+        generations): PATCH the first free EXT member. XCC1 accepts plain HTTP
+        or credential-less NFS image URLs only; XCC2 also takes HTTPS/CIFS.
+        No EXT members (other vendors, or an unlicensed XCC — nothing to
+        insert into on Lenovo): standard POST InsertMedia on a CD/DVD-capable
+        member. Mode is auto-detected from the collection contents. Returns
+        {"mode": ..., "member_path": ...}.
         """
         vm = self.virtual_media()
         if "error" in vm:
@@ -330,13 +525,18 @@ class RedfishDiscovery:
         else:
             self._post(f"{member_path}/Actions/VirtualMedia.EjectMedia", {})
 
-    def set_boot_once_cd(self) -> None:
+    def set_boot_once(self, target: str) -> None:
+        """One-time boot override (Redfish BootSourceOverrideTarget: Cd, Pxe,
+        BiosSetup, Hdd, Usb ...) — Standard on XCC1 and XCC2, no license."""
         if not self._system_path:
             self.discover_paths()
         self._patch(
             self._system_path,
-            {"Boot": {"BootSourceOverrideEnabled": "Once", "BootSourceOverrideTarget": "Cd"}},
+            {"Boot": {"BootSourceOverrideEnabled": "Once", "BootSourceOverrideTarget": target}},
         )
+
+    def set_boot_once_cd(self) -> None:
+        self.set_boot_once("Cd")
 
     def get_power_state(self) -> str:
         if not self._system_path:
@@ -361,6 +561,8 @@ class RedfishDiscovery:
             "bios_pending": self.bios_pending_settings(),
             "bios_registry": self.bios_attribute_registry(),
             "virtual_media": self.virtual_media(),
+            "licenses": self.licenses(),
+            "drives": self.storage_drives(),
             "secure_boot": self.secure_boot(),
             "firmware_inventory": self.firmware_inventory(),
             "chassis": self.chassis_and_oem(),

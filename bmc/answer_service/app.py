@@ -28,6 +28,13 @@ Security model (defense in depth, smallest-possible trust):
     nested profile deliberately powers off between install and first boot.
   - The credentials phone-home is additionally source-checked against the
     node's own management IP (VERIFY_PHONE_HOME_SOURCE).
+  - Per-DeviceType install profiles (bmc/profiles/<slug>.yaml) are the only
+    place hardware policy lives: disk filter / filter-match, filesystem
+    options, install.data_pool (JBOD boxes: firstboot builds a ZFS data
+    mirror) or install.data_volume (RAID-adapter boxes such as the SE455 V3:
+    firstboot turns the data virtual drive into LVM-thin), each registered as
+    a PVE storage. The RAID adapter itself is laid out by the install job over
+    Redfish from the profile's `storage` section (decision #50).
   - This service holds the root password HASH (never plaintext) and writes
     per-node API tokens straight into text-file Secrets — nothing secret is
     ever rendered into logs. Run it over HTTPS (SSL_CERTFILE/SSL_KEYFILE +
@@ -241,6 +248,78 @@ def default_gateway_for(ip_cidr: str) -> str | None:
     return gws[0]["address"].split("/")[0]
 
 
+def best_nic_mac(nics: list) -> str:
+    """Fallback NIC when the SoT pins no mgmt MAC: the installer lists every
+    NIC it sees, including the XCC's USB Ethernet-over-USB port (seen on a
+    real SE455 V3 with a locally administered MAC). Prefer link-up NICs with
+    a universally administered MAC; stable sort keeps the installer's order
+    among equals. A fallback only — pin the MAC for deterministic installs."""
+    def score(nic):
+        mac = str(nic.get("mac") or "").lower()
+        try:
+            first_octet = int(mac.split(":")[0], 16)
+        except ValueError:
+            first_octet = 0xFF
+        return (0 if nic.get("link") else 1, 1 if first_octet & 0x02 else 0)
+
+    candidates = [n for n in nics or [] if n.get("mac")]
+    if not candidates:
+        return ""
+    return str(sorted(candidates, key=score)[0]["mac"]).lower()
+
+
+# Interface names the installer accepts for pinning (pve-iface: letter first,
+# ASCII alnum/underscore) capped at IFNAMSIZ-1 = 15; the installer's own
+# default namespace nic<N> is off limits — a SoT name clashing with an
+# enumerated default would fail the whole install ("duplicate interface name").
+_IFNAME_RE = re.compile(r"^[a-z][a-z0-9_]{1,14}$", re.IGNORECASE)
+_DEFAULT_PIN_RE = re.compile(r"^nic\d+$", re.IGNORECASE)
+
+
+def device_interfaces(device: dict) -> list:
+    return _nb(
+        "GET", "/dcim/interfaces/", params={"device_id": device["id"], "limit": 200}
+    ).get("results", [])
+
+
+def build_pin_mapping(interfaces: list, nics: list, device_name: str = "") -> dict:
+    """SoT interface names by MAC for [network.interface-name-pinning.mapping].
+
+    Only MACs the installer reported in its identity POST are mapped — the
+    answer file names what is really there; every other physical NIC keeps
+    the installer's default nic<N> (enumeration order). The `xcc` interface
+    holds the BMC address, not a host NIC. Skipped entries are logged, never
+    guessed."""
+    seen = {str(n.get("mac") or "").lower() for n in nics or [] if n.get("mac")}
+    mapping: dict[str, str] = {}
+    used: dict[str, str] = {}
+    for iface in interfaces or []:
+        mac = str(iface.get("mac_address") or "").lower()
+        name = str(iface.get("name") or "")
+        if not mac or name == "xcc":
+            continue
+        if mac not in seen:
+            log.info("%s: interface %s (%s) not reported by the installer — not pinned",
+                     device_name, name, mac)
+            continue
+        if not _IFNAME_RE.match(name):
+            log.warning("%s: interface name %r is not a valid Linux/pve-iface name "
+                        "(letter first, alnum/underscore, 2-15 chars) — %s keeps nic<N>",
+                        device_name, name, mac)
+            continue
+        if _DEFAULT_PIN_RE.match(name):
+            log.warning("%s: interface name %r squats the installer's default nic<N> "
+                        "namespace — %s keeps its enumerated name", device_name, name, mac)
+            continue
+        if name.lower() in used:
+            log.warning("%s: interface name %r is used by %s and %s — second one not pinned",
+                        device_name, name, used[name.lower()], mac)
+            continue
+        used[name.lower()] = mac
+        mapping[mac] = name
+    return mapping
+
+
 def mgmt_interface_mac(device: dict) -> str | None:
     """MAC pinned on the interface carrying primary_ip4, if the SoT has one."""
     primary = device.get("primary_ip4")
@@ -269,6 +348,89 @@ def load_profile(device_type_model: str) -> dict:
             403, f"no install profile for DeviceType {device_type_model!r} ({path.name})"
         )
     return yaml.safe_load(path.read_text())
+
+
+_POOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,31}$")
+
+
+def filter_match_for(install: dict) -> str:
+    """install.filter_match -> answer [disk-setup] filter-match ("" = installer default)."""
+    value = str(install.get("filter_match") or "").strip().lower()
+    if value not in ("", "any", "all"):
+        raise HTTPException(500, f"profile install.filter_match must be any|all (got {value!r})")
+    return value
+
+
+def data_pool_spec(install: dict) -> dict | None:
+    """Validate install.data_pool for the firstboot hook (SE455 V3-style
+    JBOD boxes: the installer mirrors the boot pair, firstboot mirrors the
+    data pair). Every value lands in a shell script, so only plain
+    identifiers and integers pass — anything else is a 500, never rendered."""
+    spec = install.get("data_pool")
+    if not spec:
+        return None
+    if not isinstance(spec, dict):
+        raise HTTPException(500, "profile install.data_pool must be a mapping")
+    name = str(spec.get("name") or "")
+    storage = str(spec.get("pve_storage") or name)
+    raid = str(spec.get("raid") or "mirror")
+    select = str(spec.get("select") or "unused-largest")
+    if not (_POOL_NAME_RE.match(name) and _POOL_NAME_RE.match(storage)):
+        raise HTTPException(500, "profile install.data_pool name/pve_storage must be a plain lowercase identifier")
+    if raid != "mirror":
+        raise HTTPException(500, f"profile install.data_pool.raid: only 'mirror' is supported (got {raid!r})")
+    if select != "unused-largest":
+        raise HTTPException(500, f"profile install.data_pool.select: only 'unused-largest' is supported (got {select!r})")
+    try:
+        count = int(spec.get("count", 2))
+        min_size_gib = int(spec.get("min_size_gib", 0))
+    except (TypeError, ValueError):
+        raise HTTPException(500, "profile install.data_pool count/min_size_gib must be integers")
+    if count < 2 or min_size_gib < 0:
+        raise HTTPException(500, "profile install.data_pool: count >= 2 and min_size_gib >= 0 required")
+    return {
+        "name": name,
+        "pve_storage": storage,
+        "raid": raid,
+        "select": select,
+        "count": count,
+        "min_size_gib": min_size_gib,
+    }
+
+
+def data_volume_spec(install: dict) -> dict | None:
+    """Validate install.data_volume for the firstboot hook (RAID-adapter boxes
+    such as the SE455 V3: the adapter presents a data virtual drive; firstboot
+    turns it into an LVM-thin PVE storage). Shell-literal rules as above."""
+    spec = install.get("data_volume")
+    if not spec:
+        return None
+    if install.get("data_pool"):
+        raise HTTPException(500, "profile install: data_pool and data_volume are mutually exclusive")
+    if not isinstance(spec, dict):
+        raise HTTPException(500, "profile install.data_volume must be a mapping")
+    vg = str(spec.get("vg") or "datastore")
+    thinpool = str(spec.get("thinpool") or "data")
+    storage = str(spec.get("pve_storage") or vg)
+    select = str(spec.get("select") or "unused-largest")
+    for value in (vg, thinpool, storage):
+        if not _POOL_NAME_RE.match(value):
+            raise HTTPException(500, "profile install.data_volume vg/thinpool/pve_storage must be plain lowercase identifiers")
+    if select != "unused-largest":
+        raise HTTPException(500, f"profile install.data_volume.select: only 'unused-largest' is supported (got {select!r})")
+    try:
+        min_size_gib = int(spec.get("min_size_gib", 0))
+    except (TypeError, ValueError):
+        raise HTTPException(500, "profile install.data_volume.min_size_gib must be an integer")
+    if min_size_gib < 0:
+        raise HTTPException(500, "profile install.data_volume.min_size_gib must be >= 0")
+    return {
+        "vg": vg,
+        "thinpool": thinpool,
+        "pve_storage": storage,
+        "select": select,
+        "min_size_gib": min_size_gib,
+    }
 
 
 # ---- endpoints ----
@@ -323,9 +485,23 @@ def _answer_impl(identity: dict) -> PlainTextResponse:
         dns = DNS_SERVER or gateway
         network_source = "from-answer"
         pinned = mgmt_interface_mac(device)
-        mac = (pinned or (nics[0].get("mac") if nics else "") or "").lower()
+        mac = (pinned or "").lower()
+        if not mac:
+            mac = best_nic_mac(nics)
+            if mac:
+                log.warning(
+                    "%s pins no mgmt MAC — NIC filter falls back to the installer's best "
+                    "candidate %s (pin the mgmt interface MAC for anything real)",
+                    device["name"], mac,
+                )
         if mac:
             net_filter["ID_NET_NAME_MAC"] = f"*{mac.replace(':', '')}"
+
+    # Interface name pinning (PVE >= 9.1 answer format, decision #51): every
+    # physical NIC gets a MAC-pinned name at install time; SoT interface names
+    # apply where the Device records the MAC, the rest default to nic<N>.
+    pinning = bool(install.get("interface_name_pinning", False))
+    pin_mapping = build_pin_mapping(device_interfaces(device), nics, device["name"]) if pinning else {}
 
     root_hash = ""
     try:
@@ -367,8 +543,11 @@ def _answer_impl(identity: dict) -> PlainTextResponse:
         gateway=gateway,
         dns=dns,
         net_filter=net_filter,
+        interface_name_pinning=pinning,
+        pin_mapping=pin_mapping,
         filesystem=filesystem,
         disk_filter=install.get("disk_filter", {}),
+        filter_match=filter_match_for(install),
         fs_family=fs_family,
         fs_options=install.get(fs_family, {}),
         firstboot_url=f"{PUBLIC_URL}/firstboot?serial={serial}&key={firstboot_key}",
@@ -376,8 +555,9 @@ def _answer_impl(identity: dict) -> PlainTextResponse:
         webhook_url=f"{PUBLIC_URL}/webhook?serial={serial}&key={webhook_key}",
     )
     log.info(
-        "ANSWERED: %s (serial %s) source=%s fs=%s",
-        device["name"], serial, network_source, filesystem,
+        "ANSWERED: %s (serial %s) source=%s fs=%s pinning=%s%s",
+        device["name"], serial, network_source, filesystem, pinning,
+        f" names={pin_mapping}" if pin_mapping else "",
     )
     return PlainTextResponse(rendered, media_type="application/toml")
 
@@ -396,9 +576,16 @@ def _firstboot_impl(serial: str, key: str) -> PlainTextResponse:
     device = device_by_serial(serial)
     if device is None:
         raise HTTPException(403, "unknown machine")
+    # Storage-layout policy rides the same profile the answer came from
+    # (install.data_pool -> the ZFS data-mirror step in the script).
+    profile = load_profile((device.get("device_type") or {}).get("model", ""))
+    data_pool = data_pool_spec(profile.get("install", {}))
+    data_volume = data_volume_spec(profile.get("install", {}))
     cred_key = issue_key(serial, "credentials")
     rendered = TEMPLATES.get_template("firstboot.sh.j2").render(
         node_name=device["name"],
+        data_pool=data_pool,
+        data_volume=data_volume,
         serial=serial,
         service_url=PUBLIC_URL,
         cert_fingerprint=CERT_FINGERPRINT,
@@ -546,6 +733,15 @@ def _webhook_impl(serial: str, key: str, body: dict) -> dict:
         (DATA_DIR / f"install-{safe_serial}.json").write_text(json.dumps(body, indent=2))
     except OSError as exc:
         log.error("webhook payload archive failed for %s: %s", serial, exc)
+    # The installed node's final NIC names (pinned or not) — the record an
+    # operator needs when a Nautobot interface has to be matched to a port.
+    names = [
+        (n.get("name"), n.get("mac"), "mgmt" if n.get("is-management") else "")
+        for n in (body.get("network-interfaces") or []) if isinstance(n, dict)
+    ]
+    if names:
+        log.info("INSTALLED %s: interfaces %s", device["name"],
+                 ", ".join(f"{n}={m}{' (' + tag + ')' if tag else ''}" for n, m, tag in names))
     cf = dict(device.get("custom_fields") or {})
     if cf.get("provisioning_state") == "awaiting_install":
         cf["provisioning_state"] = "bm_installed"

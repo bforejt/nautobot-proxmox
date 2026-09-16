@@ -21,7 +21,6 @@ import time
 
 from nautobot.apps.jobs import BooleanVar, Job, ObjectVar, register_jobs
 from nautobot.dcim.models import Device
-from nautobot.extras.models import Secret
 
 from ..lib.install_delivery import (
     DeliveryError,
@@ -29,12 +28,15 @@ from ..lib.install_delivery import (
     RedfishVmediaDelivery,
     load_profile,
 )
-from ..lib.nautobot_helpers import resolve_hypervisor, resolve_proxmox_credentials
+from ..lib.nautobot_helpers import (
+    CredentialError,
+    resolve_bmc,
+    resolve_hypervisor,
+    resolve_proxmox_credentials,
+)
 from ..lib.proxmox_client import ProxmoxClient
 from ..lib.redfish_discovery import RedfishDiscovery
-
-XCC_USERNAME_SECRET_NAME = "xcc_username"
-XCC_PASSWORD_SECRET_NAME = "xcc_password"
+from ..lib.storage_layout import StorageLayoutError, apply_storage_layout, parse_storage_spec
 
 
 class ContractViolation(Exception):
@@ -53,7 +55,9 @@ class InstallProxmoxNode(Job):
         description = (
             "Boots the prepared auto-installer on an NFV-role Device in "
             "provisioning_state=awaiting_install (nested lab VM or Redfish "
-            "virtual media per the DeviceType profile) and follows the state "
+            "virtual media per the DeviceType profile; profiles with a "
+            "`storage` section get their RAID volumes created out-of-band "
+            "first) and follows the state "
             "machine to bm_installed + stored credentials. Reinstalls the OS "
             "— requires explicit confirmation."
         )
@@ -179,27 +183,39 @@ class InstallProxmoxNode(Job):
         self.logger.info("Install confirmed (webhook landed) — detaching ISO, booting from disk")
         delivery.finalize_boot_from_disk(int(vmid))
 
-    def _install_vmedia(self, device, image):
-        xcc_iface = device.interfaces.filter(name="xcc").first()
-        _require(
-            xcc_iface is not None and xcc_iface.ip_addresses.exists(),
-            f"{device.name} has no 'xcc' interface with an IP (contract §4 BMC address)",
-        )
+    def _install_vmedia(self, device, profile, image):
         try:
-            username = Secret.objects.get(name=XCC_USERNAME_SECRET_NAME).get_value()
-            password = Secret.objects.get(name=XCC_PASSWORD_SECRET_NAME).get_value()
-        except Secret.DoesNotExist as exc:
-            raise ContractViolation(
-                f"XCC credential Secrets missing (need {XCC_USERNAME_SECRET_NAME!r} "
-                f"and {XCC_PASSWORD_SECRET_NAME!r}): {exc}"
-            )
+            bmc_ip, username, password = resolve_bmc(device)
+        except CredentialError as exc:
+            raise ContractViolation(str(exc))
+        # Image-URL schemes the BMC generation can mount (profile
+        # delivery.iso_url_schemes). Default = XCC1 reality: plain HTTP only
+        # (or credential-less NFS); XCC2 profiles also allow https.
+        schemes = [
+            str(x).lower() for x in profile.get("delivery", {}).get("iso_url_schemes", ["http"])
+        ]
         _require(
-            image.download_url.startswith("http://"),
-            "XCC1 virtual media mounts plain-HTTP ISO URLs only — publish the "
-            f"prepared ISO on the plain-HTTP vhost (got {image.download_url})",
+            any(image.download_url.startswith(f"{scheme}://") for scheme in schemes),
+            f"{device.device_type.model} virtual media mounts {'/'.join(schemes)} ISO "
+            f"URLs only — publish the prepared ISO accordingly (got {image.download_url})",
         )
-        bmc_ip = str(xcc_iface.ip_addresses.first().address.ip)
         redfish = RedfishDiscovery(bmc_ip=bmc_ip, username=username, password=password)
+        # Out-of-band RAID layout (profile `storage`, decision #50): the
+        # adapter must present the boot/data virtual drives before the
+        # installer boots. Creates what is missing, keeps what exists, powers
+        # the host on into UEFI Setup if it was off — refuses on any ambiguity.
+        storage_spec = parse_storage_spec(profile)
+        if storage_spec:
+            try:
+                summary = apply_storage_layout(redfish, storage_spec, self.logger)
+            except StorageLayoutError as exc:
+                raise ContractViolation(f"Storage layout refused: {exc}")
+            self.logger.info(
+                "Storage layout on %s: created %s, kept %s",
+                summary["controller"], summary["created"] or "nothing", summary["kept"] or "nothing",
+            )
+            for warning in summary["warnings"]:
+                self.logger.warning("%s", warning)
         mount = RedfishVmediaDelivery(redfish, self.logger).boot_installer(image.download_url)
         # Remember the mount so a confirmed install can eject it — otherwise
         # stale media accumulates on the EXT slots across installs.
@@ -253,7 +269,7 @@ class InstallProxmoxNode(Job):
             if method == "pve-nested":
                 self._install_nested(device, profile, image)
             elif method == "redfish-vmedia":
-                self._install_vmedia(device, image)
+                self._install_vmedia(device, profile, image)
             elif method == "pxe":
                 raise ContractViolation(
                     f"{device.device_type.model} installs via PXE — there is no "

@@ -24,8 +24,11 @@ everything from the VM layer up.
   — proven live via nested VM, PXE on a physical NUC, and the SE350's XCC
   virtual-media checks. Installer media is prepared by the **media forge**
   from a Nautobot job. See [docs/baremetal-install.md](docs/baremetal-install.md).
-- ✅ **SE350/XCC platform discovery + host verification** (read-only Redfish
-  sweep, opt-in vmedia write checks, SSH host checks) for the bare-metal track.
+- ✅ **Lenovo XCC platform discovery + host verification** (read-only Redfish
+  sweep incl. licenses and drive inventory, opt-in vmedia write checks, SSH
+  host checks) plus **out-of-band RAID layout** (the SE455 V3's mirror sets
+  are created over Redfish from the profile, no UEFI trip) for the bare-metal
+  track — SE350 (XCC1) and SE455 V3 (XCC2) profiles ship in `bmc/profiles/`.
 - 🚧 **Not yet built**: Palo Alto / Cisco VNF day-0 builders (the deploy engine
   is pluggable and ready for them), host network/tuning automation,
   audit/converge jobs. See
@@ -79,7 +82,7 @@ storage blocks VM autostart when one node dies).
 | **Firmware/image server** | Any HTTP(S) server the Proxmox nodes can reach at stable `/images/<file>` URLs. The [nautobot-composer](https://github.com/bforejt/nautobot-composer) project's `firmware` profile provides one (nginx + Filebrowser). |
 | **Git host** | Anywhere Nautobot can sync this repo from (GitHub today; any git remote works). |
 | **Network paths** | Nautobot worker → Proxmox API (`:8006`); Proxmox nodes → firmware server; Nautobot → git host. Nothing else. |
-| **Hypervisor hardware** | Any x86 Proxmox host for the VM track (developed against a small NUC). SE350-specific material (BIOS policy, Redfish/XCC, wiring) applies to the edge-hardware track only. |
+| **Hypervisor hardware** | Any x86 Proxmox host for the VM track (developed against a small NUC). Edge-platform material (BIOS policy, Redfish/XCC, wiring, install profiles for the SE350 and the SE455 V3) applies to the edge-hardware track only. |
 | **Guest images** | Ubuntu 24.04 cloud image (fetched at template build). Vendor VNF images (PAN-OS, IOS-XE) are entitlement-gated downloads you supply. |
 
 ## Getting started
@@ -114,10 +117,11 @@ The minimum loop to prove it in a new lab:
 | `Decommission VNF Device (SoT-driven)` ([jobs/proxmox/decommission_device.py](jobs/proxmox/decommission_device.py)) | SoT-true teardown: verifies VMID+name match, destroys the VM, writes back Active→Planned. Deploy + decommission = the redeploy primitive. |
 | `Ingest Image onto Proxmox Node` ([jobs/proxmox/ingest_image.py](jobs/proxmox/ingest_image.py)) | Idempotent, checksum-verified pre-stage of an image onto a hypervisor — warm nodes ahead of maintenance windows. |
 | `Register Image from Published Set` ([jobs/design/register_image.py](jobs/design/register_image.py)) | Point it at a published qcow2 URL: reads the `.sha256` + `manifest.json` siblings, verifies the served artifact (optional full re-hash), and registers the Staged SoftwareVersion + SoftwareImageFile — checksum/size never hand-typed. Create-only; refuses checksum collisions. |
-| `SE350 Platform Discovery` ([jobs/baremetal/discover_platform.py](jobs/baremetal/discover_platform.py)) | Read-only Redfish sweep of a Lenovo XCC (BIOS attributes, virtual-media capability, firmware); opt-in write checks incl. a lab-only boot dress rehearsal. Edge-hardware track. |
-| `Install Proxmox Node (SoT-driven)` ([jobs/baremetal/install_node.py](jobs/baremetal/install_node.py)) | One-input bare-metal install: boots the prepared installer (nested VM or XCC virtual media per the DeviceType profile) and follows the state machine to an installed, self-credentialed node. |
+| `SE350 Platform Discovery` ([jobs/baremetal/discover_platform.py](jobs/baremetal/discover_platform.py)) | Read-only Redfish sweep of a Lenovo XCC — SE350/XCC1 and SE455 V3/XCC2 (BIOS attributes, virtual-media capability, licenses, drive inventory with a boot-pair filter hint, firmware); opt-in write checks incl. a lab-only boot dress rehearsal. Edge-hardware track. |
+| `Apply Storage Layout (SoT-driven)` ([jobs/baremetal/apply_storage_layout.py](jobs/baremetal/apply_storage_layout.py)) | Out-of-band RAID layout from the DeviceType profile's `storage` section via the BMC (Lenovo XCC/XCC2 Redfish): dry-run plan by default, creates the missing boot/data virtual drives with Confirm, never deletes. The install job runs the same step itself. Edge-hardware track (SE455 V3). |
+| `Install Proxmox Node (SoT-driven)` ([jobs/baremetal/install_node.py](jobs/baremetal/install_node.py)) | One-input bare-metal install: ensures the profile's RAID layout (when declared), boots the prepared installer (nested VM or XCC virtual media per the DeviceType profile) and follows the state machine to an installed, self-credentialed node. |
 | `Prepare Installer Media (Media Forge)` ([jobs/baremetal/prepare_media.py](jobs/baremetal/prepare_media.py)) | Asks the answer service to prepare, publish, and register (Staged) installer media bound to its own URL/cert identity — decision #44. |
-| `SE350 Host Verification (SSH)` ([jobs/baremetal/verify_host.py](jobs/baremetal/verify_host.py)) | Read-only SSH pass over a Linux-booted SE350: disk-filter validation with the installer's own matching, DMI serial vs SoT, X722 LLDP flag, Secure Boot, BIOS-effect readbacks. |
+| `SE350 Host Verification (SSH)` ([jobs/baremetal/verify_host.py](jobs/baremetal/verify_host.py)) | Read-only SSH pass over a Linux-booted edge node (SE350 / SE455 V3): disk-filter validation with the installer's own matching (incl. ZFS-mirror pair counts and the data-pool preflight), DMI serial vs SoT, X722 LLDP flag, Secure Boot, BIOS-effect readbacks. |
 
 ## Documentation map
 
@@ -139,7 +143,8 @@ The minimum loop to prove it in a new lab:
 | [plan-of-attack.md](docs/plan-of-attack.md) | The full phased plan: assessment, ESXi→Proxmox translation, roadmap |
 | [site-reference-architecture.md](docs/site-reference-architecture.md) | The edge-site standard being reproduced (VLANs, wiring, LACP, tuning) |
 | [se350-verification-checklist.md](docs/se350-verification-checklist.md) | Hardware validation checklist for the SE350 edge platform |
-| [research/](docs/research/) | Deep per-dimension research backing the plan (six documents) |
+| [research/se455-v3-platform-notes.md](docs/research/se455-v3-platform-notes.md) | The SE455 V3 (XCC2) platform: what differs from the SE350, the two-mirror storage layout, installer debug-shell how-to, open lab items |
+| [research/](docs/research/) | Deep per-dimension research backing the plan (seven documents) |
 
 ## Design rules (read before contributing)
 
@@ -158,7 +163,8 @@ The minimum loop to prove it in a new lab:
 
 ```
 jobs/            Nautobot jobs (Git-synced) + pure-Python libs (lib/)
-bmc/             BIOS/firmware policy as data (SE350 edge track)
+bmc/             BIOS/firmware policy + per-DeviceType install profiles as data
+                 (SE350 + SE455 V3 edge track; answer service source)
 vnf-profiles/    Per-guest-platform image tooling: build seeds + build script
                  (ubuntu), vendor-image register script (paloalto)
 docs/            The documentation set above

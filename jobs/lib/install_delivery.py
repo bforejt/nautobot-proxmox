@@ -10,8 +10,10 @@ profile in bmc/profiles/<slug>.yaml:
   pve-nested      A VM on an existing lab Proxmox host stands in for a blank
                   server (carrier resolved via the Hosted On relationship).
                   Proves the whole L0 loop with zero special hardware.
-  redfish-vmedia  BMC virtual media + one-shot CD boot. Vendor quirks (XCC1
-                  PATCH-on-EXT vs XCC2 InsertMedia) live in the dual-mode
+  redfish-vmedia  BMC virtual media + one-shot CD boot. Vendor quirks (Lenovo
+                  EXT-member PATCH on XCC1 and XCC2, generic InsertMedia
+                  elsewhere; per-generation image-URL schemes via
+                  delivery.iso_url_schemes) live in the dual-mode
                   client, not here.
   (pxe)           Not an adapter at all: PXE-booting the same prepared
                   artifact needs only DHCP/boot infra outside Nautobot; the
