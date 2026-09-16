@@ -105,7 +105,10 @@ code path entered at different layers.
    accepts **plain HTTP or credential-less NFS only** for ISO URLs. The BMC client needs a
    platform-profile abstraction (per-DeviceType YAML: vmedia method, BIOS attribute map,
    disk filter, license requirements), not an if/else bolted on later — the fleet will
-   inevitably be mixed SE350 + successor hardware.
+   inevitably be mixed SE350 + successor hardware. *Status 2026-09-16: built — dual-mode
+   client in `jobs/lib/redfish_discovery.py`, profiles in `bmc/profiles/`; XCC2 turned
+   out to document the same PATCH-on-EXT insert, so InsertMedia is only the non-Lenovo
+   fallback (decisions #14, #49–#51).*
 7. **Security Pack confirmed** (the fleet requires ThinkShield activation, which exists
    only on Security Pack units). Consequences are now firm: replacements arrive
    ThinkShield-locked and won't boot until claimed via the Key Vault Portal / Edge app
@@ -367,6 +370,15 @@ decisions in §6.
 
 ### Phase 3 — Bare-metal track: port L0 to SE350 + close the loop (parallel with Phase 2)
 
+> **Status 2026-09-16.** Built: the dual-mode Redfish client (both XCC generations
+> PATCH the `EXT{N}` member; InsertMedia only as the non-Lenovo fallback), platform
+> profiles as data (`bmc/profiles/<devicetype-slug>.yaml`, now also carrying an
+> out-of-band RAID layout — decision #50 — and interface name pinning — #51), the
+> SE455 V3 profile, the `Apply Storage Layout` job, and the unverified AMD BIOS
+> skeleton `bmc/se455v3_bios.yaml`. Open: `ApplyBiosPolicyJob`, the firstboot
+> host-baseline steps below (except pinning, which the installer now does), and the
+> first real installs on the SE350 and the SE455 V3 (`[lab-verify]`).
+
 - Refactor `xcc_client.py` to dual-mode vmedia: `EXT{N}` members present → XCC1 path
   (PATCH on member, select by `Id` prefix "EXT", HTTP-only ISO URL); else XCC2 path (POST
   InsertMedia). Fail explicitly on missing Enterprise FoD ("EXT members absent"). Fix
@@ -398,10 +410,13 @@ decisions in §6.
   validate-answer` on rendered answers. answer.toml: **ext4 + LVM-thin on the
   hardware-RAID volume** (the Marvell controller presents a single disk — fleet
   standard; no ZFS, no ARC reservation), disk filter matched to the RAID volume's
-  model/serial string so a data disk can never be selected.
+  model/serial string so a data disk can never be selected. SE455 V3 (2026-09-16):
+  same boot policy on a RAID 540-8i volume the install job creates over Redfish
+  first (#50); the data volume becomes LVM-thin `datastore` at firstboot.
 - Firstboot hook (small fetch-and-exec stub): kernel cmdline (C-states, serial console —
   both GRUB and proxmox-boot-tool paths), ethtool/`disable-fw-lldp` systemd oneshot, NIC
-  name pinning, **final network topology** (`vmbr0` = active-backup bond on the copper
+  name pinning (done at install time by the answer file since #51 — MAC-pinned, SoT
+  names), **final network topology** (`vmbr0` = active-backup bond on the copper
   pair, untagged; f1/f2 10G 802.3ad bond → VLAN-aware `vmbr1`, MTU 9000 on the data
   path pending the switch-jumbo answer), KSM disabled, **host-service confinement**
   (`system.slice`/`user.slice` `AllowedCPUs=` → housekeeping cores; NIC IRQ affinity
@@ -493,10 +508,10 @@ nautobot-proxmox/
 │   │   ├── site_build.py          # SiteBuildJob wrapper (P4)
 │   │   └── audit_node.py          # AuditNodeJob (read-only)
 │   └── lib/
-│       ├── bmc_client/            # dual-mode Redfish (XCC1 PATCH-EXT / XCC2 InsertMedia)
+│       ├── bmc_client/            # dual-mode Redfish — built as jobs/lib/redfish_discovery.py (+ storage_layout.py)
 │       ├── proxmox_client/        # proxmoxer wrapper, task-UPID polling, role docs
 │       ├── layout/                # pure-function site layout computation
-│       └── platform_profiles/     # SE350.yaml, SE455V3.yaml
+│       └── platform_profiles/     # built as bmc/profiles/<devicetype-slug>.yaml (SE350, SE455 V3, NUC, nested)
 ├── bmc/                           # BIOS/RAID policy as data
 │   ├── se350_bios.yaml
 │   └── se455v3_bios.yaml
@@ -544,6 +559,10 @@ nautobot-proxmox/
 4. Answered (Aug 2026): boot storage is the hardware-RAID single volume →
    ext4 + LVM-thin, no ZFS. `[lab-verify]` the volume's Linux model/serial enumeration
    (answer.toml disk filter) and degraded-mirror alerting visibility (checklist §4).
+   SE455 V3 (2026-09-16, #50): same policy, but the RAID 540-8i volumes are created by
+   the install job over XCC2 Redfish (boot = the smaller pair, first VD, pinned by
+   `ID_PATH *-scsi-0:2:0:0`; data → LVM-thin `datastore`); confirmed against a
+   hand-built unit's udev dump, first automated install `[lab-verify]`.
 5. `[lab-verify]` DMI serial as POSTed by the installer matches Nautobot serials;
    auto-install boot under Secure Boot (default: disable).
 6. `[lab-verify]` X722 `disable-fw-lldp` at fleet NIC firmware; OOB NIC-firmware updates
@@ -639,7 +658,9 @@ nautobot-proxmox/
     (Aug 2026): the L2 fabric is always jumbo-capable (`system mtu` in the standard
     switch build; existing sites verified/raised proactively — confirm live-vs-reload
     on the fleet IOS-XE release first); Proxmox data path mirrors MTU 9000.
-    `[lab-verify]` remaining: Linux NIC-name↔faceplate pinning map (PCI path), and
+    `[lab-verify]` remaining: Linux NIC-name↔faceplate pinning map (PCI path — on the
+    SE455 V3 superseded by #51: names are MAC-pinned at install from the Device's
+    interface records, so the faceplate map lives in Nautobot), and
     per-site `show system mtu` capture during rollout.
 31. **Empirically confirmed on PVE 9.2.2 (lab NUC, Aug 2026)**: `affinity` and
     `hugepages` refuse **every** API token — including a full-privilege token of

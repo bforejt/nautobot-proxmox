@@ -216,8 +216,10 @@ Same loop; only delivery differs. The Device needs an `xcc` interface with the
 BMC IP (contract §4) and Secrets `xcc_username`/`xcc_password` (records
 pre-created by the bootstrap; supply values via `./add-secret.sh` or
 composer's `./setup.sh --nfv-secrets` — see getting-started §3). The
-`redfish-vmedia` adapter auto-detects XCC1 (PATCH-on-EXT, plain-HTTP ISO) vs
-XCC2 (standard InsertMedia), arms a one-shot CD boot, and powers on.
+`redfish-vmedia` adapter PATCHes the first free `EXT{N}` member on any Lenovo
+XCC (XCC1 and XCC2 both document that path; plain-HTTP ISO URLs on XCC1,
+http/https/NFS/CIFS on XCC2) and falls back to a standard `InsertMedia` POST
+only where no EXT members exist, arms a one-shot CD boot, and powers on.
 Remaining `[lab-verify]` on a real SE350: the vmedia write test + boot dress
 rehearsal (already built into `SE350 Platform Discovery` as opt-in checks —
 **tester procedure: [se350-verification-checklist.md §1

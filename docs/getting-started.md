@@ -39,8 +39,9 @@ nautobot-composer stack, one `./add-secret.sh <name>` per credential
 (`./setup.sh --nfv-secrets` prompts through all of them in one pass):
 
 - `jumphost_console_password` — console login for deployed cloud-init guests.
-- `xcc_username` / `xcc_password` — SE350 BMC login (discovery + vmedia
-  install delivery).
+- `xcc_username` / `xcc_password` — Lenovo XCC login for the physical nodes
+  (SE350 / SE455 V3): platform discovery, out-of-band storage layout, and
+  vmedia install delivery.
 - `host_ssh_username` / `host_ssh_password` — root (or sudo-capable) login
   the `SE350 Host Verification (SSH)` job uses against a Linux-booted unit.
 - `pa_admin_password` — PA-VM admin password (REQUIRED before a PA deploy;
@@ -151,10 +152,10 @@ This is the exact shape proven live in the dev lab. Prerequisite: a
 |---|---|
 | Name | `pve1` — must equal the Proxmox **node name** exactly |
 | Role / Status | `NFV` / `Active` |
-| Device type | `ThinkSystem SE350` (bootstrap-created; any type works for a lab box) |
+| Device type | `ThinkSystem SE350` or `ThinkEdge SE455 V3` (both bootstrap-created; any type works for a lab box) |
 | Interface | `mgmt` (type Virtual) with the node's management IP assigned, set as the device's **primary IPv4** — this is the API endpoint |
 | CF `vm_bridge` | `vmbr0` (SE350 standard: `vmbr1`) |
-| CF `vm_storage` | `local-lvm` |
+| CF `vm_storage` | `local-lvm` (an SE455 V3 installed by the bare-metal loop: `datastore`, the firstboot-created LVM-thin storage) |
 | CF `import_storage` | `local` — a storage with the **Import** content type enabled |
 | CF `secrets_group` | name of its SecretsGroup, or empty to use the global Secrets (step 3) |
 
