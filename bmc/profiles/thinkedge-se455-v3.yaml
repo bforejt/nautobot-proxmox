@@ -1,0 +1,73 @@
+# Install profile: Lenovo ThinkEdge SE455 V3 (XCC2, AMD EPYC 8004, machine
+# type 7DBY) — the current-generation physical edge target. Delivery via
+# Redfish virtual media: XCC2 exposes the same EXT{N} VirtualMedia members and
+# takes the same PATCH-on-member insert as XCC1 (dual-mode client, auto-
+# detected), and the fleet carries the XCC2 Platinum license that entitles
+# remote media (decision #49). Platform facts and open items:
+# docs/research/se455-v3-platform-notes.md.
+device_type: "ThinkEdge SE455 V3"
+
+# Out-of-band RAID layout (decision #50) — replaces the admin's UEFI trip. The
+# install job (and the standalone "Apply Storage Layout" job) make the XCC
+# create these virtual drives over Redfish BEFORE the installer boots, in this
+# order, from the adapter's UNCONFIGURED drives: the fleet unit carries
+# 2 x 480 GB + 2 x 1.92 TB SATA SSDs on a ThinkSystem RAID 540-8i / 940-8i,
+# and "boot is always the smaller pair". Existing volumes are kept by name or
+# adopted by role — a hand-made RAID1 over the two smallest drives IS the boot
+# volume whatever the adapter calls it (Lenovo default VD_0/VD_1) — so units
+# built the old way need nothing; a reinstall keeps the data volume; JBOD
+# drives are never touched. Confirmed on a hand-built unit (tester dump
+# 2026-09-16): RAID 540-8i, boot VD = scsi-0:2:0:0, data VD = scsi-0:2:1:0. The XCC
+# reports RAID inventory only with the host powered on, so the step powers it
+# on into UEFI Setup first when needed.
+storage:
+  controller: "RAID_*"        # Storage member Id glob (Lenovo: RAID_Slot<n>)
+  volumes:
+    - name: boot              # created first => the adapter's first VD (target 0)
+      raid: RAID1
+      select: smallest        # the two smallest unconfigured drives, equal-sized
+      count: 2
+    - name: datastore
+      raid: RAID1
+      select: largest
+      count: 2
+
+install:
+  filesystem: ext4            # fleet standard (decision #27): ext4 + LVM-thin on the boot VD
+  network_source: from-answer # static mgmt from primary_ip4 + DefaultGW; DHCP otherwise
+  # Boot VD = the adapter's first virtual drive. megaraid_sas exposes VDs as
+  # SCSI targets on channel 2 (ID_PATH pci-...-scsi-0:2:<target>:0), and the
+  # storage step creates "boot" first on a fresh adapter => target 0. The
+  # 1.92 TB data VD is target 1 and can never match this pin. Units whose
+  # volumes were created by hand in another order: the storage step warns
+  # ("boot volume is volume #2"), and the host-verification job evaluates
+  # this filter with the installer's own matcher — confirm before installing.
+  disk_filter:
+    ID_PATH: "*-scsi-0:2:0:0"
+  reboot_mode: reboot         # boot-once CD override clears; falls to the boot VD
+  # Interface name pinning (decision #51): the installer writes a MAC-pinned
+  # systemd .link per physical NIC so names survive naming-scheme, firmware
+  # and card changes. Names come from the SoT where the Device's interface
+  # records the MAC (e.g. an interface `mgmt` with the OCP port's MAC becomes
+  # Linux `mgmt`); everything else — including the XCC's USB NIC — gets the
+  # installer's nic<N> by enumeration order, matching the hand-built units.
+  interface_name_pinning: true
+  # Data VD -> LVM-thin PVE storage, created by the firstboot hook (fully-up
+  # ordering, so pvesm works) on the largest unused signature-free whole disk.
+  # A volume group of this name found on disk (reinstall) is reused, never
+  # rebuilt. Set the node's vm_storage CF to `datastore`; import_storage stays
+  # `local` (the root LV carries the directory storage for iso/import/backup).
+  data_volume:
+    vg: datastore
+    thinpool: data
+    pve_storage: datastore
+    select: unused-largest
+    min_size_gib: 1000
+
+delivery:
+  method: redfish-vmedia
+  # XCC2 mounts HTTP and HTTPS ISO URLs (also NFS/CIFS). The composer's
+  # plain-HTTP vhost keeps working; https is additionally allowed here.
+  iso_url_schemes: [http, https]
+  # Documentation only (not enforced by code): remote media needs this license.
+  license: XCC2_Platinum

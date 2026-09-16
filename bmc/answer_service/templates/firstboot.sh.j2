@@ -4,9 +4,11 @@
 # (one-time key), baked into the installed system by proxmox-first-boot, and
 # run on the node's first boot. Idempotent where it matters; logs to journal.
 #
-# Scope (lab kit / nested profile): apt repos, the pveum service-account
-# bootstrap, and the credentials phone-home. Physical-node profiles will add
-# the SE350 topology/tuning steps here (plan-of-attack Phase 3).
+# Scope: apt repos, the pveum service-account bootstrap, the credentials
+# phone-home, and the profile's data storage step: install.data_pool (JBOD
+# boxes: ZFS data mirror) or install.data_volume (RAID-adapter boxes such as
+# the SE455 V3: LVM-thin on the data virtual drive), registered as PVE storage. Physical-node tuning steps
+# (BIOS-effect checks, NIC quirks) remain plan-of-attack Phase 3.
 set -euo pipefail
 log() { echo "[nfv-firstboot] $*"; }
 
@@ -102,5 +104,140 @@ else:
 PYEOF
 log "credentials stored in Nautobot — firstboot complete"
 
+{% if data_pool -%}
+# --- data pool (profile install.data_pool): ZFS {{ data_pool.raid }} over the
+#     {{ data_pool.count }} largest UNUSED whole disks, registered as the
+#     zfspool storage {{ data_pool.pve_storage }}. Runs AFTER the credentials
+#     phone-home so a storage problem can never cost the node its token.
+#     Fail-closed: a pool of this name found on disk (reinstall) is imported;
+#     otherwise creation needs exactly {{ data_pool.count }} equal-sized,
+#     signature-free disks >= {{ data_pool.min_size_gib }} GiB, else it logs and
+#     skips — it never writes to a disk carrying a filesystem/zfs/LVM label.
+#     Every failure below is logged, not fatal (set -e is bypassed via if). ---
+count_of() { echo "$#"; }   # array length helper (bash ${ #arr[@] } would open a Jinja comment)
+POOL={{ data_pool.name | shquote }}
+POOL_STORAGE={{ data_pool.pve_storage | shquote }}
+POOL_COUNT={{ data_pool.count }}
+POOL_MIN_BYTES=$(( {{ data_pool.min_size_gib }} * 1073741824 ))
+if zpool list -H -o name "${POOL}" >/dev/null 2>&1; then
+  log "data pool ${POOL} already present — leaving it alone"
+elif zpool import -d /dev/disk/by-id -f "${POOL}" >/dev/null 2>&1; then
+  log "data pool ${POOL} found on disk and imported (reinstall — data kept)"
+else
+  CANDS=()
+  while read -r name size; do
+    dev="/dev/${name}"
+    [ "${size}" -ge "${POOL_MIN_BYTES}" ] || continue
+    # partitions or holders => in use (the rpool mirror members live here)
+    [ "$(lsblk -n -o NAME "${dev}" | wc -l)" -eq 1 ] || continue
+    # any filesystem / zfs_member / LVM2_member / raid signature => not ours
+    [ -z "$(blkid -p -o value -s TYPE "${dev}" 2>/dev/null)" ] || continue
+    CANDS+=("${name} ${size}")
+  done < <(lsblk -dbn -o NAME,SIZE,TYPE,RM | awk '$3=="disk" && $4=="0" {print $1, $2}')
+  if [ "$(count_of "${CANDS[@]}")" -eq 0 ]; then
+    log "data pool ${POOL}: no unused signature-free disks >= {{ data_pool.min_size_gib }} GiB — skipped"
+  else
+    mapfile -t SORTED < <(printf '%s\n' "${CANDS[@]}" | sort -k2,2nr -k1,1)
+    top_size="${SORTED[0]##* }"
+    SEL=()
+    for entry in "${SORTED[@]}"; do
+      [ "${entry##* }" = "${top_size}" ] && SEL+=("${entry%% *}")
+    done
+    n_sel="$(count_of "${SEL[@]}")"
+    if [ "${n_sel}" -ne "${POOL_COUNT}" ]; then
+      log "data pool ${POOL}: need exactly ${POOL_COUNT} unused equal-sized disks, found ${n_sel} of ${top_size} bytes (${SEL[*]:-none}) — refusing, nothing written"
+    else
+      IDS=()
+      for name in "${SEL[@]}"; do
+        # stable by-id name (ata-/scsi-/nvme-, never a partition link)
+        id="$(find /dev/disk/by-id -maxdepth 1 \( -name 'ata-*' -o -name 'scsi-*' -o -name 'nvme-*' \) ! -name '*-part*' -printf '%p %l\n' 2>/dev/null \
+              | awk -v n="${name}" '$2 ~ ("/" n "$") {print $1; exit}')"
+        IDS+=("${id:-/dev/${name}}")
+      done
+      log "data pool ${POOL}: creating {{ data_pool.raid }} over ${IDS[*]}"
+      if zpool create -o ashift=12 -O compression=on -O atime=off "${POOL}" {{ data_pool.raid }} "${IDS[@]}"; then
+        log "data pool ${POOL} created"
+      else
+        log "data pool ${POOL}: zpool create failed (rc=$?) — pool NOT created"
+      fi
+    fi
+  fi
+fi
+if zpool list -H -o name "${POOL}" >/dev/null 2>&1; then
+  if grep -q "^zfspool: ${POOL_STORAGE}\$" /etc/pve/storage.cfg 2>/dev/null; then
+    log "PVE storage ${POOL_STORAGE} already registered"
+  elif pvesm add zfspool "${POOL_STORAGE}" --pool "${POOL}" --content images,rootdir --sparse 1; then
+    log "PVE storage ${POOL_STORAGE} registered (zfspool ${POOL}, content images,rootdir)"
+  else
+    log "PVE storage ${POOL_STORAGE}: pvesm add failed (rc=$?) — register it by hand"
+  fi
+fi
+
+{% endif -%}
+{% if data_volume -%}
+# --- data volume (profile install.data_volume): LVM-thin on the largest UNUSED
+#     whole disk — the RAID adapter's data virtual drive — registered as the
+#     lvmthin storage {{ data_volume.pve_storage }}. Runs AFTER the credentials
+#     phone-home so a storage problem can never cost the node its token.
+#     A volume group of this name found on disk (reinstall) is reused — the
+#     VM disks on it survive; otherwise creation needs exactly ONE
+#     signature-free disk >= {{ data_volume.min_size_gib }} GiB at the largest
+#     unused size, else it logs and skips. Nothing here is fatal (set -e is
+#     bypassed via if). ---
+count_of() { echo "$#"; }   # array length helper (bash ${ #arr[@] } would open a Jinja comment)
+VG={{ data_volume.vg | shquote }}
+THINPOOL={{ data_volume.thinpool | shquote }}
+VOL_STORAGE={{ data_volume.pve_storage | shquote }}
+VOL_MIN_BYTES=$(( {{ data_volume.min_size_gib }} * 1073741824 ))
+if vgs "${VG}" >/dev/null 2>&1; then
+  log "volume group ${VG} already present (reinstall — data kept) — reusing it"
+else
+  CANDS=()
+  while read -r name size; do
+    dev="/dev/${name}"
+    [ "${size}" -ge "${VOL_MIN_BYTES}" ] || continue
+    # partitions or holders => in use (the boot volume lives here)
+    [ "$(lsblk -n -o NAME "${dev}" | wc -l)" -eq 1 ] || continue
+    # any filesystem / zfs_member / LVM2_member / raid signature => not ours
+    [ -z "$(blkid -p -o value -s TYPE "${dev}" 2>/dev/null)" ] || continue
+    CANDS+=("${name} ${size}")
+  done < <(lsblk -dbn -o NAME,SIZE,TYPE,RM | awk '$3=="disk" && $4=="0" {print $1, $2}')
+  if [ "$(count_of "${CANDS[@]}")" -eq 0 ]; then
+    log "data volume ${VG}: no unused signature-free disk >= {{ data_volume.min_size_gib }} GiB — skipped"
+  else
+    mapfile -t SORTED < <(printf '%s\n' "${CANDS[@]}" | sort -k2,2nr -k1,1)
+    top_size="${SORTED[0]##* }"
+    SEL=()
+    for entry in "${SORTED[@]}"; do
+      [ "${entry##* }" = "${top_size}" ] && SEL+=("${entry%% *}")
+    done
+    n_sel="$(count_of "${SEL[@]}")"
+    if [ "${n_sel}" -ne 1 ]; then
+      log "data volume ${VG}: need exactly one unused disk at the largest size, found ${n_sel} of ${top_size} bytes (${SEL[*]:-none}) — refusing, nothing written"
+    else
+      name="${SEL[0]}"
+      id="$(find /dev/disk/by-id -maxdepth 1 \( -name 'scsi-*' -o -name 'ata-*' -o -name 'nvme-*' \) ! -name '*-part*' -printf '%p %l\n' 2>/dev/null \
+            | awk -v n="${name}" '$2 ~ ("/" n "$") {print $1; exit}')"
+      dev="${id:-/dev/${name}}"
+      log "data volume ${VG}: creating LVM-thin pool ${VG}/${THINPOOL} on ${dev}"
+      if pvcreate "${dev}" && vgcreate "${VG}" "${dev}" && lvcreate -l 98%FREE --thinpool "${THINPOOL}" "${VG}"; then
+        log "data volume ${VG}/${THINPOOL} created"
+      else
+        log "data volume ${VG}: LVM setup failed (rc=$?) — NOT created"
+      fi
+    fi
+  fi
+fi
+if lvs "${VG}/${THINPOOL}" >/dev/null 2>&1; then
+  if grep -q "^lvmthin: ${VOL_STORAGE}\$" /etc/pve/storage.cfg 2>/dev/null; then
+    log "PVE storage ${VOL_STORAGE} already registered"
+  elif pvesm add lvmthin "${VOL_STORAGE}" --vgname "${VG}" --thinpool "${THINPOOL}" --content images,rootdir; then
+    log "PVE storage ${VOL_STORAGE} registered (lvmthin ${VG}/${THINPOOL}, content images,rootdir)"
+  else
+    log "PVE storage ${VOL_STORAGE}: pvesm add failed (rc=$?) — register it by hand"
+  fi
+fi
+
+{% endif -%}
 # Single-use package: remove so the hook can never re-run on later boots.
 apt-get -y purge proxmox-first-boot >/dev/null 2>&1 || true

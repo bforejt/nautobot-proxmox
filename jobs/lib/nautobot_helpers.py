@@ -18,6 +18,10 @@ from nautobot.extras.models import RelationshipAssociation, Secret, SecretsGroup
 GLOBAL_TOKEN_ID_SECRET = "proxmox_token_id"
 GLOBAL_TOKEN_SECRET_SECRET = "proxmox_token_secret"
 
+# Fleet BMC login (Lenovo XCC/XCC2), one pair for every physical node.
+XCC_USERNAME_SECRET_NAME = "xcc_username"
+XCC_PASSWORD_SECRET_NAME = "xcc_password"
+
 
 class CredentialError(RuntimeError):
     pass
@@ -75,3 +79,22 @@ def resolve_proxmox_credentials(hypervisor):
             "configure one (getting-started.md)"
         )
     return token_id, token_secret
+
+
+def resolve_bmc(device):
+    """(bmc_ip, username, password) for a physical Device: the IP on its `xcc`
+    interface (contract §4) plus the fleet XCC credential Secrets."""
+    xcc_iface = device.interfaces.filter(name="xcc").first()
+    if xcc_iface is None or not xcc_iface.ip_addresses.exists():
+        raise CredentialError(
+            f"{device.name} has no 'xcc' interface with an IP (contract §4 BMC address)"
+        )
+    try:
+        username = Secret.objects.get(name=XCC_USERNAME_SECRET_NAME).get_value()
+        password = Secret.objects.get(name=XCC_PASSWORD_SECRET_NAME).get_value()
+    except Secret.DoesNotExist as exc:
+        raise CredentialError(
+            f"XCC credential Secrets missing (need {XCC_USERNAME_SECRET_NAME!r} "
+            f"and {XCC_PASSWORD_SECRET_NAME!r}): {exc}"
+        )
+    return str(xcc_iface.ip_addresses.first().address.ip), username, password

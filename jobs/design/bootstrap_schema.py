@@ -108,6 +108,10 @@ class BootstrapNfvSchema(Job):
         # ---- Manufacturers + 0U virtual DeviceTypes ----
         device_types = [
             ("Lenovo", "ThinkSystem SE350", 1),
+            # Current-generation edge target (XCC2, AMD EPYC 8004, 2U short
+            # depth) — bmc/profiles/thinkedge-se455-v3.yaml. The model string
+            # is the profile key: slugified, it must equal the file name.
+            ("Lenovo", "ThinkEdge SE455 V3", 2),
             ("Palo Alto Networks", "VM-Series", 0),
             ("Cisco Systems", "C8000v", 0),
             ("Cisco Systems", "C9800-CL", 0),

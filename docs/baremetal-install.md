@@ -224,11 +224,28 @@ rehearsal (already built into `SE350 Platform Discovery` as opt-in checks —
 runbook](se350-verification-checklist.md)**) and the RAID volume's `ID_MODEL`
 string for the [profile's disk filter](../bmc/profiles/thinksystem-se350.yaml).
 
+**SE455 V3 (XCC2)** — same adapter, second profile
+([thinkedge-se455-v3.yaml](../bmc/profiles/thinkedge-se455-v3.yaml)). XCC2
+exposes the same `EXT{N}` members and takes the same PATCH-on-member insert,
+so the client's EXT-first branch runs unchanged; it additionally accepts
+HTTPS/NFS/CIFS image URLs (`delivery.iso_url_schemes: [http, https]` in the
+profile) and gates remote media behind the **XCC2 Platinum** license
+(fleet-wide, decision #49 — the discovery job reads
+`/redfish/v1/LicenseService/Licenses/XCC2_Platinum`). Storage is where the
+automation grows: the unit's four SATA SSDs sit behind a ThinkSystem RAID
+540-8i / 940-8i, and the two RAID1 virtual drives the admin used to create
+in UEFI are now **created out-of-band by the install job** from the profile's
+`storage` section (decision #50 — `Apply Storage Layout` does the same on its
+own, dry-run first). Boot VD: ext4 + LVM-thin as everywhere (#27); data VD:
+LVM-thin `datastore` at firstboot. See "Disk layout" below and
+[research/se455-v3-platform-notes.md](research/se455-v3-platform-notes.md).
+
 Other vendors (iDRAC/iLO/Supermicro) = a new profile + at most a small vmedia
 quirk in the client; the answer service and job don't change. Note every
-vendor licenses remote vmedia (XCC Enterprise FoD is fleet-confirmed for us);
-**PXE is the escape hatch for unlicensed BMCs** — same artifact, boot it from
-the lab netboot server instead.
+vendor licenses remote vmedia (XCC Enterprise FoD on the SE350 and XCC2
+Platinum on the SE455 V3 are fleet-confirmed for us); **PXE is the escape
+hatch for unlicensed BMCs** — same artifact, boot it from the lab netboot
+server instead.
 
 ## The first real SE350 install (runbook)
 
@@ -278,6 +295,57 @@ install — allow 20–40 min**, slower than PXE/nested) → webhook flips
 `bm_installed` → reboot to disk → firstboot creates the service account and
 phones the token home → SecretsGroup set → the job ejects the spent installer
 media. The node is then deployable by the VM jobs.
+
+## The first SE455 V3 install (runbook)
+
+Same chain as the SE350 runbook; the differences are the RAID adapter and
+the XCC2 checks. Pre-flight adds, on top of the SE350 list:
+
+1. **Discovery first, before any Device edits**: run `SE350 Platform Discovery`
+   (it is generic — any Lenovo XCC) against the XCC2 IP with the host powered
+   on. Read from its log: the **serial** (goes in the Device), **XCC2
+   Platinum ENABLED**, **EXT members present**, and the **drive inventory** —
+   four drives on the `RAID_Slot<n>` controller, the 480 GB pair and the
+   1.92 TB pair, ideally all `Unconfigured good`. Drives shown as `JBOD` must
+   be converted to Unconfigured Good once (XCC storage page or UEFI) — the
+   layout step never converts drives itself. Drives already `Online` in
+   admin-made volumes are fine: the step **adopts** a RAID1 over the two
+   smallest drives as `boot` and one over the two largest as `datastore`
+   whatever the adapter calls them (Lenovo defaults are `VD_0`/`VD_1`);
+   other shapes (a RAID10 over all four, a lone RAID1 over the big pair
+   with the small pair also in use) make it refuse.
+2. **Device record**: DeviceType **ThinkEdge SE455 V3** (bootstrap-created),
+   role NFV, the XCC-reported serial, `provisioning_state=awaiting_install`,
+   `software_version` = the Active prepared ISO, CFs `vm_bridge`,
+   **`vm_storage=datastore`** (the firstboot-created LVM-thin storage),
+   `import_storage=local`; interface `xcc` with the BMC IP; `mgmt` interface
+   with `primary_ip4` and the OCP mgmt port's **MAC pinned** (no onboard NIC
+   on this box — the NIC filter is the only thing naming the port, and with
+   interface name pinning that MAC also makes the Linux name `mgmt`; record
+   the MACs of the other ports on their Nautobot interfaces if you want SoT
+   names for them too, otherwise they come up as `nic<N>`).
+3. **Storage layout dry run**: `Apply Storage Layout (SoT-driven)` with the
+   default dry run prints the plan (`create boot RAID1` over the two 480 GB
+   drives, `create datastore RAID1` over the 1.92 TB pair) without touching
+   the adapter. Untick dry run + Confirm to create them now, or let the
+   install job do it as its first step — same code, same rules.
+4. **Confirm the boot pin the first time**: the profile selects the boot VD
+   as the adapter's first virtual drive (`ID_PATH: "*-scsi-0:2:0:0"`). Boot
+   the prepared media once, switch to the tty3 root shell (`Ctrl+Alt+F3`) and
+   run `proxmox-auto-install-assistant device-match disk
+   ID_PATH='*-scsi-0:2:0:0'` — it must list exactly the ~480 GB volume. If the
+   layout step warned that `boot` is not the first volume (hand-made units),
+   fix the order (delete and re-create by hand) or pin by `ID_SERIAL` from
+   that shell's `device-info -t disk` output.
+5. Run **`Install Proxmox Node (SoT-driven)`** with Confirm. Expected: RAID
+   layout ensured (host powered on into UEFI Setup if it was off) → EXT mount
+   (XCC2 also takes https URLs) → one-shot CD → `ANSWERED` (source static, fs
+   ext4) → install onto the boot VD → webhook → reboot → firstboot: service
+   account, credentials phone-home, then **LVM-thin `datastore/data` on the
+   data VD** + `pvesm add lvmthin datastore` (an existing volume group is
+   reused on reinstall). Check `journalctl -u proxmox-first-boot` for the
+   `data volume datastore/data created` / `PVE storage datastore registered`
+   lines, then `pvesm status`.
 
 ## Preparing media from Nautobot (the media forge)
 
@@ -482,14 +550,79 @@ Consequences worth knowing:
   ~100G root, ~380G thin pool.
 - ZFS/Btrfs profiles use the same mechanism with their own option families
   (`install.zfs` / `install.btrfs` — e.g. `zfs: {raid: raid1, ashift: 12}`);
-  the fleet standard stays ext4 + LVM-thin because the SE350's hardware RAID
-  presents a single volume (decision #27).
+  the fleet standard stays ext4 + LVM-thin where the hardware presents a
+  single RAID volume (SE350, decision #27).
+- `install.filter_match` (`any`, the installer default, or `all`) renders the
+  answer file's `filter-match` for profiles that combine several filter keys.
+- `install.interface_name_pinning: true` (decision #51; PVE ≥ 9.1 answer
+  format) makes the installer pin every physical NIC's name by MAC at install
+  time — `nic<N>` by enumeration order, exactly like the hand-built units —
+  and the answer service adds a **mapping from the SoT**: a Device interface
+  that records its MAC gets its Nautobot name as the Linux name (`mgmt` stays
+  `mgmt` after every upgrade), the rest keep `nic<N>`. Only MACs the installer
+  actually reported are mapped; names must be 2–15 chars, letter first,
+  alnum/underscore, and may not be `nic<N>` (skipped with a log line
+  otherwise). The `xcc` interface is never a host NIC. The webhook log line
+  `INSTALLED <node>: interfaces …` records the final name-to-MAC map.
+
+### RAID-adapter platforms: two hardware mirrors (SE455 V3, decision #50)
+
+The SE455 V3's four SATA SSDs (2 × 480 GB, 2 × 1.92 TB) sit behind a RAID
+540-8i / 940-8i. The profile's top-level `storage` section is the layout the
+install job (or `Apply Storage Layout`) makes the XCC create over Redfish
+before the installer boots — "boot is always the smaller pair":
+
+```yaml
+storage:
+  controller: "RAID_*"        # Storage member Id glob (Lenovo: RAID_Slot<n>)
+  volumes:                    # creation order = VD target order
+    - {name: boot,      raid: RAID1, select: smallest, count: 2}
+    - {name: datastore, raid: RAID1, select: largest,  count: 2}
+```
+
+| Piece | What it is |
+|---|---|
+| **`boot`** — RAID1 over the two smallest unconfigured drives, created first | The adapter's first VD (SCSI target 0 → `ID_PATH *-scsi-0:2:0:0`, the profile's boot filter). The installer lays ext4 + LVM-thin on it exactly as on the SE350: `local` (iso/import/backup) and `local-lvm` |
+| **`datastore`** — RAID1 over the two largest unconfigured drives | The data VD. The firstboot hook (`install.data_volume`) makes it VG `datastore` with thin pool `data` and registers the lvmthin storage **`datastore`** (images, rootdir) — the contract's `vm_storage=datastore` |
+
+Rules the layout step enforces: the picked drives must be equal-sized and the
+pick unambiguous (a third drive of the same size refuses); volumes that exist
+by name are kept after a RAID-type check, never re-created; nothing is ever
+deleted; JBOD drives are reported, not converted. The XCC reports RAID
+inventory only while the host is powered on, so the step powers it on with a
+one-time boot into UEFI Setup and waits for the adapter to enumerate. It warns
+when `boot` is not the adapter's first volume (hand-made units), because the
+ID_PATH pin assumes it is. `install.data_volume` keys: `vg`, `thinpool`,
+`pve_storage`, `select: unused-largest`, `min_size_gib`; a volume group of
+that name found on disk (reinstall) is reused, so VM disks survive.
+
+### JBOD platforms: ZFS mirrors (`install.data_pool`)
+
+Boxes that present raw disks (onboard SATA/NVMe, an HBA, or an adapter in
+JBOD mode) use the installer's own mirroring instead: `filesystem: zfs`,
+`zfs.raid: raid1` and a `disk_filter` selecting exactly the boot pair (e.g. a
+capacity token in the model string, `ID_MODEL: "*480*"`) build `rpool`; the
+firstboot hook's `install.data_pool` (`name`, `pve_storage`, `raid: mirror`,
+`select: unused-largest`, `count`, `min_size_gib`) builds the data mirror over
+the largest unused signature-free pair and registers it as a zfspool storage,
+importing a same-named pool on reinstall. The hook runs **after** the
+credentials phone-home, so a storage problem can never cost the node its
+token. The host-verification job's "§4 data-pool preflight" / "§4 data-volume
+preflight" evaluate the same rules from the host side.
 
 ## Troubleshooting
 
 | Symptom | Look at |
 |---|---|
-| Installer sits at answer fetch | Answer service log (`docker compose logs answer-service`): `REFUSED` lines say exactly why (unknown serial, wrong state, missing DefaultGW, no profile) |
+| Installer sits at answer fetch | Answer service log (`docker compose logs answer-service`): `REFUSED` lines say exactly why (unknown serial, wrong state, missing DefaultGW, no profile). **No `POST /answer` line at all** = the machine never reached the service (wrong media/URL, network, or the service host asleep/down) — nothing to fix in Nautobot |
+| Installer: `filter did not match any device` / `... any devices` | The answer was issued, but its NIC filter (`ID_NET_NAME_MAC` from the pinned mgmt MAC) or the profile's disk filter matched nothing on this box. From the installer shell: `proxmox-auto-install-assistant device-info -t disk` / `-t network`, then `device-match disk KEY='glob'` until it lists exactly the intended disk(s); fix the profile (or the pinned MAC) and rebuild the answer service |
+| Need a shell on the installer | Every mode runs a root shell on **tty3** (`Ctrl+Alt+F3`; tty2 = installer stderr). A failed automated install drops to a debug shell on tty1 (our answers set `reboot-on-error = false`). To pause *before* anything runs, add `proxmox-debug` to the kernel line (press `e` in GRUB on the automated entry, or use the `debug` iPXE entry). Logs: `/tmp/fetch_answer.log`, `/tmp/auto_installer.log`, `/tmp/install-low-level.log` |
+| `Storage layout refused: ... JBOD` / `only N free` | The RAID adapter's drives are not `Unconfigured good` (JBOD, hot spare, or already in a volume of the wrong shape). Convert JBOD drives once in the XCC storage page or UEFI; a volume the step cannot adopt (wrong RAID level or drive set) must be deleted by hand — the step never deletes |
+| `datastore` storage missing on a hand-built unit | Its data VD already carries an LVM signature with a differently named volume group: firstboot creates nothing on a signed disk and registers only a VG named `datastore`. Rename the VG (`vgrename`) or wipe the VD (`wipefs -a`, data loss) before installing |
+| `boot volume 'boot' is volume #2 on the adapter` warning | The volumes were created by hand in the other order; the profile's `ID_PATH *-scsi-0:2:0:0` pin would select the data VD. Re-create in the right order, or pin `ID_SERIAL` from the installer shell's `device-info -t disk` |
+| `datastore` storage missing after an SE455 V3 install | `journalctl -u proxmox-first-boot` on the node: the data-volume step logs why it refused (no unused signature-free disk at the largest size, or LVM error). A reused volume group from a previous install is expected and logged |
+| Installer fails with `duplicate interface name mapping` or `interface name ... is invalid` | The pinning mapping rendered from Nautobot clashed (two interfaces with the same name, or a name the installer's `pve-iface` rule rejects). The answer service skips such names with a log line before rendering; if the installer still complains, check the `ANSWERED ... names=` log line against the Device's interfaces |
+| `datastore` pool missing after a JBOD (ZFS) install | `journalctl -u proxmox-first-boot` on the node: the data-pool step logs why it refused (fewer/more than `count` equal-sized unused disks, or leftover signatures — `wipefs -a` the intended data disks by hand only if they are truly spare, then `zpool create` + `pvesm add zfspool` per the profile) |
 | `500 root password hash not provisioned` in the log | `secrets/root_password_hash` missing/empty — composer's `./setup.sh` generates it when the answer-service profile is enabled (re-run it), or create manually: `openssl passwd -6 > secrets/root_password_hash` |
 | Install finished but state didn't flip | `docker compose logs answer-service` — webhook arrives before reboot/power-off; payload archived in `/data/install-<serial>.json` |
 | No credentials after first boot | Node's journal: `journalctl -u proxmox-first-boot`; the phone-home retries for ~10 min, and its one-time key stays valid until success — but a consumed key needs a fresh install (by design) |

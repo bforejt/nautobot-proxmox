@@ -1,5 +1,6 @@
 """
-Nautobot Job: SE350 platform discovery (read-only).
+Nautobot Job: Lenovo XCC platform discovery (read-only) — SE350 (XCC1) and
+SE455 V3 (XCC2).
 
 Dumps the Redfish facts the project's Phase 0 checklist needs from a Lenovo
 XCC BMC — BIOS attribute names/values (feeds bmc/se350_bios.yaml), VirtualMedia
@@ -43,6 +44,13 @@ INTERESTING_BIOS_FRAGMENTS = (
     "secureboot",
     "hyperthread",
     "smt",
+    # AMD (SE455 V3 / EPYC) attribute families
+    "determinism",
+    "cppc",
+    "globalc",
+    "corepe",
+    "numa",
+    "powerprofile",
 )
 
 
@@ -50,7 +58,8 @@ class DiscoverSe350Platform(Job):
     class Meta:
         name = "SE350 Platform Discovery"
         description = (
-            "Redfish sweep of a Lenovo XCC: BIOS attributes, VirtualMedia EXT members, "
+            "Redfish sweep of a Lenovo XCC (SE350/XCC1, SE455 V3/XCC2): BIOS "
+            "attributes, VirtualMedia EXT members, licenses, drive inventory, "
             "firmware versions, Secure Boot state. Read-only by default (checklist "
             "items 1-3). Optional WRITE checks: virtual-media mount/eject test, and a "
             "DISRUPTIVE full dress rehearsal (boot-once from the mounted ISO + power "
@@ -129,6 +138,8 @@ class DiscoverSe350Platform(Job):
 
         self._log_system(report.get("system", {}), report.get("manager", {}))
         self._log_virtual_media(report.get("virtual_media", {}))
+        self._log_licenses(report.get("licenses", {}))
+        self._log_drives(report.get("drives", {}))
         self._log_bios_highlights(report.get("bios", {}))
         self._log_secure_boot(report.get("secure_boot", {}))
         self._log_firmware(report.get("firmware_inventory", {}))
@@ -238,8 +249,82 @@ class DiscoverSe350Platform(Job):
         else:
             self.logger.warning(
                 "CHECKLIST §1 FAIL: no EXT members in the VirtualMedia collection. "
-                "License is known Enterprise fleet-wide, so suspect XCC firmware too "
-                "old — update XCC firmware and re-run."
+                "XCC1: Enterprise FoD is known fleet-wide, so suspect XCC firmware too "
+                "old — update and re-run. XCC2: check the license section below "
+                "(XCC2_Platinum must be Enabled)."
+            )
+
+    def _log_licenses(self, licenses):
+        if "error" in licenses:
+            self.logger.warning("License enumeration failed: %s", licenses["error"])
+            return
+        if not licenses.get("supported"):
+            self.logger.info(
+                "No LicenseService on this BMC (XCC1) — license state is not readable "
+                "via Redfish; EXT-member presence above is the proxy."
+            )
+            return
+        for item in licenses.get("items", []):
+            self.logger.info(
+                "License %s (%s): %s%s",
+                item.get("id"), item.get("name"), item.get("state"),
+                f", expires {item['expiration']}" if item.get("expiration") else "",
+            )
+        if licenses.get("platinum_enabled"):
+            self.logger.info("XCC2 Platinum ENABLED — remote media (virtual media) is entitled.")
+        else:
+            self.logger.warning(
+                "XCC2 Platinum NOT enabled — Redfish virtual media will not work on "
+                "this unit; install the Platinum key (7S0X000KWW) or deliver via PXE."
+            )
+
+    def _log_drives(self, drives):
+        if "error" in drives:
+            self.logger.warning("Drive inventory failed: %s", drives["error"])
+            return
+        items = drives.get("drives", [])
+        if not items:
+            self.logger.info("Drive inventory: %s", drives.get("note") or "no drives reported")
+            return
+        for d in items:
+            gb = (d.get("capacity_bytes") or 0) / 1e9
+            self.logger.info(
+                "Drive %s [%s]: model=%r serial=%s %.0f GB %s/%s (udev ID_MODEL=%r)",
+                d.get("location") or d.get("id"), d.get("controller"), d.get("model"),
+                d.get("serial"), gb, d.get("media_type"), d.get("protocol"),
+                d.get("udev_id_model"),
+            )
+        # Boot-pair hint for JBOD profiles (SE455 V3 rule: boot = the smaller
+        # pair): the smallest capacity group, its model string, and whether a
+        # model-glob on it would also catch larger drives.
+        sized = [d for d in items if d.get("capacity_bytes")]
+        if len(sized) < 2:
+            return
+        smallest = sized[0]["capacity_bytes"]
+        pair = [d for d in sized if d["capacity_bytes"] == smallest]
+        models = {d.get("udev_id_model") for d in pair}
+        if len(pair) == 2 and len(models) == 1:
+            model = pair[0]["udev_id_model"] or ""
+            clash = [d for d in sized if d["capacity_bytes"] != smallest and d.get("udev_id_model") == model]
+            if clash:
+                self.logger.warning(
+                    "Boot-pair hint: the two smallest drives share ID_MODEL %r with larger "
+                    "drives — a model glob cannot discriminate; pin ID_PATH (bay) instead.",
+                    model,
+                )
+            else:
+                self.logger.info(
+                    "Boot-pair hint: the two smallest drives (%.0f GB) are ID_MODEL %r — "
+                    "profile disk_filter ID_MODEL: \"%s\" selects exactly them; confirm "
+                    "from the installer shell with: proxmox-auto-install-assistant "
+                    "device-match disk ID_MODEL='%s'",
+                    smallest / 1e9, model, model, model,
+                )
+        else:
+            self.logger.info(
+                "Boot-pair hint: smallest capacity %.0f GB is shared by %d drive(s) with "
+                "model(s) %s — no unambiguous pair; pin the boot filter by ID_PATH.",
+                smallest / 1e9, len(pair), sorted(m for m in models if m),
             )
 
     def _log_bios_highlights(self, bios):
@@ -316,6 +401,8 @@ class DiscoverSe350Platform(Job):
             "bios_attributes.json": report.get("bios", {}),
             "bios_registry.json": report.get("bios_registry", {}),
             "virtual_media.json": report.get("virtual_media", {}),
+            "licenses.json": report.get("licenses", {}),
+            "drives.json": report.get("drives", {}),
             "chassis.json": report.get("chassis", {}),
         }
         for filename, content in files.items():

@@ -45,6 +45,7 @@ EXPECTED_JOBS = {
     "DecommissionVnfDevice",
     "IngestImage",
     "DiscoverSe350Platform",
+    "ApplyStorageLayout",
     "InstallProxmoxNode",
     "PrepareInstallerMedia",
     "VerifySe350Host",

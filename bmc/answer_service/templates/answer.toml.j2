@@ -23,6 +23,21 @@ dns = "{{ dns }}"
 {% for key, glob in net_filter.items() -%}
 filter.{{ key }} = "{{ glob }}"
 {% endfor -%}
+{% endif -%}
+{% if interface_name_pinning -%}
+{# PVE >= 9.1 answer format: every physical NIC gets a MAC-pinned name at
+   install time — nic<N> by enumeration order, or the SoT name from the
+   mapping (decision #51). -#}
+
+[network.interface-name-pinning]
+enabled = true
+{% if pin_mapping -%}
+
+[network.interface-name-pinning.mapping]
+{% for mac, name in pin_mapping.items() -%}
+"{{ mac }}" = "{{ name }}"
+{% endfor -%}
+{% endif -%}
 {% endif %}
 [disk-setup]
 filesystem = "{{ filesystem }}"
@@ -33,7 +48,12 @@ filesystem = "{{ filesystem }}"
 {% endfor -%}
 {% for key, glob in disk_filter.items() -%}
 filter.{{ key }} = "{{ glob }}"
-{% endfor %}
+{% endfor -%}
+{# filter-match: how several filter keys combine ("any" = installer default,
+   "all" = every key must match) — profile install.filter_match. -#}
+{% if filter_match -%}
+filter-match = "{{ filter_match }}"
+{% endif %}
 [first-boot]
 source = "from-url"
 url = "{{ firstboot_url }}"
