@@ -303,6 +303,25 @@ media. The node is then deployable by the VM jobs.
 Same chain as the SE350 runbook; the differences are the RAID adapter and
 the XCC2 checks. Pre-flight adds, on top of the SE350 list:
 
+**Before anything else: rebuild the answer service.** Install profiles bake
+into its image at build time, and the jobs arrive separately through the Git
+sync — so a service built before this profile merged still refuses the node
+with `403 ... no install profile for DeviceType 'ThinkEdge SE455 V3'` and the
+installer aborts at the answer fetch (exactly what the first tester run hit
+on 2026-09-16, after the storage step and the vmedia mount had already
+succeeded). On the composer host:
+
+```bash
+docker compose --profile answer-service up -d --build answer-service
+```
+
+(`git pull` the checkout first if `ANSWER_SERVICE_BUILD_CONTEXT` points at a
+local one.) Then confirm the profile is inside before booting anything:
+
+```bash
+docker exec answer-service ls /app/profiles
+```
+
 1. **Discovery first, before any Device edits**: run `SE350 Platform Discovery`
    (it is generic — any Lenovo XCC) against the XCC2 IP with the host powered
    on. Read from its log: the **serial** (goes in the Device), **XCC2
@@ -617,6 +636,7 @@ preflight" evaluate the same rules from the host side.
 | Symptom | Look at |
 |---|---|
 | Installer sits at answer fetch | Answer service log (`docker compose logs answer-service`): `REFUSED` lines say exactly why (unknown serial, wrong state, missing DefaultGW, no profile). **No `POST /answer` line at all** = the machine never reached the service (wrong media/URL, network, or the service host asleep/down) — nothing to fix in Nautobot |
+| Installer: `Fetching answer file via HTTP failed: http error: 403 Forbidden: {"detail":"no install profile for DeviceType '...'"}` | The answer service image predates the DeviceType's profile (profiles bake in at build; the jobs update independently via Git sync). Rebuild it from the current main — `docker compose --profile answer-service up -d --build answer-service` — verify with `docker exec answer-service ls /app/profiles`, then re-run the install job: the storage step adopts the volumes it already made and the media is re-mounted |
 | Installer: `filter did not match any device` / `... any devices` | The answer was issued, but its NIC filter (`ID_NET_NAME_MAC` from the pinned mgmt MAC) or the profile's disk filter matched nothing on this box. From the installer shell: `proxmox-auto-install-assistant device-info -t disk` / `-t network`, then `device-match disk KEY='glob'` until it lists exactly the intended disk(s); fix the profile (or the pinned MAC) and rebuild the answer service |
 | Need a shell on the installer | Every mode runs a root shell on **tty3** (`Ctrl+Alt+F3`; tty2 = installer stderr). A failed automated install drops to a debug shell on tty1 (our answers set `reboot-on-error = false`). To pause *before* anything runs, add `proxmox-debug` to the kernel line (press `e` in GRUB on the automated entry, or use the `debug` iPXE entry). Logs: `/tmp/fetch_answer.log`, `/tmp/auto_installer.log`, `/tmp/install-low-level.log` |
 | `Storage layout refused: ... JBOD` / `only N free` | The RAID adapter's drives are not `Unconfigured good` (JBOD, hot spare, or already in a volume of the wrong shape). Convert JBOD drives once in the XCC storage page or UEFI; a volume the step cannot adopt (wrong RAID level or drive set) must be deleted by hand — the step never deletes |
