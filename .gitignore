@@ -238,3 +238,14 @@ nautobot_joblogentry_data*.csv
 *.img
 *.qcow2.sha256
 *.manifest.json
+
+# Photos and screen recordings shared for troubleshooting — never in git
+*.mov
+*.MOV
+*.mp4
+*.MP4
+*.m4v
+*.mkv
+*.avi
+*.heic
+*.HEIC

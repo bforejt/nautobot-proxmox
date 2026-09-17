@@ -322,6 +322,13 @@ local one.) Then confirm the profile is inside before booting anything:
 docker exec answer-service ls /app/profiles
 ```
 
+The install job now checks this itself: before it touches the BMC it reads
+the service's `GET /info` through the `nfv-answer-service`
+ExternalIntegration and refuses with `answer service at … has no install
+profile 'thinkedge-se455-v3'` (or `does not support profile feature(s) …`)
+when the image is stale. No integration or an unreachable service only logs
+a warning — the node, not the worker, is what must reach the service.
+
 1. **Discovery first, before any Device edits**: run `SE350 Platform Discovery`
    (it is generic — any Lenovo XCC) against the XCC2 IP with the host powered
    on. Read from its log: the **serial** (goes in the Device), **XCC2
@@ -636,6 +643,7 @@ preflight" evaluate the same rules from the host side.
 | Symptom | Look at |
 |---|---|
 | Installer sits at answer fetch | Answer service log (`docker compose logs answer-service`): `REFUSED` lines say exactly why (unknown serial, wrong state, missing DefaultGW, no profile). **No `POST /answer` line at all** = the machine never reached the service (wrong media/URL, network, or the service host asleep/down) — nothing to fix in Nautobot |
+| Install job refuses: `answer service at … has no install profile '…'` / `does not support profile feature(s) …` | The preflight caught the stale-image case before booting: rebuild the answer service from the current main (`docker compose --profile answer-service up -d --build answer-service`) and re-run. A `did not answer GET /info` *warning* instead means the worker cannot reach the service; the install proceeds — check the node's own reachability if the fetch then fails |
 | Installer: `Fetching answer file via HTTP failed: http error: 403 Forbidden: {"detail":"no install profile for DeviceType '...'"}` | The answer service image predates the DeviceType's profile (profiles bake in at build; the jobs update independently via Git sync). Rebuild it from the current main — `docker compose --profile answer-service up -d --build answer-service` — verify with `docker exec answer-service ls /app/profiles`, then re-run the install job: the storage step adopts the volumes it already made and the media is re-mounted |
 | Installer: `filter did not match any device` / `... any devices` | The answer was issued, but its NIC filter (`ID_NET_NAME_MAC` from the pinned mgmt MAC) or the profile's disk filter matched nothing on this box. From the installer shell: `proxmox-auto-install-assistant device-info -t disk` / `-t network`, then `device-match disk KEY='glob'` until it lists exactly the intended disk(s); fix the profile (or the pinned MAC) and rebuild the answer service |
 | Need a shell on the installer | Every mode runs a root shell on **tty3** (`Ctrl+Alt+F3`; tty2 = installer stderr). A failed automated install drops to a debug shell on tty1 (our answers set `reboot-on-error = false`). To pause *before* anything runs, add `proxmox-debug` to the kernel line (press `e` in GRUB on the automated entry, or use the `debug` iPXE entry). Logs: `/tmp/fetch_answer.log`, `/tmp/auto_installer.log`, `/tmp/install-low-level.log` |
