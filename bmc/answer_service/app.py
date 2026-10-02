@@ -335,7 +335,15 @@ def mgmt_interface_mac(device: dict) -> str | None:
     primary = device.get("primary_ip4")
     if not primary:
         return None
-    detail = _nb("GET", f"/ipam/ip-addresses/{primary['id']}/", params={"depth": 1})
+    # exclude_m2m=false: Nautobot 3.x omits many-to-many fields (the
+    # `interfaces` list included) from REST responses by default; 2.4 accepts
+    # the parameter and returns them either way. Without it a pinned mgmt MAC
+    # is invisible on 3.x and every static install would be refused.
+    detail = _nb(
+        "GET",
+        f"/ipam/ip-addresses/{primary['id']}/",
+        params={"depth": 1, "exclude_m2m": "false"},
+    )
     for assignment in detail.get("interfaces", []) or []:
         iface = _nb("GET", f"/dcim/interfaces/{assignment['id']}/")
         if iface.get("mac_address"):
