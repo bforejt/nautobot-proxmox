@@ -27,6 +27,7 @@ from ..lib.answer_service import (
     INTEGRATION_NAME,
     evaluate_profile_preflight,
     fetch_info,
+    is_hostname_label,
     profile_feature_keys,
 )
 from ..lib.bmc_identity import BmcIdentityError, verify_bmc_identity
@@ -310,6 +311,13 @@ class InstallProxmoxNode(Job):
         _require(
             device.serial,
             f"{device.name} has no serial — the installer's identity POST matches on it",
+        )
+        _require(
+            is_hostname_label(device.name),
+            f"Device name {device.name!r} is not a valid hostname label — it becomes the "
+            "node's hostname, so use letters, digits and hyphens only (1-63 chars, no "
+            "leading/trailing hyphen, not all digits); rename the Device (the answer "
+            "service refuses otherwise)",
         )
         image = self._resolve_image(device)
         profile = load_profile(device.device_type.model)

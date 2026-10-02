@@ -79,6 +79,46 @@ TEMPLATES = Environment(
 )
 TEMPLATES.filters["shquote"] = shlex.quote
 
+_TOML_ESCAPES = {'"': '\\"', "\\": "\\\\", "\b": "\\b", "\t": "\\t",
+                 "\n": "\\n", "\f": "\\f", "\r": "\\r"}
+_TOML_BARE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+\Z")
+
+
+def toml_value(value) -> str:
+    """Render a scalar as a TOML literal: bool/int/float as-is, everything
+    else as an escaped basic string. Every value the answer template places
+    in answer.toml goes through this — a SoT/profile/env string can never
+    close its quotes and inject keys."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    out = []
+    for ch in str(value):
+        if ch in _TOML_ESCAPES:
+            out.append(_TOML_ESCAPES[ch])
+        elif ord(ch) < 0x20 or ord(ch) == 0x7F:
+            out.append(f"\\u{ord(ch):04X}")
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
+
+
+def toml_key(key) -> str:
+    """A TOML key: bare when it is a plain identifier, else quoted."""
+    key = str(key)
+    return key if _TOML_BARE_KEY_RE.match(key) else toml_value(key)
+
+
+TEMPLATES.filters["toml"] = toml_value
+TEMPLATES.filters["tomlkey"] = toml_key
+
+# The Device name becomes the node's hostname (fqdn = <name>.<DOMAIN>): an
+# RFC 1123 label — letters, digits, hyphen, 1-63 chars, no leading/trailing
+# hyphen — and not all digits (the PVE installer rejects a numeric host).
+# Keep in step with jobs/lib/answer_service.py HOSTNAME_LABEL_RE.
+HOSTNAME_LABEL_RE = re.compile(r"^(?![0-9]+\Z)[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z")
+
 # ---- configuration (env) ----
 NAUTOBOT_URL = os.environ.get("NAUTOBOT_URL", "").rstrip("/")
 NAUTOBOT_TOKEN = os.environ.get("NAUTOBOT_TOKEN", "")
@@ -482,6 +522,13 @@ def _answer_impl(identity: dict) -> PlainTextResponse:
             device["name"], serial, role, state,
         )
         raise HTTPException(403, "device is not awaiting install")
+    if not HOSTNAME_LABEL_RE.match(str(device.get("name") or "")):
+        log.warning(
+            "REFUSED: Device name %r (serial %s) is not a valid hostname label — "
+            "letters, digits and hyphens only, 1-63 chars, no leading/trailing hyphen, "
+            "not all digits; rename the Device", device.get("name"), serial,
+        )
+        raise HTTPException(409, "device name is not a valid hostname label (contract §4)")
 
     profile = load_profile((device.get("device_type") or {}).get("model", ""))
     install = profile.get("install", {})

@@ -65,5 +65,43 @@ class FeatureKeys(unittest.TestCase):
         self.assertEqual(asvc.profile_feature_keys({}), [])
 
 
+class HostnameLabel(unittest.TestCase):
+    """The Device name becomes the node's hostname (<name>.<DOMAIN>)."""
+
+    def test_valid_labels(self):
+        for name in ("n1", "NUC-01", "pve-se455-01", "x", "1n", "a" * 63):
+            self.assertTrue(asvc.is_hostname_label(name), name)
+
+    def test_invalid_labels_are_refused(self):
+        for name in (
+            'n1.x"\nroot-ssh-keys = ["ssh-ed25519 attacker"]\n#',  # TOML injection
+            "NFV Lab 1", "n1.nfv.lab", "n_1", "-n1", "n1-", "123",
+            "a" * 64, "", None, "n1\n", "nüc",
+        ):
+            self.assertFalse(asvc.is_hostname_label(name), repr(name))
+
+    def test_regex_matches_the_answer_service_copy(self):
+        app = (MODULE.parents[2] / "bmc" / "answer_service" / "app.py").read_text()
+        self.assertIn(f"HOSTNAME_LABEL_RE = re.compile(r\"{asvc.HOSTNAME_LABEL_RE.pattern}\")", app)
+
+
+class AnswerTemplateEscaping(unittest.TestCase):
+    """Every value/key interpolated into answer.toml goes through the TOML
+    filters, so no SoT/profile/env string can close its quotes."""
+
+    def test_every_interpolation_is_filtered(self):
+        import re
+
+        template = (MODULE.parents[2] / "bmc" / "answer_service" / "templates" / "answer.toml.j2").read_text()
+        exprs = re.findall(r"\{\{(.*?)\}\}", template)
+        self.assertTrue(exprs)
+        for expr in exprs:
+            expr = expr.strip()
+            if expr.startswith('", "'):  # the list separator literal
+                continue
+            self.assertRegex(expr, r"\|\s*toml(key)?$", f"unfiltered: {{{{ {expr} }}}}")
+        self.assertNotRegex(template, r'"\{\{', "a value is wrapped in hand-written quotes")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

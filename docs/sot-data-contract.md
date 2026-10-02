@@ -170,7 +170,7 @@ stored once.** The line it draws here:
 
 | Need | Source | Notes |
 |---|---|---|
-| Node name (Proxmox) | `device.name` | Settled |
+| Node name (Proxmox) | `device.name` — for a bare-metal install it becomes the hostname (`<name>.<DOMAIN>`), so it must be a valid hostname label: letters, digits and hyphens, 1-63 chars, no leading/trailing hyphen, not all digits. The install job and the answer service refuse any other name | Settled |
 | API endpoint | `device.primary_ip4` | **Settled (2026-08-08)** |
 | API credentials | Per-hypervisor **SecretsGroup** named by the device's `secrets_group` CF (Generic/Username = token id, Generic/Secret = token UUID) — each standalone node has its own token; **falls back** to the global `proxmox_token_id`/`proxmox_token_secret` Secret pair when the CF is empty (single-host quickstart) | **Settled (2026-08-08)** |
 | BMC/XCC address | **Settled (2026-08-08)**: a dedicated interface named `xcc` on the physical device (SE350, SE455 V3) with its IP assigned — native, visible, cable-truthful. Never a host NIC: it is excluded from NIC-name pinning. The BMC at that IP must report the Device's `serial` (Redfish system SerialNumber, trimmed, case-insensitive): the install and storage-layout jobs refuse before any BMC write otherwise, and when the BMC reports no serial (decision #52) | Layout process creates it |

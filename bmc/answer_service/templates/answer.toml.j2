@@ -1,27 +1,30 @@
 {#- Proxmox automated-installer answer file, rendered per node from Nautobot.
     Kebab-case keys (snake_case deprecated as of PVE 9.0). Validate rendered
-    output with `proxmox-auto-install-assistant validate-answer`. -#}
+    output with `proxmox-auto-install-assistant validate-answer`.
+    Every value goes through the `toml` filter (escaped TOML literal) and
+    every templated key through `tomlkey`: a SoT, profile or env string can
+    never close its quotes and inject keys. -#}
 [global]
-keyboard = "{{ keyboard }}"
-country = "{{ country }}"
-fqdn = "{{ fqdn }}"
-mailto = "{{ mailto }}"
-timezone = "{{ timezone }}"
-root-password-hashed = "{{ root_password_hashed }}"
+keyboard = {{ keyboard | toml }}
+country = {{ country | toml }}
+fqdn = {{ fqdn | toml }}
+mailto = {{ mailto | toml }}
+timezone = {{ timezone | toml }}
+root-password-hashed = {{ root_password_hashed | toml }}
 {% if root_ssh_keys -%}
-root-ssh-keys = [{% for k in root_ssh_keys %}"{{ k }}"{{ ", " if not loop.last }}{% endfor %}]
+root-ssh-keys = [{% for k in root_ssh_keys %}{{ k | toml }}{{ ", " if not loop.last }}{% endfor %}]
 {% endif -%}
 reboot-on-error = false
-reboot-mode = "{{ reboot_mode }}"
+reboot-mode = {{ reboot_mode | toml }}
 
 [network]
-source = "{{ network_source }}"
+source = {{ network_source | toml }}
 {% if network_source == "from-answer" -%}
-cidr = "{{ cidr }}"
-gateway = "{{ gateway }}"
-dns = "{{ dns }}"
+cidr = {{ cidr | toml }}
+gateway = {{ gateway | toml }}
+dns = {{ dns | toml }}
 {% for key, glob in net_filter.items() -%}
-filter.{{ key }} = "{{ glob }}"
+filter.{{ key | tomlkey }} = {{ glob | toml }}
 {% endfor -%}
 {% endif -%}
 {% if interface_name_pinning -%}
@@ -35,34 +38,34 @@ enabled = true
 
 [network.interface-name-pinning.mapping]
 {% for mac, name in pin_mapping.items() -%}
-"{{ mac }}" = "{{ name }}"
+{{ mac | toml }} = {{ name | toml }}
 {% endfor -%}
 {% endif -%}
 {% endif %}
 [disk-setup]
-filesystem = "{{ filesystem }}"
+filesystem = {{ filesystem | toml }}
 {# fs option family: lvm.* for ext4/xfs (no ext4.*/xfs.* keys exist);
    zfs.*/btrfs.* for those filesystems — fs_family computed by the app. -#}
 {% for key, value in fs_options.items() -%}
-{{ fs_family }}.{{ key }} = {{ value if value is number else '"%s"' % value }}
+{{ fs_family | tomlkey }}.{{ key | tomlkey }} = {{ value | toml }}
 {% endfor -%}
 {% for key, glob in disk_filter.items() -%}
-filter.{{ key }} = "{{ glob }}"
+filter.{{ key | tomlkey }} = {{ glob | toml }}
 {% endfor -%}
 {# filter-match: how several filter keys combine ("any" = installer default,
    "all" = every key must match) — profile install.filter_match. -#}
 {% if filter_match -%}
-filter-match = "{{ filter_match }}"
+filter-match = {{ filter_match | toml }}
 {% endif %}
 [first-boot]
 source = "from-url"
-url = "{{ firstboot_url }}"
+url = {{ firstboot_url | toml }}
 ordering = "fully-up"
 {% if cert_fingerprint -%}
-cert-fingerprint = "{{ cert_fingerprint }}"
+cert-fingerprint = {{ cert_fingerprint | toml }}
 {% endif %}
 [post-installation-webhook]
-url = "{{ webhook_url }}"
+url = {{ webhook_url | toml }}
 {% if cert_fingerprint -%}
-cert-fingerprint = "{{ cert_fingerprint }}"
+cert-fingerprint = {{ cert_fingerprint | toml }}
 {% endif -%}

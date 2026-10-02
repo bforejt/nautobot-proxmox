@@ -13,7 +13,21 @@ is only a warning — the installing node, not the worker, is who must reach it.
 Importable by file path for tests; `requests` is imported lazily.
 """
 
+import re
+
 INTEGRATION_NAME = "nfv-answer-service"
+
+# The Device name becomes the installed node's hostname (<name>.<DOMAIN> in
+# answer.toml): an RFC 1123 label — letters, digits, hyphen, 1-63 chars, no
+# leading/trailing hyphen — and not all digits (the PVE installer rejects a
+# numeric host). The answer service refuses anything else; keep in step with
+# bmc/answer_service/app.py HOSTNAME_LABEL_RE.
+HOSTNAME_LABEL_RE = re.compile(r"^(?![0-9]+\Z)[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z")
+
+
+def is_hostname_label(name):
+    """True when `name` can be the installed node's hostname label."""
+    return isinstance(name, str) and bool(HOSTNAME_LABEL_RE.match(name))
 
 # Profile keys under `install` that older service builds silently ignore —
 # a stale image would answer, but with a degraded layout (no data storage,
