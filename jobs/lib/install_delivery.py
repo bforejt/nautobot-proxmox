@@ -65,6 +65,42 @@ def load_profile(device_type_model: str) -> dict:
     return profile
 
 
+# How long the install job follows the state machine after its delivery step,
+# per delivery method; a profile may override it with
+# delivery.watch_timeout_seconds. Virtual media streams the ISO through the
+# BMC NIC for the whole install (20-40 min observed), so its watch must
+# outlast that; the nested path has already waited for the installer's
+# power-off (webhook landed) and only needs to see the firstboot phone-home.
+# The caps keep the job's worst case inside InstallProxmoxNode.Meta's
+# soft_time_limit (nested: ISO pull 1800 + power-off 2700 + 120 + watch;
+# vmedia: RAID layout/media waits ~800 + watch).
+WATCH_TIMEOUT_DEFAULTS = {"pve-nested": 1800, "redfish-vmedia": 4500}
+WATCH_TIMEOUT_MAX = {"pve-nested": 3600, "redfish-vmedia": 6000}
+WATCH_TIMEOUT_MIN = 300
+
+
+def watch_timeout_seconds(profile: dict) -> int:
+    """The state-watch window (seconds) for this profile's delivery method.
+    Only meaningful for methods the job delivers itself (pve-nested,
+    redfish-vmedia). An override outside [WATCH_TIMEOUT_MIN, the method's
+    cap] or not an integer is refused (DeliveryError) rather than clamped."""
+    delivery = (profile or {}).get("delivery") or {}
+    method = delivery.get("method")
+    if method not in WATCH_TIMEOUT_DEFAULTS:
+        raise DeliveryError(f"No state-watch window for delivery method {method!r}")
+    raw = delivery.get("watch_timeout_seconds")
+    if raw is None:
+        return WATCH_TIMEOUT_DEFAULTS[method]
+    cap = WATCH_TIMEOUT_MAX[method]
+    if isinstance(raw, bool) or not isinstance(raw, int) or not WATCH_TIMEOUT_MIN <= raw <= cap:
+        raise DeliveryError(
+            f"profile delivery.watch_timeout_seconds must be an integer between "
+            f"{WATCH_TIMEOUT_MIN} and {cap} for {method} (got {raw!r}) — the cap keeps "
+            "the install job inside its time limit"
+        )
+    return raw
+
+
 def _b64(value: str) -> str:
     return base64.b64encode(value.encode()).decode()
 

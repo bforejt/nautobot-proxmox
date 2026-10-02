@@ -308,8 +308,20 @@ mount via PATCH-EXT → one-shot CD → ForceRestart → `ANSWERED` in the servi
 log → unattended install (**the ISO streams through the BMC NIC for the whole
 install — allow 20–40 min**, slower than PXE/nested) → webhook flips
 `bm_installed` → reboot to disk → firstboot creates the service account and
-phones the token home → SecretsGroup set → the job ejects the spent installer
-media. The node is then deployable by the VM jobs.
+phones the token home → SecretsGroup set. The job ejects the spent installer
+media the moment the webhook flips `bm_installed` (before the phone-home).
+The node is then deployable by the VM jobs.
+
+**Watch window.** After the boot step the job follows the state machine for
+**75 min on `redfish-vmedia`** (30 min on `pve-nested`, which has already
+waited for the installer's power-off) — long enough for the slow end of a
+vmedia install. A unit that is slower still can raise it per profile with
+`delivery.watch_timeout_seconds` (integer seconds, 300–6000 for vmedia,
+300–3600 for nested; anything else is refused before the BMC is touched —
+the caps keep the job inside its time limit). Running out of the window is
+not an install failure: the job ends with `state machine incomplete within
+the N-min watch window` and leaves the media mounted (the installer may
+still be reading it) — see Troubleshooting.
 
 ## The first SE455 V3 install (runbook)
 
@@ -685,6 +697,9 @@ preflight" evaluate the same rules from the host side.
 | A port came up as `nic<N>` although its Nautobot interface records the MAC | Answer-service log: `pin name … is already used` (two Nautobot names transliterate to the same Linux name — first wins), `squats the installer's default nic<N> namespace`, or `is not a valid Linux/pve-iface name` (shorter than 2 chars after transliteration). Rename the interface in Nautobot |
 | `datastore` pool missing after a JBOD (ZFS) install | `journalctl -u proxmox-first-boot` on the node: the data-pool step logs why it refused (fewer/more than `count` equal-sized unused disks, or leftover signatures — `wipefs -a` the intended data disks by hand only if they are truly spare, then `zpool create` + `pvesm add zfspool` per the profile) |
 | `500 root password hash not provisioned` in the log | `secrets/root_password_hash` missing/empty — composer's `./setup.sh` generates it when the answer-service profile is enabled (re-run it), or create manually: `openssl passwd -6 > secrets/root_password_hash` |
+| Install job result: `installer delivered; state machine incomplete within the N-min watch window (webhook=…, credentials=…)` | The job stopped *watching*; the install itself carries on. `webhook=pending`: check the answer-service log for the `ANSWERED` line and the node's console — a vmedia install that is merely slow will still flip `bm_installed` on its own; re-check the Device's `provisioning_state` later. If the unit routinely needs more than the window, set `delivery.watch_timeout_seconds` in its profile. `credentials=pending` only: see "No credentials after first boot" below |
+| Job log *warning*: `Installer media left mounted on … — the webhook did not land within the N-min watch window` / `Could not eject installer media from …` | The vmedia ISO is still inserted on that `EXT{N}` slot (left on purpose when the webhook had not landed — the installer may still be reading it). Once the node is installed, eject it from the XCC UI or with a discovery-job write-test run, so stale mounts do not fill the EXT slots |
+| Install job refuses: `profile delivery.watch_timeout_seconds must be an integer between 300 and … for …` | The DeviceType profile's watch-window override is not an integer in range (6000 s cap for `redfish-vmedia`, 3600 s for `pve-nested` — the caps keep the job inside its time limit). Fix or drop the key; nothing was booted |
 | Install finished but state didn't flip | `docker compose logs answer-service` — webhook arrives before reboot/power-off; payload archived in `/data/install-<serial>.json` |
 | No credentials after first boot | Node's journal: `journalctl -u proxmox-first-boot`; the phone-home retries for ~10 min, and its one-time key stays valid until success — but a consumed key needs a fresh install (by design) |
 | Phone-home 403 `source does not match` | The node reached the service from an IP other than its SoT primary_ip4 (NAT?) — fix the record or set `VERIFY_PHONE_HOME_SOURCE=false` |

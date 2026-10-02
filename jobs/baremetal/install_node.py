@@ -34,11 +34,13 @@ from ..lib.answer_service import (
 )
 from ..lib.bmc_identity import BmcIdentityError, verify_bmc_identity
 from ..lib.install_delivery import (
+    WATCH_TIMEOUT_DEFAULTS,
     DeliveryError,
     PveNestedDelivery,
     RedfishVmediaDelivery,
     load_profile,
     slugify,
+    watch_timeout_seconds,
 )
 from ..lib.nautobot_helpers import (
     CredentialError,
@@ -75,7 +77,11 @@ class InstallProxmoxNode(Job):
         )
         has_sensitive_variables = False
         # Worst case (nested): ISO pull (~1800s) + install to power-off
-        # (~2700s) + state watch (1800s) + overhead — limits must exceed it.
+        # (~2700s) + state watch (default 1800s, cap 3600s) + overhead;
+        # vmedia: RAID layout + media waits (~800s) + state watch (default
+        # 4500s — the ISO streams through the BMC for the whole 20-40 min
+        # install — cap 6000s). Limits must exceed both; the per-method
+        # watch caps live in lib/install_delivery.WATCH_TIMEOUT_MAX.
         soft_time_limit = 9000
         time_limit = 9600
 
@@ -280,10 +286,29 @@ class InstallProxmoxNode(Job):
 
     # ---- state watch ----
 
-    def _watch_state_machine(self, device, timeout=1800, poll=30):
+    def _eject_vmedia(self):
+        """vmedia cleanup: once the webhook has confirmed the install, the
+        mounted installer media is spent — eject it (best-effort; the
+        boot-once override already cleared, so a failed eject is cosmetic)."""
+        if not getattr(self, "_vmedia_mount", None):
+            return
+        redfish, mount = self._vmedia_mount
+        self._vmedia_mount = None
+        try:
+            redfish.eject_iso(mount["member_path"], mount["mode"])
+            self.logger.info("Installer media ejected from %s", mount["member_path"])
+        except Exception as exc:
+            self.logger.warning(
+                "Could not eject installer media from %s (%s) — eject it via "
+                "a discovery-job write-test run or the XCC UI",
+                mount["member_path"], exc,
+            )
+
+    def _watch_state_machine(self, device, timeout, poll=30):
         """Follow provisioning_state -> bm_installed (webhook) and the
         credentials phone-home (secrets_group CF). Informative, not fatal —
-        the install continues without us either way."""
+        the install continues without us either way. The vmedia installer
+        media is ejected as soon as the webhook lands, not after the watch."""
         deadline = time.time() + timeout
         seen_installed = seen_credentials = False
         while time.time() < deadline and not (seen_installed and seen_credentials):
@@ -292,6 +317,7 @@ class InstallProxmoxNode(Job):
             if not seen_installed and state == "bm_installed":
                 seen_installed = True
                 self.logger.info("Webhook landed: provisioning_state=bm_installed")
+                self._eject_vmedia()
             if not seen_credentials and device.cf.get("secrets_group"):
                 seen_credentials = True
                 self.logger.info(
@@ -303,6 +329,7 @@ class InstallProxmoxNode(Job):
         return seen_installed, seen_credentials
 
     def run(self, device, confirm):
+        self._vmedia_mount = None
         _require(confirm, "Confirmation not given — refusing to boot an installer")
         # Server-side role gate: the dropdown filter is UI-only, and the answer
         # service's role check comes only after the host has been reset.
@@ -339,6 +366,12 @@ class InstallProxmoxNode(Job):
             "the answer's NIC filter is exact (the answer service refuses otherwise)",
         )
         method = profile["delivery"].get("method")
+        watch_timeout = None
+        if method in WATCH_TIMEOUT_DEFAULTS:
+            try:
+                watch_timeout = watch_timeout_seconds(profile)
+            except DeliveryError as exc:
+                raise ContractViolation(str(exc))
 
         try:
             if method == "pve-nested":
@@ -361,21 +394,16 @@ class InstallProxmoxNode(Job):
         except DeliveryError as exc:
             raise RuntimeError(f"Delivery failed: {exc}") from exc
 
-        installed, credentials = self._watch_state_machine(device)
-        # vmedia cleanup: once the webhook has confirmed the install, the
-        # mounted installer media is spent — eject it (best-effort; the
-        # boot-once override already cleared, so a failed eject is cosmetic).
-        if installed and getattr(self, "_vmedia_mount", None):
-            redfish, mount = self._vmedia_mount
-            try:
-                redfish.eject_iso(mount["member_path"], mount["mode"])
-                self.logger.info("Installer media ejected from %s", mount["member_path"])
-            except Exception as exc:
-                self.logger.warning(
-                    "Could not eject installer media from %s (%s) — eject it via "
-                    "a discovery-job write-test run or the XCC UI",
-                    mount["member_path"], exc,
-                )
+        installed, credentials = self._watch_state_machine(device, watch_timeout)
+        if getattr(self, "_vmedia_mount", None):
+            # The webhook never landed, so the media may still be in use —
+            # leave it mounted, but say so: it occupies an EXT slot.
+            self.logger.warning(
+                "Installer media left mounted on %s — the webhook did not land within "
+                "the %d-min watch window; once the install has finished, eject it via "
+                "a discovery-job write-test run or the XCC UI",
+                self._vmedia_mount[1]["member_path"], watch_timeout // 60,
+            )
         if installed and credentials:
             return (
                 f"{device.name}: installed, state=bm_installed, per-node API token "
@@ -383,7 +411,7 @@ class InstallProxmoxNode(Job):
             )
         return (
             f"{device.name}: installer delivered; state machine incomplete within the "
-            f"watch window (webhook={'ok' if installed else 'pending'}, "
+            f"{watch_timeout // 60}-min watch window (webhook={'ok' if installed else 'pending'}, "
             f"credentials={'ok' if credentials else 'pending'}) — check the answer "
             "service log and re-check the device's provisioning_state."
         )
