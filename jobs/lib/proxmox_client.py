@@ -11,6 +11,7 @@ No Nautobot imports — testable standalone, same separation as the other libs.
 
 from __future__ import annotations
 
+import logging
 import time
 import urllib.parse
 from dataclasses import dataclass, field
@@ -20,11 +21,108 @@ import requests
 
 
 class ProxmoxError(RuntimeError):
-    pass
+    """Any Proxmox API failure. `status_code` is the HTTP status when the
+    failure was an HTTP error response (None for transport/body errors)."""
+
+    def __init__(self, *args: Any, status_code: Optional[int] = None) -> None:
+        super().__init__(*args)
+        self.status_code = status_code
 
 
 class ProxmoxTaskError(ProxmoxError):
     pass
+
+
+class ProxmoxUnreachableError(ProxmoxError):
+    """The API could not be observed: transport failure (connection refused or
+    reset, timeout, TLS), an HTTP 5xx (incl. pveproxy's 596), or a body that is
+    not the JSON {"data": ...} envelope. A ProxmoxError subclass, so every
+    best-effort `except ProxmoxError` guard also covers a node that went away;
+    wait_task treats it as transient and retries the status poll."""
+
+
+class ProxmoxAgentPermissionError(ProxmoxError):
+    """The guest-agent probe was refused (401/403): the token lacks
+    VM.GuestAgent.Audit. Raised instead of reporting "agent not ready"."""
+
+
+_log = logging.getLogger(__name__)
+
+
+class ImageIntegrityError(ValueError):
+    """An image pull that could not be checksum-verified (refused, fail closed).
+
+    A ValueError, not a ProxmoxError: it is a SoT-contract refusal raised
+    before any node call, and must never be swallowed by the jobs'
+    best-effort ProxmoxError guards."""
+
+
+def require_image_checksum(filename: str, checksum: Optional[str],
+                           checksum_algorithm: Optional[str]) -> tuple[str, str]:
+    """Return (checksum, algorithm) for a node-side pull, or refuse.
+
+    PVE's download-url verifies only when a checksum is passed, and the
+    node-side cache is keyed by filename, so an image record without a
+    checksum would be pulled unverified (possibly over plain HTTP) and then
+    reused forever. Fail closed instead."""
+    value = (checksum or "").strip()
+    if not value:
+        raise ImageIntegrityError(
+            f"REFUSED: image {filename} has no checksum on its SoftwareImageFile — "
+            "the node-side pull would be unverified. Register it via 'Register Image "
+            "from Published Set' (or set image_file_checksum + hashing_algorithm on "
+            "the record)"
+        )
+    return value, (checksum_algorithm or "sha256").strip() or "sha256"
+
+
+def task_exit_outcome(exitstatus: Any) -> tuple[bool, int]:
+    """Classify a stopped PVE task's `exitstatus` -> (succeeded, warning_count).
+
+    PVE (pve-common RESTEnvironment fork_worker) ends a task that completed
+    but emitted log_warn() lines with `TASK WARNINGS: <n>` and exit code 0,
+    so its exitstatus is "WARNINGS: <n>" -- a success, not a failure. Only
+    "OK" and "WARNINGS..." are successes; anything else (an error message,
+    "unexpected status", an empty/missing value) is a failure. A "WARNINGS"
+    status whose count does not parse is still a success, reported as at
+    least one warning so it is never silently dropped.
+    """
+    if not isinstance(exitstatus, str):
+        return False, 0
+    status = exitstatus.strip()
+    if status == "OK":
+        return True, 0
+    if status.startswith("WARNINGS"):
+        _, _, tail = status.partition(":")
+        try:
+            count = int(tail.strip())
+        except ValueError:
+            count = 1
+        return True, max(count, 1)
+    return False, 0
+
+
+def rollback_vm_decision(vms: list, vmid: int, expected_name: str) -> tuple[str, Optional[str]]:
+    """Decide whether a failed deploy may destroy the VM at `vmid` on a node.
+
+    `vms` is the node's VM list (GET /nodes/{node}/qemu). Returns
+    (action, found_name) with action one of:
+      "absent"  -- no VM with that vmid on the node: nothing to roll back;
+      "destroy" -- the VM carries this deploy's name: it is ours, destroy it;
+      "foreign" -- the VM has another (or no) name: leave it alone.
+    /cluster/nextid reserves nothing, so two concurrent deploys can get the
+    same vmid; the loser's create fails and its rollback must not destroy the
+    winner's VM. The deploy refuses up front when a VM with the device's name
+    already exists on the node, so a name match here is this run's VM. A VM
+    without a name is NOT assumed ours (fail closed).
+    """
+    vm = next((v for v in vms or [] if str(v.get("vmid")) == str(vmid)), None)
+    if vm is None:
+        return "absent", None
+    name = vm.get("name")
+    if name and expected_name and name == expected_name:
+        return "destroy", name
+    return "foreign", name
 
 
 @dataclass
@@ -35,6 +133,7 @@ class ProxmoxClient:
     port: int = 8006
     verify_tls: bool = False
     timeout: int = 60
+    logger: Any = None   # job logger (self.logger) so task warnings reach the JobResult
 
     def __post_init__(self) -> None:
         self.base_url = f"https://{self.host}:{self.port}/api2/json"
@@ -46,11 +145,36 @@ class ProxmoxClient:
 
     # ---------- low level ----------
 
-    def _req(self, method: str, path: str, data: Optional[dict] = None) -> Any:
-        r = self.session.request(method, f"{self.base_url}{path}", data=data, timeout=self.timeout)
+    @staticmethod
+    def _data(what: str, r: Any) -> Any:
+        """HTTP status check + JSON envelope unwrap for one response, mapping
+        every failure to a ProxmoxError (never a raw requests/ValueError)."""
+        if r.status_code >= 500:
+            raise ProxmoxUnreachableError(
+                f"{what} -> {r.status_code}: {r.text[:300]}", status_code=r.status_code
+            )
         if r.status_code >= 400:
-            raise ProxmoxError(f"{method} {path} -> {r.status_code}: {r.text[:300]}")
-        return r.json().get("data")
+            raise ProxmoxError(f"{what} -> {r.status_code}: {r.text[:300]}", status_code=r.status_code)
+        try:
+            body = r.json()
+        except ValueError as exc:  # requests' JSONDecodeError is a ValueError
+            raise ProxmoxUnreachableError(
+                f"{what} -> {r.status_code}: response is not JSON: {r.text[:120]!r}"
+            ) from exc
+        if not isinstance(body, dict):
+            raise ProxmoxUnreachableError(
+                f"{what} -> {r.status_code}: unexpected JSON body (no 'data' envelope)"
+            )
+        return body.get("data")
+
+    def _req(self, method: str, path: str, data: Optional[dict] = None) -> Any:
+        try:
+            r = self.session.request(method, f"{self.base_url}{path}", data=data, timeout=self.timeout)
+        except requests.RequestException as exc:
+            raise ProxmoxUnreachableError(
+                f"{method} {path} -> transport error: {type(exc).__name__}: {exc}"
+            ) from exc
+        return self._data(f"{method} {path}", r)
 
     def get(self, path: str) -> Any:
         return self._req("GET", path)
@@ -66,15 +190,64 @@ class ProxmoxClient:
 
     # ---------- tasks ----------
 
+    # Consecutive failed status polls wait_task tolerates before giving up on
+    # observing a task (a pveproxy restart or a dropped connection must not
+    # abandon a multi-minute import-from create that is still running).
+    TASK_POLL_MAX_FAILURES = 5
+    TASK_POLL_BACKOFF_CAP = 30  # seconds between polls while failing
+
     def wait_task(self, node: str, upid: str, timeout: int = 600, poll: int = 3) -> None:
-        """Block until the task finishes; raise ProxmoxTaskError on failure."""
+        """Block until the task finishes; raise ProxmoxTaskError on failure.
+
+        A task that finished with warnings ("WARNINGS: n") succeeded; the
+        count is logged at warning level (see task_exit_outcome).
+
+        A status poll that could not observe the task (ProxmoxUnreachableError:
+        transport error, 5xx, non-JSON) is logged and retried with a growing
+        delay; a successful poll resets the count. After TASK_POLL_MAX_FAILURES
+        consecutive failures it raises ProxmoxUnreachableError -- "could not
+        observe the task", distinct from ProxmoxTaskError "the task failed".
+        A 4xx (e.g. permission, unknown UPID) is not transient and raises at
+        once. `timeout` still bounds the summed poll intervals."""
+        log = self.logger or _log
         waited = 0
+        failures = 0
         while waited <= timeout:
-            status = self.get(f"/nodes/{node}/tasks/{urllib.parse.quote(upid, safe='')}/status")
+            try:
+                status = self.get(f"/nodes/{node}/tasks/{urllib.parse.quote(upid, safe='')}/status")
+                if not isinstance(status, dict):
+                    raise ProxmoxUnreachableError(
+                        f"task status for {upid} is not an object: {type(status).__name__}"
+                    )
+            except ProxmoxUnreachableError as exc:
+                failures += 1
+                if failures >= self.TASK_POLL_MAX_FAILURES:
+                    raise ProxmoxUnreachableError(
+                        f"Lost contact with task {upid} on {node} after {failures} consecutive "
+                        f"failed status polls - the task may still be running on the node "
+                        f"(check its Tasks panel): {exc}"
+                    ) from exc
+                delay = min(poll * failures, max(poll, self.TASK_POLL_BACKOFF_CAP))
+                log.warning(
+                    "Proxmox task %s on %s: status poll failed (%d/%d consecutive), "
+                    "retrying in %ss: %s",
+                    upid, node, failures, self.TASK_POLL_MAX_FAILURES, delay, exc,
+                )
+                time.sleep(delay)
+                waited += delay
+                continue
+            failures = 0
             if status.get("status") == "stopped":
                 exitstatus = status.get("exitstatus", "")
-                if exitstatus != "OK":
+                ok, warnings = task_exit_outcome(exitstatus)
+                if not ok:
                     raise ProxmoxTaskError(f"Task {upid} failed: {exitstatus}")
+                if warnings:
+                    log.warning(
+                        "Proxmox task %s on %s succeeded with %d warning(s) - "
+                        "see the task log on the node (Tasks panel) for the WARN lines",
+                        upid, node, warnings,
+                    )
                 return
             time.sleep(poll)
             waited += poll
@@ -127,14 +300,21 @@ class ProxmoxClient:
     def ensure_image(self, node: str, storage: str, filename: str, url: str,
                      checksum: Optional[str], checksum_algorithm: str = "sha256",
                      logger=None) -> str:
-        """Idempotent: return the import volid, pulling from `url` if absent."""
+        """Idempotent: return the import volid, pulling from `url` if absent.
+
+        Refuses (ImageIntegrityError) when `checksum` is empty — before any
+        node call, so an unverified pull never happens. A volume already on
+        the node is matched by filename and NOT re-hashed (filenames are
+        unique per content; Register Image refuses same-name collisions)."""
+        checksum, checksum_algorithm = require_image_checksum(filename, checksum, checksum_algorithm)
         volid = self.find_import_volume(node, storage, filename)
         if volid:
             if logger:
-                logger.info("Image already present on %s: %s", node, volid)
+                logger.info("Image already present on %s: %s (matched by filename)", node, volid)
             return volid
         if logger:
-            logger.info("Image not on node - pulling %s from %s (checksum-verified)", filename, url)
+            logger.info("Image not on node - pulling %s from %s (%s-verified by the node)",
+                        filename, url, checksum_algorithm)
         return self.download_url(node, storage, url, filename,
                                  checksum=checksum, checksum_algorithm=checksum_algorithm)
 
@@ -153,14 +333,17 @@ class ProxmoxClient:
         import os
         filename = filename or os.path.basename(local_path)
         with open(local_path, "rb") as fh:
-            r = self.session.post(
-                f"{self.base_url}/nodes/{node}/storage/{storage}/upload",
-                data={"content": content}, files={"filename": (filename, fh)},
-                timeout=timeout,
-            )
-        if r.status_code >= 400:
-            raise ProxmoxError(f"upload {filename} -> {r.status_code}: {r.text[:300]}")
-        upid = r.json().get("data")
+            try:
+                r = self.session.post(
+                    f"{self.base_url}/nodes/{node}/storage/{storage}/upload",
+                    data={"content": content}, files={"filename": (filename, fh)},
+                    timeout=timeout,
+                )
+            except requests.RequestException as exc:
+                raise ProxmoxUnreachableError(
+                    f"upload {filename} -> transport error: {type(exc).__name__}: {exc}"
+                ) from exc
+        upid = self._data(f"upload {filename}", r)
         if isinstance(upid, str) and upid.startswith("UPID"):
             self.wait_task(node, upid, timeout=timeout)
         return f"{storage}:{content}/{filename}"
@@ -202,10 +385,25 @@ class ProxmoxClient:
         self.wait_task(node, upid, timeout=timeout)
 
     def agent_ipv4(self, node: str, vmid: int) -> Optional[str]:
-        """First non-loopback IPv4 the guest agent reports, or None."""
+        """First non-loopback IPv4 the guest agent reports, or None.
+
+        "Not ready yet" (agent not running -- PVE answers 500 -- or any other
+        failed probe) is None, so wait_agent_ipv4 keeps polling. A 401/403 is
+        NOT "not ready": the token can never see the agent (PVE 8.2+/9.x gate
+        network-get-interfaces on VM.GuestAgent.Audit), so polling would only
+        burn the whole wait and end in a misleading "agent never came up".
+        That raises ProxmoxAgentPermissionError at once.
+        """
         try:
             result = self.get(f"/nodes/{node}/qemu/{vmid}/agent/network-get-interfaces")
-        except ProxmoxError:
+        except ProxmoxError as exc:
+            if exc.status_code in (401, 403):
+                raise ProxmoxAgentPermissionError(
+                    f"guest-agent probe on VM {vmid} refused ({exc.status_code}): the API token "
+                    "lacks VM.GuestAgent.Audit -- add it to the NFVAutomation role "
+                    f"(pveum role modify, see getting-started section 4). Detail: {exc}",
+                    status_code=exc.status_code,
+                ) from exc
             return None
         for iface in (result or {}).get("result", []):
             if iface.get("name") == "lo":

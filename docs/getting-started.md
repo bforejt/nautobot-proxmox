@@ -42,8 +42,10 @@ nautobot-composer stack, one `./add-secret.sh <name>` per credential
 - `xcc_username` / `xcc_password` — Lenovo XCC login for the physical nodes
   (SE350 / SE455 V3): platform discovery, out-of-band storage layout, and
   vmedia install delivery.
-- `host_ssh_username` / `host_ssh_password` — root (or sudo-capable) login
-  the `SE350 Host Verification (SSH)` job uses against a Linux-booted unit.
+- `host_ssh_username` / `host_ssh_password` — the **root** login the
+  `SE350 Host Verification (SSH)` job uses against a Linux-booted unit. A
+  sudo-capable non-root user is not enough: the job never invokes sudo, and
+  its DMI serial read (`/sys/class/dmi/id/product_serial`) is root-only.
 - `pa_admin_password` — PA-VM admin password (REQUIRED before a PA deploy;
   it ships in bootstrap.xml as a hash so firewalls never come up admin/admin).
 - `pa_authcode` — optional BYOL auth code; leave valueless for unlicensed
@@ -72,7 +74,7 @@ a custom **`NFVAutomation`** role and a privilege-separated token. As root on
 the node:
 
 ```bash
-pveum role add NFVAutomation --privs "VM.Allocate,VM.Clone,VM.Config.Disk,VM.Config.CDROM,VM.Config.CPU,VM.Config.Memory,VM.Config.Network,VM.Config.HWType,VM.Config.Options,VM.Config.Cloudinit,VM.PowerMgmt,VM.Audit,VM.Console,Datastore.Allocate,Datastore.AllocateSpace,Datastore.AllocateTemplate,Datastore.Audit,Sys.Audit,Sys.Modify,SDN.Use"
+pveum role add NFVAutomation --privs "VM.Allocate,VM.Clone,VM.Config.Disk,VM.Config.CDROM,VM.Config.CPU,VM.Config.Memory,VM.Config.Network,VM.Config.HWType,VM.Config.Options,VM.Config.Cloudinit,VM.PowerMgmt,VM.Audit,VM.GuestAgent.Audit,VM.Console,Datastore.Allocate,Datastore.AllocateSpace,Datastore.AllocateTemplate,Datastore.Audit,Sys.Audit,Sys.Modify,SDN.Use"
 pveum user add nfv-automation@pve --comment "Nautobot NFV jobs"
 pveum user token add nfv-automation@pve nautobot --privsep 1   # SAVE the printed UUID
 pveum acl modify / --users nfv-automation@pve --roles NFVAutomation
@@ -88,12 +90,15 @@ where step 3 expects them.
 **Upgrading an existing install**: `Datastore.Allocate` joined the role
 2026-08-27 (the PA deploy path deletes its own bootstrap ISO after first
 boot — content deletion needs it; the deliberate gap noted in decision #35 is
-now closed). The answer service's firstboot role default was updated in the
-same change, so freshly L0-installed nodes get it automatically — nodes
-installed before that update, and hand-built nodes, re-run:
+now closed), and `VM.GuestAgent.Audit` joined it 2026-10-02 (the deploy job's
+guest-agent readiness probe, `agent/network-get-interfaces`, is gated on it
+since PVE 8.2; without it the probe is refused with 403 and the deploy ends
+"Readiness UNVERIFIED"). The answer service's firstboot role default carries
+both, so freshly L0-installed nodes get them automatically — nodes installed
+before those updates, and hand-built nodes, re-run:
 
 ```bash
-pveum role modify NFVAutomation --privs "VM.Allocate,VM.Clone,VM.Config.Disk,VM.Config.CDROM,VM.Config.CPU,VM.Config.Memory,VM.Config.Network,VM.Config.HWType,VM.Config.Options,VM.Config.Cloudinit,VM.PowerMgmt,VM.Audit,VM.Console,Datastore.Allocate,Datastore.AllocateSpace,Datastore.AllocateTemplate,Datastore.Audit,Sys.Audit,Sys.Modify,SDN.Use"
+pveum role modify NFVAutomation --privs "VM.Allocate,VM.Clone,VM.Config.Disk,VM.Config.CDROM,VM.Config.CPU,VM.Config.Memory,VM.Config.Network,VM.Config.HWType,VM.Config.Options,VM.Config.Cloudinit,VM.PowerMgmt,VM.Audit,VM.GuestAgent.Audit,VM.Console,Datastore.Allocate,Datastore.AllocateSpace,Datastore.AllocateTemplate,Datastore.Audit,Sys.Audit,Sys.Modify,SDN.Use"
 ```
 
 ## 5. A golden image

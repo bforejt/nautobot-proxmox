@@ -12,7 +12,8 @@ of the verification checklist in one pass:
       profile's filesystem needs (1 for ext4/xfs/btrfs, 2 for a zfs raid1
       pair, ...). For profiles with install.data_pool / install.data_volume,
       also checks that the remaining disks leave exactly the expected data
-      pair / data virtual drive. Cross-checks the
+      pair / data virtual drive, unused and signature-free (firstboot's own
+      rule; a same-named pool / VG is imported). Cross-checks the
       boot adapter's PCI address from a pinned ID_PATH against lspci.
   §5  DMI serial: reads /sys/class/dmi/id/product_serial (the value the
       installer POSTs to the answer service) and compares it to the Nautobot
@@ -25,7 +26,9 @@ of the verification checklist in one pass:
       disable check), cpufreq governor, core count.
 
 Credentials come from Nautobot Secrets named ``host_ssh_username`` /
-``host_ssh_password`` (root or sudo-capable). All commands are READ-ONLY.
+``host_ssh_password``, which must be a ROOT login: the job never invokes
+sudo, and some reads are root-only (/sys/class/dmi/id/product_serial is mode
+0400, so a non-root login FAILs §5). All commands are READ-ONLY.
 Uses paramiko (present in the composer stack via the device-onboarding /
 Nornir dependency chain); host keys are auto-accepted — lab tooling.
 """
@@ -87,6 +90,61 @@ def evaluate_disk_filter(disks, disk_filter, filter_match="any"):
     return selected
 
 
+_LSBLK_PAIR = re.compile(r'(\w+)="([^"]*)"')
+
+
+def disk_in_use(disk):
+    """Why the firstboot data-storage step would not build on this whole disk
+    (empty list = usable): any child (partition, holder, LV), a filesystem /
+    zfs_member / LVM2_member / raid signature on the disk itself, or a
+    partition table. Mirrors firstboot.sh.j2's candidate rule (`lsblk` child
+    count + `blkid -p` TYPE); a bare partition table is refused too, because
+    pvcreate / zpool create would refuse that disk anyway."""
+    reasons = []
+    if disk.get("_parts", 0):
+        reasons.append(f"{disk['_parts']} partition(s)/holder(s)")
+    if disk.get("ID_FS_TYPE"):
+        reasons.append(f"a {disk['ID_FS_TYPE']} signature")
+    if disk.get("ID_PART_TABLE_TYPE"):
+        reasons.append(f"a {disk['ID_PART_TABLE_TYPE']} partition table")
+    return reasons
+
+
+def zfs_pools_on(disk):
+    """Names of the ZFS pools whose members sit on this disk or its partitions
+    (blkid/udev report a zfs_member's pool name as its LABEL)."""
+    return {
+        n["LABEL"] for n in disk.get("_nodes", ())
+        if n.get("FSTYPE") == "zfs_member" and n.get("LABEL")
+    }
+
+
+def _dm_vg_name(dm_name):
+    """VG part of a device-mapper LV name: `my--vg-data` -> `my-vg` (LVM
+    doubles every hyphen inside the VG and LV names)."""
+    parts = re.split(r"(?<!-)-(?!-)", dm_name, maxsplit=1)
+    return parts[0].replace("--", "-") if len(parts) == 2 else ""
+
+
+def volume_groups_on(disk):
+    """Volume groups with a PV on this disk: `pvs` (needs root) plus the VG
+    part of any active LV stacked on it (visible without root)."""
+    vgs = set(disk.get("_pv_vgs", ()))
+    for node in disk.get("_nodes", ()):
+        if node.get("TYPE") == "lvm":
+            vg = _dm_vg_name(node.get("NAME", ""))
+            if vg:
+                vgs.add(vg)
+    return vgs
+
+
+def _dirty_detail(disks):
+    return "; ".join(
+        f"{d['DEVNAME']} ({d.get('_size')}) carries {', '.join(disk_in_use(d))}"
+        for d in disks
+    )
+
+
 class VerifySe350Host(Job):
     class Meta:
         name = "SE350 Host Verification (SSH)"
@@ -95,7 +153,8 @@ class VerifySe350Host(Job):
             "disk inventory + install disk-filter validation with the installer's "
             "matching rules (checklist §4), data-pool preflight, DMI serial vs "
             "Nautobot (§5), firmware LLDP flags on i40e/ice (§6), Secure Boot state (§9), "
-            "BIOS-effect readbacks. Secrets: host_ssh_username/host_ssh_password."
+            "BIOS-effect readbacks. Secrets: host_ssh_username/host_ssh_password "
+            "(a root login — the job does not use sudo)."
         )
         has_sensitive_variables = False
         soft_time_limit = 300
@@ -154,9 +213,13 @@ class VerifySe350Host(Job):
             client,
             "for d in /dev/sd? /dev/nvme?n1; do [ -b \"$d\" ] || continue; "
             "echo \"DEV $d\"; udevadm info --query=property \"$d\" "
-            "| grep -E '^(ID_MODEL|ID_SERIAL|ID_PATH)='; "
+            "| grep -E '^(ID_MODEL|ID_SERIAL|ID_PATH|ID_FS_TYPE|ID_PART_TABLE_TYPE)='; "
             "echo \"SIZE $(lsblk -dbn -o SIZE \"$d\" | tr -d ' ')\"; "
-            "echo \"PARTS $(($(lsblk -n -o NAME \"$d\" | wc -l) - 1))\"; done",
+            "echo \"PARTS $(($(lsblk -n -o NAME \"$d\" | wc -l) - 1))\"; "
+            "echo \"RM $(lsblk -dn -o RM \"$d\" | tr -d ' ')\"; "
+            "lsblk -nP -o NAME,TYPE,FSTYPE,LABEL \"$d\" | sed 's/^/NODE /'; "
+            "echo \"PVVG $(pvs --noheadings -o vg_name $(lsblk -lnp -o NAME \"$d\") "
+            "2>/dev/null | tr -s ' \\n' ' ')\"; done",
         )
         if rc != 0 and not out:
             return "FAIL", "could not enumerate disks (udevadm/lsblk missing?)"
@@ -173,14 +236,23 @@ class VerifySe350Host(Job):
                 current["_size"] = _human(current["_bytes"])
             elif current is not None and line.startswith("PARTS "):
                 current["_parts"] = int(line[6:] or 0)
+            elif current is not None and line.startswith("RM "):
+                current["_rm"] = line[3:].strip()
+            elif current is not None and line.startswith("NODE "):
+                current.setdefault("_nodes", []).append(dict(_LSBLK_PAIR.findall(line[5:])))
+            elif current is not None and line.startswith("PVVG"):
+                current["_pv_vgs"] = line[4:].split()
             elif current is not None and "=" in line:
                 key, _, value = line.partition("=")
                 current[key] = value
         for d in disks:
             self.logger.info(
-                "Disk %s: size=%s model=%s serial=%s path=%s partitions=%s",
+                "Disk %s: size=%s model=%s serial=%s path=%s partitions=%s "
+                "signature=%s partition-table=%s removable=%s",
                 d.get("DEVNAME"), d.get("_size"), d.get("ID_MODEL"),
                 d.get("ID_SERIAL"), d.get("ID_PATH"), d.get("_parts", "?"),
+                d.get("ID_FS_TYPE") or "-", d.get("ID_PART_TABLE_TYPE") or "-",
+                d.get("_rm", "?"),
             )
         self._disks = disks
         install = profile.get("install", {})
@@ -217,70 +289,98 @@ class VerifySe350Host(Job):
         )
 
     def _check_data_pool(self, profile):
-        """install.data_pool preflight: after the boot filter takes its disks,
-        the largest remaining unused disks must be exactly `count` equal-sized
-        ones >= min_size_gib — the same rule the firstboot hook applies."""
+        """install.data_pool preflight — the firstboot hook's rule: a pool of
+        the profile's name already on the non-boot disks is imported (PASS);
+        otherwise the largest remaining non-removable disks >= min_size_gib
+        must be exactly `count` equal-sized ones, all unused and
+        signature-free (firstboot skips the pool otherwise)."""
         spec = profile.get("install", {}).get("data_pool")
         if not spec:
             return "SKIP", "profile has no install.data_pool"
         disks = getattr(self, "_disks", None) or []
         boot = {d["DEVNAME"] for d in (getattr(self, "_boot_disks", None) or [])}
+        pool = spec.get("name")
+        others = [d for d in disks if d["DEVNAME"] not in boot]
+        holders = [d["DEVNAME"] for d in others if pool in zfs_pools_on(d)]
+        if holders:
+            return "PASS", (
+                f"data pool {pool!r} already exists on {holders} — firstboot "
+                "imports it (reinstall: data kept) and creates nothing"
+            )
         count = int(spec.get("count", 2))
         min_bytes = int(spec.get("min_size_gib", 0)) * 1024 ** 3
-        rest = [d for d in disks if d["DEVNAME"] not in boot and d.get("_bytes", 0) >= min_bytes]
+        rest = [d for d in others
+                if d.get("_rm") != "1" and d.get("_bytes", 0) >= min_bytes]
         if not rest:
             return "FAIL", (
                 f"no disks >= {spec.get('min_size_gib', 0)} GiB remain after the boot "
-                f"filter — data pool {spec.get('name')!r} cannot be built"
+                f"filter — data pool {pool!r} cannot be built"
             )
         top = max(d["_bytes"] for d in rest)
         pair = [d for d in rest if d["_bytes"] == top]
         names = [f"{d['DEVNAME']} ({d.get('_size')})" for d in pair]
-        in_use = [d["DEVNAME"] for d in pair if d.get("_parts", 0)]
+        dirty = [d for d in pair if disk_in_use(d)]
+        if dirty:
+            return "FAIL", (
+                f"data pool {pool!r}: the largest remaining disk(s) are not unused "
+                f"and signature-free — {_dirty_detail(dirty)}; firstboot builds "
+                "only on clean disks, so it would skip the pool (no zfspool "
+                "storage). Wipe them (wipefs -a, data loss) only if truly spare"
+            )
         if len(pair) != count:
             return "FAIL", (
-                f"data pool {spec.get('name')!r} needs exactly {count} equal-sized "
+                f"data pool {pool!r} needs exactly {count} equal-sized "
                 f"disks at the largest remaining size; found {len(pair)}: {names}"
             )
-        note = (
-            f" (NOTE: {in_use} already carry partitions — firstboot only creates "
-            "the pool on signature-free disks; a same-named pool is imported)"
-            if in_use else ""
-        )
-        return "PASS", (
-            f"data pool {spec.get('name')!r} would mirror {names}{note}"
-        )
+        return "PASS", f"data pool {pool!r} would mirror {names}"
 
     def _check_data_volume(self, profile):
-        """install.data_volume preflight (RAID-adapter boxes): after the boot
-        filter takes its disk, exactly one unused disk >= min_size_gib must be
-        the largest remaining one — the firstboot LVM-thin rule."""
+        """install.data_volume preflight (RAID-adapter boxes) — the firstboot
+        LVM-thin rule: a volume group of the profile's name already on the
+        non-boot disks is reused (PASS); otherwise exactly one non-removable
+        disk >= min_size_gib must be the largest remaining one, and it must
+        be unused and signature-free (firstboot skips the volume otherwise)."""
         spec = profile.get("install", {}).get("data_volume")
         if not spec:
             return "SKIP", "profile has no install.data_volume"
         disks = getattr(self, "_disks", None) or []
         boot = {d["DEVNAME"] for d in (getattr(self, "_boot_disks", None) or [])}
+        vg = spec.get("vg")
+        others = [d for d in disks if d["DEVNAME"] not in boot]
+        holders = [d["DEVNAME"] for d in others if vg in volume_groups_on(d)]
+        if holders:
+            return "PASS", (
+                f"volume group {vg!r} already exists on {holders} — firstboot "
+                "reuses it (reinstall: data kept) and registers the storage only "
+                f"if it holds the thin pool {vg}/{spec.get('thinpool')}"
+            )
         min_bytes = int(spec.get("min_size_gib", 0)) * 1024 ** 3
-        rest = [d for d in disks if d["DEVNAME"] not in boot and d.get("_bytes", 0) >= min_bytes]
+        rest = [d for d in others
+                if d.get("_rm") != "1" and d.get("_bytes", 0) >= min_bytes]
         if not rest:
             return "FAIL", (
                 f"no disk >= {spec.get('min_size_gib', 0)} GiB remains after the boot "
-                f"filter — data volume {spec.get('vg')!r} cannot be built"
+                f"filter — data volume {vg!r} cannot be built"
             )
         top = max(d["_bytes"] for d in rest)
         cands = [d for d in rest if d["_bytes"] == top]
         names = [f"{d['DEVNAME']} ({d.get('_size')})" for d in cands]
+        dirty = [d for d in cands if disk_in_use(d)]
+        if dirty:
+            return "FAIL", (
+                f"data volume {vg!r}: the largest remaining disk(s) are not unused "
+                f"and signature-free — {_dirty_detail(dirty)}; firstboot builds "
+                f"only on a clean disk or reuses a volume group named {vg!r} (none "
+                "seen here; `pvs` on the node names a PV's group), so it would "
+                "skip the volume (no lvmthin storage). Rename the group to "
+                f"{vg!r} (vgrename) or wipe the disk (wipefs -a, data loss)"
+            )
         if len(cands) != 1:
             return "FAIL", (
-                f"data volume {spec.get('vg')!r} needs exactly one disk at the largest "
+                f"data volume {vg!r} needs exactly one disk at the largest "
                 f"remaining size; found {len(cands)}: {names}"
             )
-        note = (
-            " (NOTE: it already carries partitions — firstboot reuses an existing "
-            f"volume group named {spec.get('vg')!r} and creates nothing otherwise)"
-            if cands[0].get("_parts", 0) else ""
-        )
-        return "PASS", f"data volume {spec.get('vg')!r} would use {names[0]}{note}"
+        return "PASS", f"data volume {vg!r} would use {names[0]}"
 
     def _check_boot_adapter(self, client, profile):
         id_path = profile.get("install", {}).get("disk_filter", {}).get("ID_PATH", "")

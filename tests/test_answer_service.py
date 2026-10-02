@@ -65,5 +65,90 @@ class FeatureKeys(unittest.TestCase):
         self.assertEqual(asvc.profile_feature_keys({}), [])
 
 
+class HostnameLabel(unittest.TestCase):
+    """The Device name becomes the node's hostname (<name>.<DOMAIN>)."""
+
+    def test_valid_labels(self):
+        for name in ("n1", "NUC-01", "pve-se455-01", "x", "1n", "a" * 63):
+            self.assertTrue(asvc.is_hostname_label(name), name)
+
+    def test_invalid_labels_are_refused(self):
+        for name in (
+            'n1.x"\nroot-ssh-keys = ["ssh-ed25519 attacker"]\n#',  # TOML injection
+            "NFV Lab 1", "n1.nfv.lab", "n_1", "-n1", "n1-", "123",
+            "a" * 64, "", None, "n1\n", "nüc",
+        ):
+            self.assertFalse(asvc.is_hostname_label(name), repr(name))
+
+    def test_regex_matches_the_answer_service_copy(self):
+        app = (MODULE.parents[2] / "bmc" / "answer_service" / "app.py").read_text()
+        self.assertIn(f"HOSTNAME_LABEL_RE = re.compile(r\"{asvc.HOSTNAME_LABEL_RE.pattern}\")", app)
+
+
+class NfvRoleGate(unittest.TestCase):
+    """F38: the bare-metal jobs re-check the NFV role server-side — the
+    ObjectVar query_params only filter the UI dropdown."""
+
+    @staticmethod
+    def _device(role_name, name="n1"):
+        from types import SimpleNamespace
+
+        role = None if role_name is None else SimpleNamespace(name=role_name)
+        return SimpleNamespace(name=name, role=role)
+
+    def test_nfv_role_passes(self):
+        self.assertIsNone(asvc.nfv_role_refusal(self._device("NFV"), "boot an installer"))
+
+    def test_other_roles_are_refused(self):
+        for role_name in ("Hypervisor", "nfv", "NFV ", "Firewall", "", None):
+            message = asvc.nfv_role_refusal(self._device(role_name, "prod-hv-1"), "boot an installer")
+            self.assertIsNotNone(message, repr(role_name))
+            self.assertIn("prod-hv-1", message)
+            self.assertIn(repr(role_name), message)
+            self.assertIn("refusing to boot an installer", message)
+
+    def test_missing_role_attribute_is_refused(self):
+        from types import SimpleNamespace
+
+        self.assertIsNotNone(asvc.nfv_role_refusal(SimpleNamespace(name="n1"), "x"))
+
+    def test_role_matches_the_answer_service_default(self):
+        app = (MODULE.parents[2] / "bmc" / "answer_service" / "app.py").read_text()
+        self.assertIn(f'NFV_ROLE = os.environ.get("NFV_ROLE", "{asvc.NFV_ROLE}")', app)
+
+    def test_jobs_gate_on_the_role_first(self):
+        """Each job's run() checks the role before any other SoT/BMC work."""
+        import re
+
+        jobs = MODULE.parents[1] / "baremetal"
+        for job, first_other in (
+            ("install_node.py", "provisioning_state"),
+            ("apply_storage_layout.py", "load_profile("),
+        ):
+            src = (jobs / job).read_text()
+            run = src[src.index("    def run(self"):]
+            self.assertIn("nfv_role_refusal(device", run, job)
+            self.assertLess(run.index("nfv_role_refusal(device"), run.index(first_other), job)
+            self.assertNotRegex(src, r'query_params=\{"role": "', f"{job}: hard-coded role in the filter")
+
+
+class AnswerTemplateEscaping(unittest.TestCase):
+    """Every value/key interpolated into answer.toml goes through the TOML
+    filters, so no SoT/profile/env string can close its quotes."""
+
+    def test_every_interpolation_is_filtered(self):
+        import re
+
+        template = (MODULE.parents[2] / "bmc" / "answer_service" / "templates" / "answer.toml.j2").read_text()
+        exprs = re.findall(r"\{\{(.*?)\}\}", template)
+        self.assertTrue(exprs)
+        for expr in exprs:
+            expr = expr.strip()
+            if expr.startswith('", "'):  # the list separator literal
+                continue
+            self.assertRegex(expr, r"\|\s*toml(key)?$", f"unfiltered: {{{{ {expr} }}}}")
+        self.assertNotRegex(template, r'"\{\{', "a value is wrapped in hand-written quotes")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

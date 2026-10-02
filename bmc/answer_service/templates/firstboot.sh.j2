@@ -209,9 +209,11 @@ fi
 #     lvmthin storage {{ data_volume.pve_storage }}. Runs AFTER the credentials
 #     phone-home so a storage problem can never cost the node its token.
 #     A volume group of this name found on disk (reinstall) is reused — the
-#     VM disks on it survive; otherwise creation needs exactly ONE
-#     signature-free disk >= {{ data_volume.min_size_gib }} GiB at the largest
-#     unused size, else it logs and skips. Nothing here is fatal (set -e is
+#     VM disks on it survive — but registered only if it holds the thin
+#     pool {{ data_volume.thinpool }} (else a log line says why); otherwise
+#     creation needs exactly ONE signature-free disk
+#     >= {{ data_volume.min_size_gib }} GiB at the largest unused size, else it
+#     logs and skips. Nothing here is fatal (set -e is
 #     bypassed via if). ---
 count_of() { echo "$#"; }   # array length helper (bash ${ #arr[@] } would open a Jinja comment)
 VG={{ data_volume.vg | shquote }}
@@ -265,6 +267,10 @@ if lvs "${VG}/${THINPOOL}" >/dev/null 2>&1; then
   else
     log "PVE storage ${VOL_STORAGE}: pvesm add failed (rc=$?) — register it by hand"
   fi
+elif vgs "${VG}" >/dev/null 2>&1; then
+  # A reused VG (hand-built unit, or a reinstall after an lvcreate failure)
+  # without the profile's thin pool: never create or rename anything on it.
+  log "data volume ${VG}: volume group present but thin pool ${VG}/${THINPOOL} missing — PVE storage ${VOL_STORAGE} NOT registered; create the pool by hand (lvcreate -l 98%FREE --thinpool ${THINPOOL} ${VG}, or lvrename an existing pool to ${THINPOOL}) and pvesm add lvmthin ${VOL_STORAGE} --vgname ${VG} --thinpool ${THINPOOL} --content images,rootdir, or wipe the VG and reinstall"
 fi
 
 {% endif -%}

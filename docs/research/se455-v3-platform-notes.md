@@ -79,7 +79,8 @@ a BIOS-policy skeleton for it; what remains is the on-unit verification pass.
 - **Data volume**: created at firstboot as LVM-thin (`datastore/data`) on the
   largest unused, signature-free whole disk — the data VD — and registered
   as the lvmthin storage `datastore` (images, rootdir). A volume group of
-  that name found on disk (reinstall) is reused, not rebuilt. The node's
+  that name found on disk (reinstall) is reused, not rebuilt, and registered
+  only if it holds the thin pool `data` (else firstboot logs why). The node's
   `vm_storage` CF becomes `datastore`; `import_storage` stays `local`.
   (Boxes without an adapter keep the ZFS alternative: `install.data_pool`.)
 - **Networking**: no onboard LOM. OCP 3.0 SFF slot (PCIe 5.0 x16) takes
@@ -139,7 +140,9 @@ the old way (mirror sets made in UEFI) settled the assumptions above:
 - **Data VD carried LVM** (`ID_FS_TYPE=LVM2_member`) on the hand-built unit —
   the same shape the firstboot `data_volume` step produces. On such units
   the step leaves the signature alone; it registers storage only when the
-  volume group is named `datastore` (rename or recreate to converge).
+  volume group is named `datastore` **and** holds the thin pool `data`
+  (rename or recreate to converge; a VG without that pool is logged as
+  `thin pool datastore/data missing — ... NOT registered`).
 - **NICs**: four Broadcom BCM5719 1GbE ports (`tg3`, `pci-0000:01:00.0-3`),
   an Intel E810-XXV-2 OCP 3.0 25GbE pair
   (`ice`, `pci-0000:41:00.0/1`), and — notably — the **XCC's USB

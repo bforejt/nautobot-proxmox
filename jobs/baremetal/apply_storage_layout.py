@@ -19,6 +19,7 @@ volume is not the adapter's first VD — the install job refuses such a unit.
 from nautobot.apps.jobs import BooleanVar, Job, ObjectVar, register_jobs
 from nautobot.dcim.models import Device
 
+from ..lib.answer_service import NFV_ROLE, nfv_role_refusal
 from ..lib.bmc_identity import BmcIdentityError, verify_bmc_identity
 from ..lib.install_delivery import DeliveryError, load_profile
 from ..lib.nautobot_helpers import CredentialError, resolve_bmc
@@ -44,7 +45,7 @@ class ApplyStorageLayout(Job):
         model=Device,
         label="Node",
         description="Physical NFV-role Device with an `xcc` interface (contract §4)",
-        query_params={"role": "NFV"},
+        query_params={"role": NFV_ROLE},
     )
     dry_run = BooleanVar(
         label="Dry run (plan only)",
@@ -58,6 +59,11 @@ class ApplyStorageLayout(Job):
     )
 
     def run(self, device, dry_run, confirm):
+        # Server-side role gate (the dropdown filter is UI-only): refuse before
+        # the profile, the BMC or a power action is touched — dry runs included.
+        refusal = nfv_role_refusal(device, "touch its RAID adapter")
+        if refusal:
+            raise RuntimeError(refusal)
         try:
             profile = load_profile(device.device_type.model)
         except DeliveryError as exc:

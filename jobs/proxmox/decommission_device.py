@@ -53,7 +53,8 @@ class DecommissionVnfDevice(Job):
             raise ValueError(f"Hypervisor {hyp.name} has no primary_ip4")
 
         token_id, token_secret = resolve_proxmox_credentials(hyp)
-        client = ProxmoxClient(host=str(hyp.primary_ip4.address.ip), token_id=token_id, token_secret=token_secret)
+        client = ProxmoxClient(host=str(hyp.primary_ip4.address.ip), token_id=token_id, token_secret=token_secret,
+                               logger=self.logger)
 
         node = hyp.name
         pa_platform = bool(

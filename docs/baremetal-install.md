@@ -137,6 +137,10 @@ Create the SoT intent for a pseudo-server:
    `DefaultGW`-role IP must exist in the prefix (contract §3). Pin the
    interface MAC if you want the answer's NIC filter exact.
 4. Run **`Install Proxmox Node (SoT-driven)`**, tick Confirm.
+   Re-running it (reinstall) destroys the previous install VM — but only
+   one tagged `l0-lab` (the job tags every install VM `nfv;l0-lab`) or at
+   the Device's recorded `vmid`; a same-named VM without either, e.g. a VNF
+   VM, is refused, never destroyed.
 
 What you should observe: the job creates a VM on the NUC with the Device's
 SMBIOS serial and boots the prepared ISO → answer service logs `ANSWERED` →
@@ -146,7 +150,11 @@ firstboot creates `svc-nfv@pve!deploy` with role NFVAutomation (granted to
 BOTH user and token) and phones the token home → answer service writes the
 text-file Secrets, creates SecretsGroup `<name>-proxmox`, and sets the
 Device's `secrets_group` CF. **The node is now deployable by the existing VM
-jobs with zero manual credential steps.**
+jobs with zero manual credential steps.** On a reinstall the CF already
+names `<name>-proxmox` from the previous install, so the job does not
+trust it: it reports the token stored only once the phone-home has rewritten
+both of that group's Secrets after the job started (their `last_updated`);
+otherwise its result says `credentials=unverified (...)`.
 
 ## The PXE path (real hardware, no BMC needed)
 
@@ -308,8 +316,20 @@ mount via PATCH-EXT → one-shot CD → ForceRestart → `ANSWERED` in the servi
 log → unattended install (**the ISO streams through the BMC NIC for the whole
 install — allow 20–40 min**, slower than PXE/nested) → webhook flips
 `bm_installed` → reboot to disk → firstboot creates the service account and
-phones the token home → SecretsGroup set → the job ejects the spent installer
-media. The node is then deployable by the VM jobs.
+phones the token home → SecretsGroup set. The job ejects the spent installer
+media the moment the webhook flips `bm_installed` (before the phone-home).
+The node is then deployable by the VM jobs.
+
+**Watch window.** After the boot step the job follows the state machine for
+**75 min on `redfish-vmedia`** (30 min on `pve-nested`, which has already
+waited for the installer's power-off) — long enough for the slow end of a
+vmedia install. A unit that is slower still can raise it per profile with
+`delivery.watch_timeout_seconds` (integer seconds, 300–6000 for vmedia,
+300–3600 for nested; anything else is refused before the BMC is touched —
+the caps keep the job inside its time limit). Running out of the window is
+not an install failure: the job ends with `state machine incomplete within
+the N-min watch window` and leaves the media mounted (the installer may
+still be reading it) — see Troubleshooting.
 
 ## The first SE455 V3 install (runbook)
 
@@ -349,7 +369,9 @@ a warning — the node, not the worker, is what must reach the service.
    four drives on the `RAID_Slot<n>` controller, the 480 GB pair and the
    1.92 TB pair, ideally all `Unconfigured good`. Drives shown as `JBOD` must
    be converted to Unconfigured Good once (XCC storage page or UEFI) — the
-   layout step never converts drives itself. Drives already `Online` in
+   layout step never converts drives itself. A drive in `Unconfigured bad`
+   (failed or foreign) or whose Redfish state is not `Enabled` is never used
+   for a new volume: replace it, or clear/import its foreign config, first. Drives already `Online` in
    admin-made volumes are fine: the step **adopts** a RAID1 over the two
    smallest drives as `boot` and one over the two largest as `datastore`
    whatever the adapter calls them (Lenovo defaults are `VD_0`/`VD_1`);
@@ -385,7 +407,7 @@ a warning — the node, not the worker, is what must reach the service.
    ext4) → install onto the boot VD → webhook → reboot → firstboot: service
    account, credentials phone-home, then **LVM-thin `datastore/data` on the
    data VD** + `pvesm add lvmthin datastore` (an existing volume group is
-   reused on reinstall). Check `journalctl -u proxmox-first-boot` for the
+   reused on reinstall, and registered only if it holds the thin pool `data`). Check `journalctl -u proxmox-first-boot` for the
    `data volume datastore/data created` / `PVE storage datastore registered`
    lines, then `pvesm status`.
 
@@ -635,8 +657,9 @@ storage:
 Rules the layout step enforces: the picked drives must be equal-sized and the
 pick unambiguous (a third drive of the same size refuses); volumes that exist
 by name are kept after a RAID-type check, never re-created; nothing is ever
-deleted; JBOD drives are reported, not converted. Adoption by role weighs
-every unclaimed hand-made volume at once (the listing order never decides
+deleted; JBOD drives are reported, not converted; a drive whose capacity the
+XCC has not reported yet is never sized as 0 — the pick refuses until it is.
+Adoption by role weighs every unclaimed hand-made volume at once (the listing order never decides
 which mirror is `boot`) and refuses equal-sized candidates. The XCC reports RAID
 inventory only while the host is powered on, so the step powers it on with a
 one-time boot into UEFI Setup and waits for the adapter to enumerate. When
@@ -658,7 +681,13 @@ the largest unused signature-free pair and registers it as a zfspool storage,
 importing a same-named pool on reinstall. The hook runs **after** the
 credentials phone-home, so a storage problem can never cost the node its
 token. The host-verification job's "§4 data-pool preflight" / "§4 data-volume
-preflight" evaluate the same rules from the host side.
+preflight" evaluate the same rules from the host side: they PASS when a
+pool / volume group of the profile's name already sits on the non-boot disks
+(firstboot imports / reuses it), and otherwise FAIL unless the largest
+remaining non-removable disk(s) are unused and signature-free — no
+partitions or holders, no filesystem / `zfs_member` / `LVM2_member` signature,
+no partition table — so a layout firstboot would skip is caught before the
+install.
 
 ## Troubleshooting
 
@@ -670,21 +699,41 @@ preflight" evaluate the same rules from the host side.
 | Installer: `filter did not match any device` / `... any devices` | The answer was issued, but its NIC filter (`ID_NET_NAME_MAC` from the pinned mgmt MAC) or the profile's disk filter matched nothing on this box. From the installer shell: `proxmox-auto-install-assistant device-info -t disk` / `-t network`, then `device-match disk KEY='glob'` until it lists exactly the intended disk(s); fix the profile (or the pinned MAC) and rebuild the answer service |
 | Need a shell on the installer | Every mode runs a root shell on **tty3** (`Ctrl+Alt+F3`; tty2 = installer stderr). A failed automated install drops to a debug shell on tty1 (our answers set `reboot-on-error = false`). To pause *before* anything runs, add `proxmox-debug` to the kernel line (press `e` in GRUB on the automated entry, or use the `debug` iPXE entry). Logs: `/tmp/fetch_answer.log`, `/tmp/auto_installer.log`, `/tmp/install-low-level.log` |
 | `Storage layout refused: ... JBOD` / `only N free` | The RAID adapter's drives are not `Unconfigured good` (JBOD, hot spare, or already in a volume of the wrong shape). Convert JBOD drives once in the XCC storage page or UEFI; a volume the step cannot adopt (wrong RAID level or drive set) must be deleted by hand — the step never deletes |
-| `datastore` storage missing on a hand-built unit | Its data VD already carries an LVM signature with a differently named volume group: firstboot creates nothing on a signed disk and registers only a VG named `datastore`. Rename the VG (`vgrename`) or wipe the VD (`wipefs -a`, data loss) before installing |
+| `Storage layout refused: ... drive(s) are bad or disabled and never used: [...]` (after `only N free` or `free drives differ in size`) | A drive the plan needs is `Unconfigured bad` (failed, or carries a foreign config) or its Redfish `Status.State` is not `Enabled`; the step never builds a volume on it. Replace the drive, or clear/import the foreign config in the XCC storage page or UEFI so it reads `Unconfigured good`, then re-run |
+| `Storage layout refused: volume '…': free drive(s) [...] report no capacity (adapter still enumerating?) — capacity unknown, refusing to pick drives; re-run in a minute` (or `free or adoptable drive(s)`) | The XCC listed the drives but has not reported their `CapacityBytes` yet — typical right after the step powered the host on. Sizing them as 0 would make large drives the "smallest" pair and mirror them as `boot`, so nothing was created. Wait a minute and re-run (the host is now on, so the step reads the inventory directly). If it persists, check the drives on the XCC storage page: a drive that never reports a size must be reseated or replaced |
+| `datastore` storage missing on a hand-built unit | Its data VD already carries an LVM signature: firstboot creates nothing on a signed disk and registers storage only when **both** names match the profile — VG `datastore` **and** thin pool `data` (`datastore/data`). A differently named VG is not touched (`vgrename` it, then see the next row if its pool is not `data`), or wipe the VD (`wipefs -a`, data loss) before installing |
+| Firstboot log `data volume datastore: volume group present but thin pool datastore/data missing — PVE storage datastore NOT registered; ...` | The reused VG `datastore` has no thin pool `data`: a hand-built unit whose pool has another name, or a reinstall after a fresh unit's `lvcreate` failed (the empty VG is then reused on every install). Firstboot never creates or renames anything on a reused VG. On the node: `lvs datastore`; rename an existing pool (`lvrename datastore <pool> data`) or create one (`lvcreate -l 98%FREE --thinpool data datastore`), then `pvesm add lvmthin datastore --vgname datastore --thinpool data --content images,rootdir`. Or wipe the VG (data loss) and reinstall |
 | Install job: `Storage layout refused: the boot volume is not the adapter's first virtual drive` (Apply Storage Layout: `boot volume … is not the adapter's first VD` + `Install Proxmox Node will REFUSE this unit`) | The volumes were created by hand in the other order; the profile's `ID_PATH *-scsi-0:2:0:0` pin would select the data VD and the installer would wipe it. Back up anything on the data VD, delete both volumes by hand (XCC storage page or UEFI — the step never deletes), and re-run: the step re-creates `boot` first |
 | `Storage layout refused: volume 'boot': existing volume … would be adopted, but other drives share its smallest size … — ambiguous role, refusing` | Hand-made mirrors over equal-sized drives: nothing says which one is `boot`. Rename the intended boot VD to `boot` (matched by name first) or delete and let the step create them |
 | `BMC identity check refused: the BMC at … belongs to serial '…', but <node>'s serial is '…'` / `reports no system serial` / `could not read the system serial` | The Device's `xcc` IP leads to another machine (or the Device's serial is wrong): fix the record — the discovery job reports the BMC's serial. A BMC that reports no serial, or cannot be read, is refused too; nothing was written to it |
 | Install job: `… installs static (primary_ip4 …) but the interface carrying it has no MAC address` / log `REFUSED: … installs static … has no MAC — pin the mgmt interface MAC` (installer: `409 static install needs the mgmt interface MAC pinned`) | Static installs need the mgmt port's MAC on the Nautobot interface that carries `primary_ip4` — the service never guesses a NIC (the installer's NIC list carries names, not link state). Record the MAC (installer shell: `proxmox-auto-install-assistant device-info -t network`), or drop `primary_ip4` for a DHCP install |
 | Log `REFUSED: … pinned mgmt MAC … is not among the NICs the installer reported (…)` (installer: `409 pinned mgmt MAC is not present on this machine`) | The MAC on the mgmt interface is a typo or belongs to another unit/card; the log lists every MAC this machine reported — correct the interface's MAC and re-run |
 | Log `REFUSED: serial '…' matches N Devices` (installer: `409 serial matches more than one Device`) | Two Devices carry the same serial (a copied record?). Serials must be unique — fix the duplicate |
+| Install job: `Device name '…' is not a valid hostname label` / log `REFUSED: Device name '…' (serial …) is not a valid hostname label` (installer: `409 device name is not a valid hostname label`) | The Device name becomes the node's hostname (`<name>.<DOMAIN>` in the answer's `fqdn`), so it must be one DNS label: letters, digits and hyphens, 1-63 chars, no leading/trailing hyphen, not all digits (no spaces, dots or underscores). Rename the Device and re-run — nothing was booted or rendered |
+| Install job / Apply Storage Layout: `<node> has role '…', not 'NFV' — refusing to boot an installer` (`… refusing to touch its RAID adapter`) | The job was given a Device without the `NFV` role — usually an API submission (the form's dropdown only lists NFV-role Devices, but the REST API accepts any Device pk). The role is checked first, so nothing was read from or done to the BMC. If the Device really is an install target, assign it the `NFV` role and re-run; otherwise fix the submitted pk (a production host with a stray `awaiting_install` state would otherwise have been reset into the installer) |
 | Installer: `500 profile install.… must be …` at answer fetch | The DeviceType profile's `data_pool` / `data_volume` / `filter_match` is invalid; it is now checked before the installer runs (it used to fail at firstboot). Fix the profile and rebuild the answer service |
-| `datastore` storage missing after an SE455 V3 install | `journalctl -u proxmox-first-boot` on the node: the data-volume step logs why it refused (no unused signature-free disk at the largest size, or LVM error). A reused volume group from a previous install is expected and logged |
+| `datastore` storage missing after an SE455 V3 install | `journalctl -u proxmox-first-boot` on the node: the data-volume step logs why it refused (no unused signature-free disk at the largest size, LVM error, or a reused volume group without the thin pool `data` — see the `thin pool datastore/data missing` row). A reused volume group from a previous install is expected and logged |
 | Installer fails with `duplicate interface name mapping` or `interface name ... is invalid` | The pinning mapping rendered from Nautobot clashed (two interfaces with the same name, or a name the installer's `pve-iface` rule rejects). The answer service transliterates names to the Linux rule and skips what still clashes with a log line before rendering; if the installer still complains, check the `ANSWERED ... names=` log line against the Device's interfaces |
 | A port came up as `nic<N>` although its Nautobot interface records the MAC | Answer-service log: `pin name … is already used` (two Nautobot names transliterate to the same Linux name — first wins), `squats the installer's default nic<N> namespace`, or `is not a valid Linux/pve-iface name` (shorter than 2 chars after transliteration). Rename the interface in Nautobot |
+| Host Verification: `FAIL: §4 data-pool preflight — data pool '…': the largest remaining disk(s) are not unused and signature-free — /dev/… carries …` (or `§4 data-volume preflight — data volume '…': …`) | The intended data disk(s) carry partitions/holders, a filesystem / `zfs_member` / `LVM2_member` signature or a partition table — firstboot would skip the data step and the node would come up without its `datastore` storage. The job lists what each disk carries (and logs every disk's `signature=` / `partition-table=` in the inventory). A pool or VG of the **profile's** name is fine (imported / reused, the check PASSes with `already exists on …`): a differently named one is not — `zpool export` + `zpool import <old> datastore`, or `vgrename <old> datastore` (then see the thin-pool row above). Otherwise wipe the disk (`wipefs -a`, plus `sgdisk --zap-all` for a partition table — data loss) only if it is truly spare. An `LVM2_member` disk whose VG is not shown may be an inactive VG on a non-root login: `pvs` on the node names it |
+| Host Verification: `FAIL: §5 DMI serial vs SoT — could not read DMI product_serial` | Almost always a non-root login: `/sys/class/dmi/id/product_serial` is readable by root only, and the job never invokes sudo, so a sudo-capable user still fails here. Point the `host_ssh_username` / `host_ssh_password` Secrets at the node's **root** login (Proxmox VE permits root SSH by default). If it fails as root, the firmware exposes no serial — fix that in the BMC/UEFI before installing, since the installer POSTs this value to the answer service |
 | `datastore` pool missing after a JBOD (ZFS) install | `journalctl -u proxmox-first-boot` on the node: the data-pool step logs why it refused (fewer/more than `count` equal-sized unused disks, or leftover signatures — `wipefs -a` the intended data disks by hand only if they are truly spare, then `zpool create` + `pvesm add zfspool` per the profile) |
 | `500 root password hash not provisioned` in the log | `secrets/root_password_hash` missing/empty — composer's `./setup.sh` generates it when the answer-service profile is enabled (re-run it), or create manually: `openssl passwd -6 > secrets/root_password_hash` |
+| Install job result: `installer delivered; state machine incomplete within the N-min watch window (webhook=…, credentials=…)` | The job stopped *watching*; the install itself carries on. `webhook=pending`: check the answer-service log for the `ANSWERED` line and the node's console — a vmedia install that is merely slow will still flip `bm_installed` on its own; re-check the Device's `provisioning_state` later. If the unit routinely needs more than the window, set `delivery.watch_timeout_seconds` in its profile. `credentials=pending` only: see "No credentials after first boot" below |
+| Install job result: `... credentials=unverified (pre-existing SecretsGroup '<name>-proxmox' not rewritten by this install's phone-home — it may still hold the previous install's token)` | A reinstall: the Device's `secrets_group` CF already named the group when the job started (the job logs `... already names SecretsGroup ... (reinstall)`), and within the watch window the phone-home did not rewrite both of its Secrets (username + secret `last_updated` at/after the job start). Until it does, the Secrets may point at the previous install's token, which died with the old OS — deploys against the node would get 401. Check the answer-service log for `OVERWRITING stored credentials` followed by `CREDENTIALS STORED` for the node (a `REFUSED credentials` line means the phone-home source did not match the mgmt IP), and the node's `journalctl -u proxmox-first-boot`; see "No credentials after first boot". If the log does show `CREDENTIALS STORED` after the job start, the store succeeded and the result is conservative — e.g. clock skew between the Nautobot worker and web containers |
+| Job log *warning*: `Installer media left mounted on … — the webhook did not land within the N-min watch window` / `Could not eject installer media from …` | The vmedia ISO is still inserted on that `EXT{N}` slot (left on purpose when the webhook had not landed — the installer may still be reading it). Once the node is installed, eject it from the XCC UI or with a discovery-job write-test run, so stale mounts do not fill the EXT slots |
+| Install job refuses: `profile delivery.watch_timeout_seconds must be an integer between 300 and … for …` | The DeviceType profile's watch-window override is not an integer in range (6000 s cap for `redfish-vmedia`, 3600 s for `pve-nested` — the caps keep the job inside its time limit). Fix or drop the key; nothing was booted |
 | Install finished but state didn't flip | `docker compose logs answer-service` — webhook arrives before reboot/power-off; payload archived in `/data/install-<serial>.json` |
 | No credentials after first boot | Node's journal: `journalctl -u proxmox-first-boot`; the phone-home retries for ~10 min, and its one-time key stays valid until success — but a consumed key needs a fresh install (by design) |
 | Phone-home 403 `source does not match` | The node reached the service from an IP other than its SoT primary_ip4 (NAT?) — fix the record or set `VERIFY_PHONE_HOME_SOURCE=false` |
 | Webhook never arrived but node installed fine | Observed once on the PXE path (real NUC). The credentials phone-home also advances the state (firstboot = proof of install), so the loop self-heals; the log says `state advanced ... via credentials phone-home`. Exact webhook loss cause `[lab-verify]` |
 | Nested VM reinstalls in a loop | The nested profile must keep `reboot_mode: power-off` so the job can detach the ISO |
+| Install job (nested) refuses: `VM <vmid> on <carrier> is named <node> but is not this job's install VM (no 'l0-lab' tag, and the Device's vmid custom field is …) — refusing to destroy it` | A reinstall destroys a same-named VM on the carrier only when it is provably the job's own install VM: tagged `l0-lab` (the job sets `nfv;l0-lab` on every install VM) or at the vmid recorded in the Device's `vmid` CF. This VM is neither — typically a VNF VM (tagged `nfv;sot-driven`) whose Device shares the node's name. Nothing was stopped or destroyed. Rename the NFV Device (or the VM), or use another carrier. If it really is this node's old install VM (tag removed by hand), set the Device's `vmid` CF to its vmid, or re-add the `l0-lab` tag, and re-run |
+| Install job (nested) refuses: `VMID <vmid> on <carrier> belongs to '<other>', not <node> — refusing to touch it` | The Device's `vmid` CF points at a VM with another name on the carrier. Nothing was touched. Clear or correct the CF (empty = the job picks a free vmid) |
+| Deploy / Ingest Image / nested install refuses: `REFUSED: image <file> has no checksum on its SoftwareImageFile — the node-side pull would be unverified. Register it via 'Register Image from Published Set' (or set image_file_checksum + hashing_algorithm on the record)` | The image record was created by hand without `image_file_checksum`. Proxmox's `download-url` only verifies when given a checksum, and a pulled file is then reused by filename for every later deploy, so the jobs no longer pull unverified bytes. Register the image with `Register Image from Published Set` (it reads the `.sha256` sidecar), or fill `image_file_checksum` + `hashing_algorithm` on the `SoftwareImageFile` from the published sidecar — never from the downloaded file itself. Nothing was pulled. If an unverified copy was pulled before this check existed, delete it from the node's import/ISO storage so the next run pulls a verified one |
+| Job log *warning*: `Proxmox task UPID:… on <node> succeeded with N warning(s) - see the task log on the node` | Informational, not a failure: PVE finished the task (VM create/start/stop/destroy, image download, ISO upload) with exit code 0 but logged `WARN:` lines, so its status is `WARNINGS: N`. The job carries on (deploy no longer rolls back a VM that started fine). Read the WARN lines in the node's **Tasks** panel (or `pvenode task log <UPID>`) and fix the cause if it matters — e.g. MTU or EFI-cert notices on `qmstart`. A task whose status is anything other than `OK`/`WARNINGS` still fails the job |
+| Job log *warning*: `Proxmox task UPID:… on <node>: status poll failed (k/5 consecutive), retrying in Ns: …` | The job could not read the task's status for a moment (connection refused/reset, timeout, HTTP 5xx such as pveproxy's `596`, or a non-JSON reply) — typically pveproxy restarting or a network blip. The task itself keeps running on the node; the job retries with a growing delay (capped at 30 s) and a single good poll resets the count. Nothing to do unless it repeats — then check `systemctl status pveproxy` and the worker→node path |
+| Job fails: `Lost contact with task UPID:… on <node> after 5 consecutive failed status polls - the task may still be running on the node (check its Tasks panel): …` | Five status polls in a row failed, so the job gave up *observing* the task — this is **not** a task failure. Open the node's **Tasks** panel (or `pvenode task status <UPID>`) to see how it ended. A deploy rolls back best-effort, but PVE refuses to destroy a VM still holding `lock: create`: if the VM finished creating after the job gave up, the re-run is refused by the name-collision check — destroy that VM by hand (it is not in the SoT; the device is still Planned), then re-run. Fix the node reachability first (pveproxy, worker→node routing) |
+| Job log *warning* after a failed deploy: `Not rolling back VM <vmid> on <node>: it is named '<other>', not '<device>' — another deploy likely took the same vmid (/cluster/nextid reserves nothing). Left untouched; re-run this deploy` | Two deploys to the same node were handed the same vmid (PVE's `nextid` is a suggestion, not a reservation), the other one created its VM first, and this run's create failed (typically `config file already exists`). The rollback now destroys only a VM carrying this device's name, so the other deploy's VM is left alone (an unnamed VM is left alone too). Nothing of this run's VM exists on the node and the device is still Planned: just re-run the deploy, which asks for a fresh vmid. If `<other>` is not a VM you expect, reconcile it before re-running |
+| Job log: `… -> transport error: ConnectionError: …` / `… -> 5xx: …` / `… response is not JSON` (e.g. in `Could not roll back VM …`, `Bootstrap-ISO sweep failed …`) | The Proxmox API was unreachable or answered garbage for that call. These now count as Proxmox errors, so the best-effort cleanups (deploy rollback, decommission ISO sweep) log a warning and carry on — decommission still writes the SoT back after a destroy. Do the named manual cleanup once the node answers again |
+| Deploy job log *warning*: `Readiness UNVERIFIED — the token may not query the guest agent: guest-agent probe on VM … refused (403): the API token lacks VM.GuestAgent.Audit …` (result: `Deployed … — readiness unverified`) | The VM is deployed and the SoT already says Active; only the readiness probe (`agent/network-get-interfaces`) was refused. Since PVE 8.2 it needs `VM.GuestAgent.Audit`, which nodes installed or hand-built before 2026-10-02 lack in their `NFVAutomation` role. On the node, run the `pveum role modify NFVAutomation --privs "…"` line from [getting-started §4](getting-started.md#4-proxmox-service-account-per-node) (the role is granted to both user and token, so one modify covers both). Then check the guest by hand (console / `qm agent <vmid> network-get-interfaces`); later deploys report the IP again. A `401` instead means the token itself is invalid — re-check the SecretsGroup |

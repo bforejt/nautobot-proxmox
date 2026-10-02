@@ -35,13 +35,64 @@ try:
 except ImportError:  # pragma: no cover — PyYAML ships with Nautobot
     yaml = None
 
-from .proxmox_client import ProxmoxClient
+from .proxmox_client import ProxmoxClient, require_image_checksum
 
 PROFILE_DIR = Path(__file__).resolve().parents[2] / "bmc" / "profiles"
 
 
 class DeliveryError(RuntimeError):
     """A delivery step failed or a profile is missing/invalid."""
+
+
+# The nested install VM's ownership marker. boot_installer() sets it; the
+# reinstall reconciliation (stale_install_vms) destroys a same-named VM only
+# when it carries this tag or sits at the Device's recorded vmid, so a VNF VM
+# (tagged nfv;sot-driven by the deploy job) that merely shares the Device's
+# name is never treated as the job's own.
+INSTALL_VM_TAG = "l0-lab"
+INSTALL_VM_TAGS = f"nfv;{INSTALL_VM_TAG}"
+
+
+def vm_tags(vm: dict) -> set[str]:
+    """A PVE VM's tags as a set (the API joins them with ';'; tolerate ','
+    and whitespace too)."""
+    return {t for t in re.split(r"[;,\s]+", str(vm.get("tags") or "").lower()) if t}
+
+
+def stale_install_vms(vms: list[dict], *, node: str, name: str, vmid: int,
+                      recorded_vmid=None) -> list[dict]:
+    """The carrier VMs a confirmed nested reinstall may destroy: those at
+    `vmid` or named `name`, each of which must be this job's install VM.
+
+    Fails closed (DeliveryError, before anything is destroyed) when the VM at
+    `vmid` has another name, or when a VM named `name` carries neither the
+    INSTALL_VM_TAG nor the Device's recorded vmid (`recorded_vmid`, the vmid
+    custom field) — a name match alone is not ownership: Device names are not
+    unique and VNF VMs are named after their Device too."""
+    stale = []
+    for vm in vms:
+        try:
+            this = int(vm.get("vmid", -1))
+        except (TypeError, ValueError):
+            continue
+        vm_name = vm.get("name")
+        if this != int(vmid) and vm_name != name:
+            continue
+        if vm_name != name:
+            raise DeliveryError(
+                f"VMID {vmid} on {node} belongs to {vm_name!r}, "
+                f"not {name} — refusing to touch it"
+            )
+        recorded = recorded_vmid is not None and str(recorded_vmid) == str(this)
+        if INSTALL_VM_TAG not in vm_tags(vm) and not recorded:
+            raise DeliveryError(
+                f"VM {this} on {node} is named {name} but is not this job's install "
+                f"VM (no '{INSTALL_VM_TAG}' tag, and the Device's vmid custom field is "
+                f"{recorded_vmid if recorded_vmid is not None else 'empty'}) — "
+                "refusing to destroy it"
+            )
+        stale.append(vm)
+    return stale
 
 
 def slugify(value: str) -> str:
@@ -65,6 +116,42 @@ def load_profile(device_type_model: str) -> dict:
     return profile
 
 
+# How long the install job follows the state machine after its delivery step,
+# per delivery method; a profile may override it with
+# delivery.watch_timeout_seconds. Virtual media streams the ISO through the
+# BMC NIC for the whole install (20-40 min observed), so its watch must
+# outlast that; the nested path has already waited for the installer's
+# power-off (webhook landed) and only needs to see the firstboot phone-home.
+# The caps keep the job's worst case inside InstallProxmoxNode.Meta's
+# soft_time_limit (nested: ISO pull 1800 + power-off 2700 + 120 + watch;
+# vmedia: RAID layout/media waits ~800 + watch).
+WATCH_TIMEOUT_DEFAULTS = {"pve-nested": 1800, "redfish-vmedia": 4500}
+WATCH_TIMEOUT_MAX = {"pve-nested": 3600, "redfish-vmedia": 6000}
+WATCH_TIMEOUT_MIN = 300
+
+
+def watch_timeout_seconds(profile: dict) -> int:
+    """The state-watch window (seconds) for this profile's delivery method.
+    Only meaningful for methods the job delivers itself (pve-nested,
+    redfish-vmedia). An override outside [WATCH_TIMEOUT_MIN, the method's
+    cap] or not an integer is refused (DeliveryError) rather than clamped."""
+    delivery = (profile or {}).get("delivery") or {}
+    method = delivery.get("method")
+    if method not in WATCH_TIMEOUT_DEFAULTS:
+        raise DeliveryError(f"No state-watch window for delivery method {method!r}")
+    raw = delivery.get("watch_timeout_seconds")
+    if raw is None:
+        return WATCH_TIMEOUT_DEFAULTS[method]
+    cap = WATCH_TIMEOUT_MAX[method]
+    if isinstance(raw, bool) or not isinstance(raw, int) or not WATCH_TIMEOUT_MIN <= raw <= cap:
+        raise DeliveryError(
+            f"profile delivery.watch_timeout_seconds must be an integer between "
+            f"{WATCH_TIMEOUT_MIN} and {cap} for {method} (got {raw!r}) — the cap keeps "
+            "the install job inside its time limit"
+        )
+    return raw
+
+
 def _b64(value: str) -> str:
     return base64.b64encode(value.encode()).decode()
 
@@ -84,11 +171,15 @@ class PveNestedDelivery:
 
     def ensure_iso(self, storage: str, filename: str, url: str,
                    checksum: str | None, checksum_algorithm: str = "sha256") -> str:
+        # Fail closed before any node call: no checksum -> no unverified pull.
+        checksum, checksum_algorithm = require_image_checksum(filename, checksum, checksum_algorithm)
         for item in self.client.storage_content(self.node, storage, "iso"):
             if item.get("volid", "").endswith(f"/{filename}"):
-                self.logger.info("Installer ISO already on %s: %s", self.node, item["volid"])
+                self.logger.info("Installer ISO already on %s: %s (matched by filename)",
+                                 self.node, item["volid"])
                 return item["volid"]
-        self.logger.info("Pulling installer ISO %s onto %s (checksum-verified)", filename, self.node)
+        self.logger.info("Pulling installer ISO %s onto %s (%s-verified by the node)",
+                         filename, self.node, checksum_algorithm)
         return self.client.download_url(
             self.node, storage, url, filename, content="iso",
             checksum=checksum, checksum_algorithm=checksum_algorithm,
@@ -114,7 +205,7 @@ class PveNestedDelivery:
             "serial0": "socket",
             "onboot": 0,
             "smbios1": f"base64=1,serial={_b64(serial)}",
-            "tags": "nfv;l0-lab",
+            "tags": INSTALL_VM_TAGS,
         }
         self.logger.info("Creating nested install VM %s (%s) on %s", vmid, name, self.node)
         self.client.create_vm(self.node, params)

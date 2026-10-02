@@ -47,7 +47,14 @@ from ..lib.pa_bootstrap import (
     render_init_cfg,
 )
 from ..lib.platform_facts import get_platform_facts, resolve_nic_order
-from ..lib.proxmox_client import ProxmoxClient, ProxmoxError
+from ..lib.proxmox_client import (
+    ImageIntegrityError,
+    ProxmoxAgentPermissionError,
+    ProxmoxClient,
+    ProxmoxError,
+    require_image_checksum,
+    rollback_vm_decision,
+)
 
 # Fleet-wide console password for cloud-init guests (users log in at the
 # desktop/console, never SSH). Proxmox hashes it before storing; the plaintext
@@ -352,6 +359,12 @@ class DeployVnfDevice(Job):
         image = (sv.software_image_files.filter(default_image=True).first()
                  or sv.software_image_files.first())
         _require(image, f"SoftwareImageFile on version {sv.version}")
+        # Integrity before anything touches a node: no checksum -> no pull.
+        try:
+            image_checksum, image_algo = require_image_checksum(
+                image.image_file_name, image.image_file_checksum, image.hashing_algorithm)
+        except ImageIntegrityError as exc:
+            raise ContractViolation(str(exc)) from exc
 
         vcpus = _require(device.cf.get("vcpus"), f"vcpus CF on {device.name}")
         memory_mb = _require(device.cf.get("memory_mb"), f"memory_mb CF on {device.name}")
@@ -372,12 +385,32 @@ class DeployVnfDevice(Job):
             vcpus, memory_mb, disk_gb, machine, len(nics), ipconfig0,
         )
 
-        # PA day-0 payload renders BEFORE anything touches the node — a
-        # contract/secret refusal must cost nothing (no image pull first).
+        # Day-0 inputs resolve BEFORE anything touches the node — a
+        # contract/secret refusal must cost nothing (no image pull, no VM
+        # create, no rollback): the PA payload renders here, and the
+        # cloud-init console login (user CF + password Secret) resolves here
+        # too; the ci block is only applied after create_vm.
         pa_payload = self._pa_render_payload(device, mgmt_ip) if day0 == "pa-bootstrap" else None
+        ci = None
+        if day0 == "native-cloudinit":
+            # Console login: username from the platform CF (ciuser overrides
+            # only the NAME — the template's baked default_user groups/sudo
+            # still apply), password from the fleet Secret.
+            console_user = _require(platform.cf.get("console_user"), f"console_user on platform {platform.name}")
+            ci = {
+                "ipconfig0": ipconfig0,
+                "ciuser": console_user,
+                "cipassword": self._secret_value(  # never logged
+                    CONSOLE_PASSWORD_SECRET, "Cloud-init platform needs the fleet console password"
+                ),
+            }
+            if ssh_pubkeys:
+                ci["sshkeys"] = ProxmoxClient.encode_sshkeys(str(ssh_pubkeys))
+            self.logger.info("Console login: user %r, password from Secret %r", console_user, CONSOLE_PASSWORD_SECRET)
 
         token_id, token_secret = resolve_proxmox_credentials(hyp)
-        client = ProxmoxClient(host=str(api_host.address.ip), token_id=token_id, token_secret=token_secret)
+        client = ProxmoxClient(host=str(api_host.address.ip), token_id=token_id, token_secret=token_secret,
+                               logger=self.logger)
 
         # Idempotency / collision checks against reality
         existing = [v for v in client.list_vms(node) if v.get("name") == device.name]
@@ -389,8 +422,8 @@ class DeployVnfDevice(Job):
 
         volid = client.ensure_image(
             node, import_storage, image.image_file_name,
-            url=image.download_url, checksum=image.image_file_checksum,
-            checksum_algorithm=image.hashing_algorithm or "sha256",
+            url=image.download_url, checksum=image_checksum,
+            checksum_algorithm=image_algo,
             logger=self.logger,
         )
 
@@ -464,19 +497,7 @@ class DeployVnfDevice(Job):
                     "(set disk_gb to match the image)", disk_gb, current_gb,
                 )
 
-            if day0 == "native-cloudinit":
-                ci = {"ipconfig0": ipconfig0}
-                # Console login: username from the platform CF (ciuser overrides
-                # only the NAME — the template's baked default_user groups/sudo
-                # still apply), password from the fleet Secret.
-                console_user = _require(platform.cf.get("console_user"), f"console_user on platform {platform.name}")
-                ci["ciuser"] = console_user
-                ci["cipassword"] = self._secret_value(  # never logged
-                    CONSOLE_PASSWORD_SECRET, "Cloud-init platform needs the fleet console password"
-                )
-                self.logger.info("Console login: user %r, password from Secret %r", console_user, CONSOLE_PASSWORD_SECRET)
-                if ssh_pubkeys:
-                    ci["sshkeys"] = ProxmoxClient.encode_sshkeys(str(ssh_pubkeys))
+            if ci is not None:  # native-cloudinit; resolved in preflight
                 client.set_vm_config(node, vmid, ci)
             # pa-bootstrap: NO ci block at all — ipconfig/ciuser/sshkeys are
             # cloud-init semantics and PAN-OS reads none of them.
@@ -486,11 +507,21 @@ class DeployVnfDevice(Job):
             # Roll back this run's node-side artifacts so a retry starts clean
             # (the device is still Planned; a half-created VM would trip the
             # name-collision refusal and force manual reconciliation).
+            # Destroy only a VM that carries this device's name: /cluster/nextid
+            # reserves nothing, so a concurrent deploy may own this vmid.
             try:
-                if any(v.get("vmid") == vmid for v in client.list_vms(node)):
+                action, found = rollback_vm_decision(client.list_vms(node), vmid, device.name)
+                if action == "destroy":
                     client.stop_vm(node, vmid)
                     client.destroy_vm(node, vmid)
                     self.logger.warning("Rolled back half-created VM %s after failure", vmid)
+                elif action == "foreign":
+                    self.logger.warning(
+                        "Not rolling back VM %s on %s: it is named %r, not %r — another "
+                        "deploy likely took the same vmid (/cluster/nextid reserves "
+                        "nothing). Left untouched; re-run this deploy",
+                        vmid, node, found, device.name,
+                    )
             except ProxmoxError as exc:
                 self.logger.warning("Could not roll back VM %s — reconcile manually: %s", vmid, exc)
             if iso_volid:
@@ -515,7 +546,15 @@ class DeployVnfDevice(Job):
                 "(decommission also sweeps it).", iso_volid,
             )
         if wait_for_agent and readiness == "guest-agent" and facts["guest_agent"]:
-            ip = client.wait_agent_ipv4(node, vmid, timeout=900)
+            try:
+                ip = client.wait_agent_ipv4(node, vmid, timeout=900)
+            except ProxmoxAgentPermissionError as exc:
+                # The VM is deployed and the SoT already says Active; only the
+                # readiness check is impossible. Say so now, not after 15 min.
+                self.logger.warning(
+                    "Readiness UNVERIFIED — the token may not query the guest agent: %s", exc,
+                )
+                return f"Deployed {device.name} (vmid {vmid}) on {node} — readiness unverified"
             if ip:
                 self.logger.info("Guest agent up — %s reports IPv4 %s", device.name, ip)
                 return f"Deployed {device.name} (vmid {vmid}) on {node} — IP {ip}"

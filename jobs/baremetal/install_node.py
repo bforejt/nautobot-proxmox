@@ -18,24 +18,31 @@ docs/baremetal-install.md.
 """
 
 import time
+from datetime import datetime, timezone
 
 from nautobot.apps.jobs import BooleanVar, Job, ObjectVar, register_jobs
 from nautobot.dcim.models import Device
-from nautobot.extras.models import ExternalIntegration
+from nautobot.extras.models import ExternalIntegration, SecretsGroupAssociation
 
 from ..lib.answer_service import (
     INTEGRATION_NAME,
+    NFV_ROLE,
     evaluate_profile_preflight,
     fetch_info,
+    is_hostname_label,
+    nfv_role_refusal,
     profile_feature_keys,
 )
 from ..lib.bmc_identity import BmcIdentityError, verify_bmc_identity
 from ..lib.install_delivery import (
+    WATCH_TIMEOUT_DEFAULTS,
     DeliveryError,
     PveNestedDelivery,
     RedfishVmediaDelivery,
     load_profile,
     slugify,
+    stale_install_vms,
+    watch_timeout_seconds,
 )
 from ..lib.nautobot_helpers import (
     CredentialError,
@@ -43,7 +50,7 @@ from ..lib.nautobot_helpers import (
     resolve_hypervisor,
     resolve_proxmox_credentials,
 )
-from ..lib.proxmox_client import ProxmoxClient
+from ..lib.proxmox_client import ImageIntegrityError, ProxmoxClient, require_image_checksum
 from ..lib.redfish_discovery import RedfishDiscovery
 from ..lib.storage_layout import StorageLayoutError, apply_storage_layout, parse_storage_spec
 
@@ -72,7 +79,11 @@ class InstallProxmoxNode(Job):
         )
         has_sensitive_variables = False
         # Worst case (nested): ISO pull (~1800s) + install to power-off
-        # (~2700s) + state watch (1800s) + overhead — limits must exceed it.
+        # (~2700s) + state watch (default 1800s, cap 3600s) + overhead;
+        # vmedia: RAID layout + media waits (~800s) + state watch (default
+        # 4500s — the ISO streams through the BMC for the whole 20-40 min
+        # install — cap 6000s). Limits must exceed both; the per-method
+        # watch caps live in lib/install_delivery.WATCH_TIMEOUT_MAX.
         soft_time_limit = 9000
         time_limit = 9600
 
@@ -80,7 +91,7 @@ class InstallProxmoxNode(Job):
         model=Device,
         label="Node to install",
         description="NFV-role Device in provisioning_state=awaiting_install",
-        query_params={"role": "NFV"},
+        query_params={"role": NFV_ROLE},
     )
     confirm = BooleanVar(
         label="Confirm install",
@@ -142,6 +153,13 @@ class InstallProxmoxNode(Job):
     # ---- delivery paths ----
 
     def _install_nested(self, device, profile, image):
+        # The carrier pulls the ISO itself (download-url): refuse an image
+        # record without a checksum before touching the carrier.
+        try:
+            iso_checksum, iso_algo = require_image_checksum(
+                image.image_file_name, image.image_file_checksum, image.hashing_algorithm)
+        except ImageIntegrityError as exc:
+            raise ContractViolation(str(exc)) from exc
         carrier = resolve_hypervisor(device)
         _require(
             carrier.primary_ip4 is not None,
@@ -152,7 +170,7 @@ class InstallProxmoxNode(Job):
         token_id, token_secret = resolve_proxmox_credentials(carrier)
         client = ProxmoxClient(
             host=str(carrier.primary_ip4.address.ip),
-            token_id=token_id, token_secret=token_secret,
+            token_id=token_id, token_secret=token_secret, logger=self.logger,
         )
         delivery = PveNestedDelivery(client, carrier.name, self.logger)
         vm_cfg = profile["delivery"].get("vm", {})
@@ -161,28 +179,33 @@ class InstallProxmoxNode(Job):
             vm_cfg.get("iso_storage", "local"),
             image.image_file_name,
             image.download_url,
-            image.image_file_checksum or None,
-            image.hashing_algorithm or "sha256",
+            iso_checksum,
+            iso_algo,
         )
-        vmid = device.cf.get("vmid") or client.next_vmid()
+        recorded_vmid = device.cf.get("vmid")
+        vmid = recorded_vmid or client.next_vmid()
         # Reinstall reconciliation: confirm=True is an explicit reinstall
-        # gate, so a stale install VM under our vmid/name is removed — but a
-        # FOREIGN VM owning the vmid is a hard refusal, never collateral.
-        for vm in client.list_vms(carrier.name):
-            if int(vm.get("vmid", -1)) == int(vmid) or vm.get("name") == device.name:
-                _require(
-                    vm.get("name") == device.name,
-                    f"VMID {vmid} on {carrier.name} belongs to {vm.get('name')!r}, "
-                    f"not {device.name} — refusing to touch it",
-                )
-                self.logger.info(
-                    "Confirmed reinstall — destroying stale install VM %s (%s)",
-                    vm["vmid"], vm.get("name"),
-                )
-                if vm.get("status") == "running":
-                    client.stop_vm(carrier.name, int(vm["vmid"]))
-                client.destroy_vm(carrier.name, int(vm["vmid"]))
-                vmid = int(vm["vmid"])
+        # gate, so a stale install VM under our vmid/name is removed — but
+        # only one that is provably ours (l0-lab tag or the recorded vmid).
+        # A FOREIGN VM owning the vmid, or a same-named VM without that
+        # marker (a VNF VM named after another Device), is a hard refusal
+        # before anything is destroyed, never collateral.
+        try:
+            stale = stale_install_vms(
+                client.list_vms(carrier.name), node=carrier.name, name=device.name,
+                vmid=int(vmid), recorded_vmid=recorded_vmid,
+            )
+        except DeliveryError as exc:
+            raise ContractViolation(str(exc)) from exc
+        for vm in stale:
+            self.logger.info(
+                "Confirmed reinstall — destroying stale install VM %s (%s)",
+                vm["vmid"], vm.get("name"),
+            )
+            if vm.get("status") == "running":
+                client.stop_vm(carrier.name, int(vm["vmid"]))
+            client.destroy_vm(carrier.name, int(vm["vmid"]))
+            vmid = int(vm["vmid"])
         delivery.boot_installer(
             vmid=int(vmid),
             name=device.name,
@@ -277,10 +300,58 @@ class InstallProxmoxNode(Job):
 
     # ---- state watch ----
 
-    def _watch_state_machine(self, device, timeout=1800, poll=30):
+    def _eject_vmedia(self):
+        """vmedia cleanup: once the webhook has confirmed the install, the
+        mounted installer media is spent — eject it (best-effort; the
+        boot-once override already cleared, so a failed eject is cosmetic)."""
+        if not getattr(self, "_vmedia_mount", None):
+            return
+        redfish, mount = self._vmedia_mount
+        self._vmedia_mount = None
+        try:
+            redfish.eject_iso(mount["member_path"], mount["mode"])
+            self.logger.info("Installer media ejected from %s", mount["member_path"])
+        except Exception as exc:
+            self.logger.warning(
+                "Could not eject installer media from %s (%s) — eject it via "
+                "a discovery-job write-test run or the XCC UI",
+                mount["member_path"], exc,
+            )
+
+    def _credentials_refreshed(self, group_name, since):
+        """True once both token Secrets (username + secret) of SecretsGroup
+        `group_name` were written at/after `since`. The phone-home PATCHes
+        them on every store (last_updated bumps even when the file path is
+        unchanged), after writing the new token files — so this is the
+        reinstall's fresh signal when the CF already named the group."""
+        fresh = {
+            assoc.secret_type
+            for assoc in SecretsGroupAssociation.objects.filter(
+                secrets_group__name=group_name, secret_type__in=("username", "secret"),
+            ).select_related("secret")
+            if assoc.secret.last_updated is not None and assoc.secret.last_updated >= since
+        }
+        return fresh == {"username", "secret"}
+
+    def _credentials_stored(self, group_name, stale_group, since):
+        """The secrets_group CF counts as this install's phone-home only if
+        it is new (empty or another name at job start) or its Secrets were
+        rewritten since the job started. On a reinstall the CF still names
+        the previous life's group — deterministic name, never cleared — so
+        its mere presence proves nothing (F42)."""
+        if not group_name:
+            return False
+        if group_name != stale_group:
+            return True
+        return self._credentials_refreshed(group_name, since)
+
+    def _watch_state_machine(self, device, timeout, poll=30, stale_group=None, since=None):
         """Follow provisioning_state -> bm_installed (webhook) and the
-        credentials phone-home (secrets_group CF). Informative, not fatal —
-        the install continues without us either way."""
+        credentials phone-home (secrets_group CF; when it was already set at
+        job start, a fresh rewrite of its Secrets — see _credentials_stored).
+        Informative, not fatal — the install continues without us either
+        way. The vmedia installer media is ejected as soon as the webhook
+        lands, not after the watch."""
         deadline = time.time() + timeout
         seen_installed = seen_credentials = False
         while time.time() < deadline and not (seen_installed and seen_credentials):
@@ -289,7 +360,10 @@ class InstallProxmoxNode(Job):
             if not seen_installed and state == "bm_installed":
                 seen_installed = True
                 self.logger.info("Webhook landed: provisioning_state=bm_installed")
-            if not seen_credentials and device.cf.get("secrets_group"):
+                self._eject_vmedia()
+            if not seen_credentials and self._credentials_stored(
+                device.cf.get("secrets_group"), stale_group, since,
+            ):
                 seen_credentials = True
                 self.logger.info(
                     "Firstboot credentials stored: SecretsGroup %r",
@@ -300,7 +374,12 @@ class InstallProxmoxNode(Job):
         return seen_installed, seen_credentials
 
     def run(self, device, confirm):
+        self._vmedia_mount = None
         _require(confirm, "Confirmation not given — refusing to boot an installer")
+        # Server-side role gate: the dropdown filter is UI-only, and the answer
+        # service's role check comes only after the host has been reset.
+        refusal = nfv_role_refusal(device, "boot an installer")
+        _require(refusal is None, refusal)
         _require(
             device.cf.get("provisioning_state") == "awaiting_install",
             f"{device.name} provisioning_state is "
@@ -311,6 +390,24 @@ class InstallProxmoxNode(Job):
             device.serial,
             f"{device.name} has no serial — the installer's identity POST matches on it",
         )
+        _require(
+            is_hostname_label(device.name),
+            f"Device name {device.name!r} is not a valid hostname label — it becomes the "
+            "node's hostname, so use letters, digits and hyphens only (1-63 chars, no "
+            "leading/trailing hyphen, not all digits); rename the Device (the answer "
+            "service refuses otherwise)",
+        )
+        # Reinstall: the CF still names the previous life's SecretsGroup. Note
+        # it (and the time) before anything boots, so the watch can demand
+        # a fresh phone-home instead of trusting the stale value (F42).
+        stale_group = device.cf.get("secrets_group") or None
+        started = datetime.now(timezone.utc)
+        if stale_group:
+            self.logger.info(
+                "%s already names SecretsGroup %r (reinstall) — its credentials count "
+                "as stored only once this install's phone-home rewrites its Secrets",
+                device.name, stale_group,
+            )
         image = self._resolve_image(device)
         profile = load_profile(device.device_type.model)
         self._preflight_answer_service(device, profile)
@@ -325,6 +422,12 @@ class InstallProxmoxNode(Job):
             "the answer's NIC filter is exact (the answer service refuses otherwise)",
         )
         method = profile["delivery"].get("method")
+        watch_timeout = None
+        if method in WATCH_TIMEOUT_DEFAULTS:
+            try:
+                watch_timeout = watch_timeout_seconds(profile)
+            except DeliveryError as exc:
+                raise ContractViolation(str(exc))
 
         try:
             if method == "pve-nested":
@@ -347,30 +450,37 @@ class InstallProxmoxNode(Job):
         except DeliveryError as exc:
             raise RuntimeError(f"Delivery failed: {exc}") from exc
 
-        installed, credentials = self._watch_state_machine(device)
-        # vmedia cleanup: once the webhook has confirmed the install, the
-        # mounted installer media is spent — eject it (best-effort; the
-        # boot-once override already cleared, so a failed eject is cosmetic).
-        if installed and getattr(self, "_vmedia_mount", None):
-            redfish, mount = self._vmedia_mount
-            try:
-                redfish.eject_iso(mount["member_path"], mount["mode"])
-                self.logger.info("Installer media ejected from %s", mount["member_path"])
-            except Exception as exc:
-                self.logger.warning(
-                    "Could not eject installer media from %s (%s) — eject it via "
-                    "a discovery-job write-test run or the XCC UI",
-                    mount["member_path"], exc,
-                )
+        installed, credentials = self._watch_state_machine(
+            device, watch_timeout, stale_group=stale_group, since=started,
+        )
+        if getattr(self, "_vmedia_mount", None):
+            # The webhook never landed, so the media may still be in use —
+            # leave it mounted, but say so: it occupies an EXT slot.
+            self.logger.warning(
+                "Installer media left mounted on %s — the webhook did not land within "
+                "the %d-min watch window; once the install has finished, eject it via "
+                "a discovery-job write-test run or the XCC UI",
+                self._vmedia_mount[1]["member_path"], watch_timeout // 60,
+            )
         if installed and credentials:
             return (
                 f"{device.name}: installed, state=bm_installed, per-node API token "
                 f"stored (SecretsGroup {device.cf.get('secrets_group')!r})."
             )
+        if credentials:
+            creds_status = "ok"
+        elif stale_group and device.cf.get("secrets_group") == stale_group:
+            creds_status = (
+                f"unverified (pre-existing SecretsGroup {stale_group!r} not rewritten by "
+                "this install's phone-home — it may still hold the previous install's "
+                "token)"
+            )
+        else:
+            creds_status = "pending"
         return (
             f"{device.name}: installer delivered; state machine incomplete within the "
-            f"watch window (webhook={'ok' if installed else 'pending'}, "
-            f"credentials={'ok' if credentials else 'pending'}) — check the answer "
+            f"{watch_timeout // 60}-min watch window (webhook={'ok' if installed else 'pending'}, "
+            f"credentials={creds_status}) — check the answer "
             "service log and re-check the device's provisioning_state."
         )
 

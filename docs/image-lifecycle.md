@@ -105,7 +105,10 @@ Lifecycle differences from templates: **refresh = register a new vendor
 version** (there is nothing to rebuild — the CVE story is the vendor's
 release cadence), and the published artifact is never booted directly — a
 checksum-verified copy is pulled per node (**`Ingest Image onto Proxmox
-Node`** pre-warms; **`Deploy VNF Device`** pulls at deploy). PAN-OS's
+Node`** pre-warms; **`Deploy VNF Device`** pulls at deploy). Both **refuse** a
+`SoftwareImageFile` with no checksum rather than pull it unverified — the
+node keeps a pulled file by filename and never re-hashes it, so the first
+pull must be the verified one. PAN-OS's
 `pa-bootstrap` day-0 builder shipped 2026-08-27 (lab validation pending —
 decision #46); IOS-XE remains Phase 2c and registers-but-cannot-deploy until
 its builder ships. Both tracks end in the same place: a **Staged**
@@ -116,7 +119,8 @@ SoftwareVersion, promoted through the same Staged → Active gate below.
 Consumes only Nautobot intent, never touches vendor sources or seeds:
 
 1. The published artifact is pulled to the target node (`download-url` +
-   checksum from the `SoftwareImageFile`) — the deploy job does this itself,
+   checksum from the `SoftwareImageFile`; a record without a checksum is
+   refused before the node is touched) — the deploy job does this itself,
    idempotently; **`Ingest Image onto Proxmox Node`** does the same thing
    standalone to warm nodes ahead of a window.
 2. VM created from it (`import-from` volume ID) with config generated from the
