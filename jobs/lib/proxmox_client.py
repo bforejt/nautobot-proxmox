@@ -21,7 +21,12 @@ import requests
 
 
 class ProxmoxError(RuntimeError):
-    pass
+    """Any Proxmox API failure. `status_code` is the HTTP status when the
+    failure was an HTTP error response (None for transport/body errors)."""
+
+    def __init__(self, *args: Any, status_code: Optional[int] = None) -> None:
+        super().__init__(*args)
+        self.status_code = status_code
 
 
 class ProxmoxTaskError(ProxmoxError):
@@ -34,6 +39,11 @@ class ProxmoxUnreachableError(ProxmoxError):
     not the JSON {"data": ...} envelope. A ProxmoxError subclass, so every
     best-effort `except ProxmoxError` guard also covers a node that went away;
     wait_task treats it as transient and retries the status poll."""
+
+
+class ProxmoxAgentPermissionError(ProxmoxError):
+    """The guest-agent probe was refused (401/403): the token lacks
+    VM.GuestAgent.Audit. Raised instead of reporting "agent not ready"."""
 
 
 _log = logging.getLogger(__name__)
@@ -90,9 +100,11 @@ class ProxmoxClient:
         """HTTP status check + JSON envelope unwrap for one response, mapping
         every failure to a ProxmoxError (never a raw requests/ValueError)."""
         if r.status_code >= 500:
-            raise ProxmoxUnreachableError(f"{what} -> {r.status_code}: {r.text[:300]}")
+            raise ProxmoxUnreachableError(
+                f"{what} -> {r.status_code}: {r.text[:300]}", status_code=r.status_code
+            )
         if r.status_code >= 400:
-            raise ProxmoxError(f"{what} -> {r.status_code}: {r.text[:300]}")
+            raise ProxmoxError(f"{what} -> {r.status_code}: {r.text[:300]}", status_code=r.status_code)
         try:
             body = r.json()
         except ValueError as exc:  # requests' JSONDecodeError is a ValueError
@@ -316,10 +328,25 @@ class ProxmoxClient:
         self.wait_task(node, upid, timeout=timeout)
 
     def agent_ipv4(self, node: str, vmid: int) -> Optional[str]:
-        """First non-loopback IPv4 the guest agent reports, or None."""
+        """First non-loopback IPv4 the guest agent reports, or None.
+
+        "Not ready yet" (agent not running -- PVE answers 500 -- or any other
+        failed probe) is None, so wait_agent_ipv4 keeps polling. A 401/403 is
+        NOT "not ready": the token can never see the agent (PVE 8.2+/9.x gate
+        network-get-interfaces on VM.GuestAgent.Audit), so polling would only
+        burn the whole wait and end in a misleading "agent never came up".
+        That raises ProxmoxAgentPermissionError at once.
+        """
         try:
             result = self.get(f"/nodes/{node}/qemu/{vmid}/agent/network-get-interfaces")
-        except ProxmoxError:
+        except ProxmoxError as exc:
+            if exc.status_code in (401, 403):
+                raise ProxmoxAgentPermissionError(
+                    f"guest-agent probe on VM {vmid} refused ({exc.status_code}): the API token "
+                    "lacks VM.GuestAgent.Audit -- add it to the NFVAutomation role "
+                    f"(pveum role modify, see getting-started section 4). Detail: {exc}",
+                    status_code=exc.status_code,
+                ) from exc
             return None
         for iface in (result or {}).get("result", []):
             if iface.get("name") == "lo":

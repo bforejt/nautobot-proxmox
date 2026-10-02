@@ -47,7 +47,7 @@ from ..lib.pa_bootstrap import (
     render_init_cfg,
 )
 from ..lib.platform_facts import get_platform_facts, resolve_nic_order
-from ..lib.proxmox_client import ProxmoxClient, ProxmoxError
+from ..lib.proxmox_client import ProxmoxAgentPermissionError, ProxmoxClient, ProxmoxError
 
 # Fleet-wide console password for cloud-init guests (users log in at the
 # desktop/console, never SSH). Proxmox hashes it before storing; the plaintext
@@ -516,7 +516,15 @@ class DeployVnfDevice(Job):
                 "(decommission also sweeps it).", iso_volid,
             )
         if wait_for_agent and readiness == "guest-agent" and facts["guest_agent"]:
-            ip = client.wait_agent_ipv4(node, vmid, timeout=900)
+            try:
+                ip = client.wait_agent_ipv4(node, vmid, timeout=900)
+            except ProxmoxAgentPermissionError as exc:
+                # The VM is deployed and the SoT already says Active; only the
+                # readiness check is impossible. Say so now, not after 15 min.
+                self.logger.warning(
+                    "Readiness UNVERIFIED — the token may not query the guest agent: %s", exc,
+                )
+                return f"Deployed {device.name} (vmid {vmid}) on {node} — readiness unverified"
             if ip:
                 self.logger.info("Guest agent up — %s reports IPv4 %s", device.name, ip)
                 return f"Deployed {device.name} (vmid {vmid}) on {node} — IP {ip}"

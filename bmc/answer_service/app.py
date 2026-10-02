@@ -154,7 +154,7 @@ PVE_ROLE_PRIVS = os.environ.get(
     "PVE_ROLE_PRIVS",
     "VM.Allocate,VM.Clone,VM.Config.CDROM,VM.Config.CPU,VM.Config.Cloudinit,"
     "VM.Config.Disk,VM.Config.HWType,VM.Config.Memory,VM.Config.Network,"
-    "VM.Config.Options,VM.PowerMgmt,VM.Audit,VM.Console,"
+    "VM.Config.Options,VM.PowerMgmt,VM.Audit,VM.GuestAgent.Audit,VM.Console,"
     "Datastore.Allocate,Datastore.AllocateSpace,Datastore.AllocateTemplate,Datastore.Audit,"
     "Sys.Audit,Sys.Modify,SDN.Use",
 )

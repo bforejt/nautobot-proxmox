@@ -285,5 +285,69 @@ class WaitTaskTransientPolls(unittest.TestCase):
         self.assertIn("failed: storage full", str(cm.exception))
 
 
+AGENT_IFACES = {"data": {"result": [
+    {"name": "lo", "ip-addresses": [{"ip-address-type": "ipv4", "ip-address": "127.0.0.1"}]},
+    {"name": "eth0", "ip-addresses": [
+        {"ip-address-type": "ipv6", "ip-address": "fe80::1"},
+        {"ip-address-type": "ipv4", "ip-address": "192.0.2.50"}]},
+]}}
+
+
+class AgentProbe(unittest.TestCase):
+    """F78: a refused agent probe is a permissions problem, not 'not ready'."""
+
+    def test_reports_first_non_loopback_ipv4(self):
+        c = client_with_session(FakeResponse(200, body=AGENT_IFACES))
+        self.assertEqual(c.agent_ipv4("pve1", 100), "192.0.2.50")
+
+    def test_agent_not_running_is_not_ready(self):
+        c = client_with_session(FakeResponse(500, text="QEMU guest agent is not running"))
+        self.assertIsNone(c.agent_ipv4("pve1", 100))
+
+    def test_other_4xx_is_not_ready(self):
+        c = client_with_session(FakeResponse(400, text="VM 100 not running"))
+        self.assertIsNone(c.agent_ipv4("pve1", 100))
+
+    def test_403_raises_naming_the_privilege(self):
+        c = client_with_session(FakeResponse(403, text="Permission check failed (/vms/100, VM.GuestAgent.Audit|VM.GuestAgent.Unrestricted)"))
+        with self.assertRaises(pc.ProxmoxAgentPermissionError) as cm:
+            c.agent_ipv4("pve1", 100)
+        self.assertIsInstance(cm.exception, pc.ProxmoxError)
+        self.assertEqual(cm.exception.status_code, 403)
+        msg = str(cm.exception)
+        self.assertIn("VM.GuestAgent.Audit", msg)
+        self.assertIn("NFVAutomation", msg)
+        self.assertNotIn(SECRET, msg)
+
+    def test_401_raises(self):
+        c = client_with_session(FakeResponse(401, text="authentication failure"))
+        with self.assertRaises(pc.ProxmoxAgentPermissionError):
+            c.agent_ipv4("pve1", 100)
+
+    def test_wait_stops_at_once_on_403(self):
+        c = client_with_session(FakeResponse(403, text="Permission check failed"))
+        with mock.patch.object(pc.time, "sleep") as slept:
+            with self.assertRaises(pc.ProxmoxAgentPermissionError):
+                c.wait_agent_ipv4("pve1", 100, timeout=900, poll=10)
+        slept.assert_not_called()
+        self.assertEqual(len(c.session.calls), 1)
+
+    def test_wait_polls_through_not_running(self):
+        c = client_with_session(
+            FakeResponse(500, text="QEMU guest agent is not running"),
+            FakeResponse(200, body=AGENT_IFACES),
+        )
+        with mock.patch.object(pc.time, "sleep"):
+            self.assertEqual(c.wait_agent_ipv4("pve1", 100, timeout=60, poll=10), "192.0.2.50")
+
+    def test_http_errors_carry_status_code(self):
+        for code, cls in ((404, pc.ProxmoxError), (502, pc.ProxmoxUnreachableError)):
+            with self.subTest(code=code):
+                c = client_with_session(FakeResponse(code, text="x"))
+                with self.assertRaises(cls) as cm:
+                    c.get("/version")
+                self.assertEqual(cm.exception.status_code, code)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
