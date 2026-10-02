@@ -107,6 +107,27 @@ class Plan(unittest.TestCase):
             sl.plan_volumes(self.spec, drives, [])
         self.assertIn("JBOD", str(ctx.exception))
 
+    def test_unconfigured_bad_drive_never_picked(self):
+        drives = four_drives() + [drive(4, 480, "Unconfigured bad")]
+        plan = sl.plan_volumes(self.spec, drives, [])  # bad drive must not make 480 GB ambiguous
+        self.assertEqual(plan[0]["drives"], [f"{CTRL}/Drives/Disk.0", f"{CTRL}/Drives/Disk.2"])
+        drives = [drive(0, 480), drive(2, 480, "Unconfigured Bad"), drive(1, 1920), drive(3, 1920)]
+        with self.assertRaises(sl.StorageLayoutError) as ctx:
+            sl.plan_volumes(self.spec, drives, [])
+        self.assertIn("Disk.2 (Unconfigured Bad)", str(ctx.exception))
+        self.assertIn("bad or disabled", str(ctx.exception))
+
+    def test_disabled_drive_never_picked(self):
+        disabled = dict(drive(2, 480), state="Disabled")
+        drives = [drive(0, 480), disabled, drive(1, 1920), drive(3, 1920)]
+        with self.assertRaises(sl.StorageLayoutError) as ctx:
+            sl.plan_volumes(self.spec, drives, [])
+        self.assertIn("Disk.2 (State Disabled)", str(ctx.exception))
+        # Enabled (or a State the XCC does not report) stays free.
+        drives = [dict(drive(0, 480), state="Enabled"), drive(2, 480), drive(1, 1920), drive(3, 1920)]
+        self.assertEqual([p["action"] for p in sl.plan_volumes(self.spec, drives, [])],
+                         ["create", "create"])
+
     def test_too_few_free(self):
         with self.assertRaises(sl.StorageLayoutError):
             sl.plan_volumes(self.spec, [drive(0, 480), drive(1, 1920)], [])

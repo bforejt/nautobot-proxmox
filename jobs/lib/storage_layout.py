@@ -23,7 +23,12 @@ capacity rule picks from the free drives plus the drives of EVERY unclaimed
 same-shape volume — so the listing order of hand-made VDs never decides
 which one is `boot`. Drives in JBOD state are not touched:
 Lenovo/Broadcom adapters can only build a VD from "Unconfigured good"
-drives, so the job asks for the conversion instead of guessing.
+drives, so the job asks for the conversion instead of guessing. A drive is
+free only when its Lenovo DriveStatus is "Unconfigured good" / "Unconfigured"
+/ "Ready" AND never contains "bad" (MegaRAID's "Unconfigured bad" = failed or
+foreign) AND its Redfish Status.State, when reported, is "Enabled" — a bad or
+disabled drive is never picked for a new VD, and a refusal for missing free
+drives names it.
 
 The XCC only shows RAID inventory while the host is powered on; the layout
 step therefore powers the host on with a one-time boot into UEFI Setup (so
@@ -43,7 +48,9 @@ VALID_RAID = ("RAID0", "RAID1", "RAID10")
 VALID_SELECT = ("smallest", "largest")
 _NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,15}$")  # Lenovo: Name <= 15 chars
 
-# Lenovo Oem.Lenovo.DriveStatus values that mean "free for a new VD".
+# Lenovo Oem.Lenovo.DriveStatus values that mean "free for a new VD"
+# (prefix match, e.g. "Unconfigured good, Spun down") — unless the status
+# says "bad" ("Unconfigured bad") or Redfish Status.State is not Enabled.
 _FREE_STATES = ("unconfigured good", "unconfigured", "ready")
 
 
@@ -115,8 +122,20 @@ def parse_storage_spec(profile):
 
 # ---- pure planning --------------------------------------------------------------
 
+def _unusable(drive):
+    """Why an otherwise unassigned drive must never back a new VD (failed,
+    foreign or disabled), or None."""
+    status = str(drive.get("status") or "").strip()
+    if "bad" in status.lower():
+        return status
+    state = drive.get("state")
+    if state is not None and str(state).strip().lower() != "enabled":
+        return f"State {state}"
+    return None
+
+
 def _is_free(drive):
-    if drive.get("volumes"):
+    if drive.get("volumes") or _unusable(drive):
         return False
     status = str(drive.get("status") or "").strip().lower()
     return any(status.startswith(s) for s in _FREE_STATES)
@@ -190,6 +209,10 @@ def plan_volumes(spec, drives, volumes):
     free = sorted((d for d in drives if _is_free(d)), key=lambda d: (_capacity(d), str(d.get("id"))))
     jbod = [d["id"] for d in drives if not d.get("volumes")
             and "jbod" in str(d.get("status") or "").lower()]
+    unusable = [f"{d['id']} ({_unusable(d)})" for d in drives
+                if not d.get("volumes") and _unusable(d)]
+    bad_hint = (f" ({len(unusable)} drive(s) are bad or disabled and never used: "
+                f"{unusable} — replace or clear them first)") if unusable else ""
     plan = []
     for vol in spec["volumes"]:
         existing = by_name.get(vol["name"])
@@ -218,14 +241,14 @@ def plan_volumes(spec, drives, volumes):
         if len(free) < n:
             hint = f" ({len(jbod)} drive(s) are JBOD: {jbod} — convert them to Unconfigured Good first)" if jbod else ""
             raise StorageLayoutError(
-                f"volume {vol['name']!r} needs {n} unconfigured drive(s), only {len(free)} free{hint}"
+                f"volume {vol['name']!r} needs {n} unconfigured drive(s), only {len(free)} free{hint}{bad_hint}"
             )
         pick, rest = _pick(free, vol["select"], n)
         sizes = {_capacity(d) for d in pick}
         if len(sizes) != 1:
             raise StorageLayoutError(
                 f"volume {vol['name']!r}: the {n} {vol['select']} free drives differ in size "
-                f"({[d['id'] for d in pick]}) — a mirror needs equal drives"
+                f"({[d['id'] for d in pick]}) — a mirror needs equal drives{bad_hint}"
             )
         size = sizes.pop()
         if any(_capacity(d) == size for d in rest):
