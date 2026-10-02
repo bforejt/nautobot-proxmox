@@ -102,6 +102,29 @@ def task_exit_outcome(exitstatus: Any) -> tuple[bool, int]:
     return False, 0
 
 
+def rollback_vm_decision(vms: list, vmid: int, expected_name: str) -> tuple[str, Optional[str]]:
+    """Decide whether a failed deploy may destroy the VM at `vmid` on a node.
+
+    `vms` is the node's VM list (GET /nodes/{node}/qemu). Returns
+    (action, found_name) with action one of:
+      "absent"  -- no VM with that vmid on the node: nothing to roll back;
+      "destroy" -- the VM carries this deploy's name: it is ours, destroy it;
+      "foreign" -- the VM has another (or no) name: leave it alone.
+    /cluster/nextid reserves nothing, so two concurrent deploys can get the
+    same vmid; the loser's create fails and its rollback must not destroy the
+    winner's VM. The deploy refuses up front when a VM with the device's name
+    already exists on the node, so a name match here is this run's VM. A VM
+    without a name is NOT assumed ours (fail closed).
+    """
+    vm = next((v for v in vms or [] if str(v.get("vmid")) == str(vmid)), None)
+    if vm is None:
+        return "absent", None
+    name = vm.get("name")
+    if name and expected_name and name == expected_name:
+        return "destroy", name
+    return "foreign", name
+
+
 @dataclass
 class ProxmoxClient:
     host: str

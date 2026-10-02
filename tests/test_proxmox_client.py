@@ -7,6 +7,8 @@ Also: transport errors / 5xx / non-JSON bodies surface as ProxmoxError
 (ProxmoxUnreachableError) so the jobs' best-effort guards catch them, and
 wait_task tolerates a few consecutive failed status polls. Image pulls refuse
 (fail closed, before any node call) when the image record has no checksum.
+A failed deploy's rollback destroys only a VM that carries the device's name
+(rollback_vm_decision), never another deploy's VM at a colliding vmid.
 Stdlib-only; `requests` is stubbed (the client only needs it at construction)
 and the API is a canned fake -- no network.
 
@@ -416,6 +418,41 @@ class ImageChecksumGuard(unittest.TestCase):
         self.assertEqual(len(log.infos), 1)
         self.assertNotIn("verified", log.infos[0])
         self.assertIn("matched by filename", log.infos[0])
+
+
+class RollbackDecision(unittest.TestCase):
+    """Deploy rollback destroys only the VM that carries the device's name."""
+
+    VMS = [
+        {"vmid": 104, "name": "jump-01"},
+        {"vmid": 105, "name": "pa-fw-01"},
+        {"vmid": 106},
+    ]
+
+    def test_own_vm_is_destroyed(self):
+        self.assertEqual(pc.rollback_vm_decision(self.VMS, 105, "pa-fw-01"), ("destroy", "pa-fw-01"))
+
+    def test_nextid_collision_leaves_other_deploys_vm(self):
+        # Job B got vmid 105 too; job A's VM sits there -- B must not destroy it.
+        self.assertEqual(pc.rollback_vm_decision(self.VMS, 105, "jump-02"), ("foreign", "pa-fw-01"))
+
+    def test_absent_vmid_is_nothing_to_roll_back(self):
+        self.assertEqual(pc.rollback_vm_decision(self.VMS, 199, "pa-fw-01"), ("absent", None))
+
+    def test_unnamed_vm_is_not_assumed_ours(self):
+        self.assertEqual(pc.rollback_vm_decision(self.VMS, 106, "pa-fw-01"), ("foreign", None))
+
+    def test_vmid_compared_across_int_and_str(self):
+        vms = [{"vmid": "105", "name": "pa-fw-01"}]
+        self.assertEqual(pc.rollback_vm_decision(vms, 105, "pa-fw-01")[0], "destroy")
+
+    def test_empty_expected_name_never_destroys(self):
+        vms = [{"vmid": 105, "name": ""}]
+        self.assertEqual(pc.rollback_vm_decision(vms, 105, "")[0], "foreign")
+
+    def test_empty_or_missing_list(self):
+        self.assertEqual(pc.rollback_vm_decision([], 105, "x"), ("absent", None))
+        self.assertEqual(pc.rollback_vm_decision(None, 105, "x"), ("absent", None))
 
 
 if __name__ == "__main__":

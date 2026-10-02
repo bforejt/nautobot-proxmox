@@ -53,6 +53,7 @@ from ..lib.proxmox_client import (
     ProxmoxClient,
     ProxmoxError,
     require_image_checksum,
+    rollback_vm_decision,
 )
 
 # Fleet-wide console password for cloud-init guests (users log in at the
@@ -499,11 +500,21 @@ class DeployVnfDevice(Job):
             # Roll back this run's node-side artifacts so a retry starts clean
             # (the device is still Planned; a half-created VM would trip the
             # name-collision refusal and force manual reconciliation).
+            # Destroy only a VM that carries this device's name: /cluster/nextid
+            # reserves nothing, so a concurrent deploy may own this vmid.
             try:
-                if any(v.get("vmid") == vmid for v in client.list_vms(node)):
+                action, found = rollback_vm_decision(client.list_vms(node), vmid, device.name)
+                if action == "destroy":
                     client.stop_vm(node, vmid)
                     client.destroy_vm(node, vmid)
                     self.logger.warning("Rolled back half-created VM %s after failure", vmid)
+                elif action == "foreign":
+                    self.logger.warning(
+                        "Not rolling back VM %s on %s: it is named %r, not %r — another "
+                        "deploy likely took the same vmid (/cluster/nextid reserves "
+                        "nothing). Left untouched; re-run this deploy",
+                        vmid, node, found, device.name,
+                    )
             except ProxmoxError as exc:
                 self.logger.warning("Could not roll back VM %s — reconcile manually: %s", vmid, exc)
             if iso_volid:
