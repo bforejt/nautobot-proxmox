@@ -25,9 +25,11 @@ from nautobot.extras.models import ExternalIntegration
 
 from ..lib.answer_service import (
     INTEGRATION_NAME,
+    NFV_ROLE,
     evaluate_profile_preflight,
     fetch_info,
     is_hostname_label,
+    nfv_role_refusal,
     profile_feature_keys,
 )
 from ..lib.bmc_identity import BmcIdentityError, verify_bmc_identity
@@ -81,7 +83,7 @@ class InstallProxmoxNode(Job):
         model=Device,
         label="Node to install",
         description="NFV-role Device in provisioning_state=awaiting_install",
-        query_params={"role": "NFV"},
+        query_params={"role": NFV_ROLE},
     )
     confirm = BooleanVar(
         label="Confirm install",
@@ -302,6 +304,10 @@ class InstallProxmoxNode(Job):
 
     def run(self, device, confirm):
         _require(confirm, "Confirmation not given — refusing to boot an installer")
+        # Server-side role gate: the dropdown filter is UI-only, and the answer
+        # service's role check comes only after the host has been reset.
+        refusal = nfv_role_refusal(device, "boot an installer")
+        _require(refusal is None, refusal)
         _require(
             device.cf.get("provisioning_state") == "awaiting_install",
             f"{device.name} provisioning_state is "

@@ -29,6 +29,29 @@ def is_hostname_label(name):
     """True when `name` can be the installed node's hostname label."""
     return isinstance(name, str) and bool(HOSTNAME_LABEL_RE.match(name))
 
+
+# The Device role the bare-metal jobs act on (team convention, decision #43).
+# The ObjectVar `query_params` only filter the UI dropdown — a job submitted
+# through the REST API can name ANY Device — so the jobs re-check it in run()
+# before touching a BMC. Keep in step with the answer service's NFV_ROLE
+# (bmc/answer_service/app.py), which refuses any other role at identity time.
+NFV_ROLE = "NFV"
+
+
+def nfv_role_refusal(device, action):
+    """None when `device` carries the NFV role; otherwise the refusal message
+    (`action` says what was refused, e.g. "boot an installer")."""
+    role = getattr(device, "role", None)
+    role_name = getattr(role, "name", None) if role is not None else None
+    if role_name == NFV_ROLE:
+        return None
+    return (
+        f"{getattr(device, 'name', device)} has role {role_name!r}, not {NFV_ROLE!r} — "
+        f"refusing to {action}; only {NFV_ROLE}-role Devices are bare-metal install "
+        "targets (the job form filters on the role, but an API-submitted job can name "
+        "any Device)"
+    )
+
 # Profile keys under `install` that older service builds silently ignore —
 # a stale image would answer, but with a degraded layout (no data storage,
 # no pinning). Keep in step with app.py's /info "profile_features".

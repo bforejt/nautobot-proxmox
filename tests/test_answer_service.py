@@ -85,6 +85,53 @@ class HostnameLabel(unittest.TestCase):
         self.assertIn(f"HOSTNAME_LABEL_RE = re.compile(r\"{asvc.HOSTNAME_LABEL_RE.pattern}\")", app)
 
 
+class NfvRoleGate(unittest.TestCase):
+    """F38: the bare-metal jobs re-check the NFV role server-side — the
+    ObjectVar query_params only filter the UI dropdown."""
+
+    @staticmethod
+    def _device(role_name, name="n1"):
+        from types import SimpleNamespace
+
+        role = None if role_name is None else SimpleNamespace(name=role_name)
+        return SimpleNamespace(name=name, role=role)
+
+    def test_nfv_role_passes(self):
+        self.assertIsNone(asvc.nfv_role_refusal(self._device("NFV"), "boot an installer"))
+
+    def test_other_roles_are_refused(self):
+        for role_name in ("Hypervisor", "nfv", "NFV ", "Firewall", "", None):
+            message = asvc.nfv_role_refusal(self._device(role_name, "prod-hv-1"), "boot an installer")
+            self.assertIsNotNone(message, repr(role_name))
+            self.assertIn("prod-hv-1", message)
+            self.assertIn(repr(role_name), message)
+            self.assertIn("refusing to boot an installer", message)
+
+    def test_missing_role_attribute_is_refused(self):
+        from types import SimpleNamespace
+
+        self.assertIsNotNone(asvc.nfv_role_refusal(SimpleNamespace(name="n1"), "x"))
+
+    def test_role_matches_the_answer_service_default(self):
+        app = (MODULE.parents[2] / "bmc" / "answer_service" / "app.py").read_text()
+        self.assertIn(f'NFV_ROLE = os.environ.get("NFV_ROLE", "{asvc.NFV_ROLE}")', app)
+
+    def test_jobs_gate_on_the_role_first(self):
+        """Each job's run() checks the role before any other SoT/BMC work."""
+        import re
+
+        jobs = MODULE.parents[1] / "baremetal"
+        for job, first_other in (
+            ("install_node.py", "provisioning_state"),
+            ("apply_storage_layout.py", "load_profile("),
+        ):
+            src = (jobs / job).read_text()
+            run = src[src.index("    def run(self"):]
+            self.assertIn("nfv_role_refusal(device", run, job)
+            self.assertLess(run.index("nfv_role_refusal(device"), run.index(first_other), job)
+            self.assertNotRegex(src, r'query_params=\{"role": "', f"{job}: hard-coded role in the filter")
+
+
 class AnswerTemplateEscaping(unittest.TestCase):
     """Every value/key interpolated into answer.toml goes through the TOML
     filters, so no SoT/profile/env string can close its quotes."""
