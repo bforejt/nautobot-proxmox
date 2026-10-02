@@ -19,7 +19,9 @@ never deleted — a reinstall keeps the data volume. A volume is matched by
 name first, then ADOPTED by role: a hand-made VD (units built the old way in
 UEFI, e.g. Lenovo's default names VD_0/VD_1) is taken for a spec entry when
 its RAID type matches and its drives are exactly the drives the entry's
-capacity rule would pick. Drives in JBOD state are not touched:
+capacity rule picks from the free drives plus the drives of EVERY unclaimed
+same-shape volume — so the listing order of hand-made VDs never decides
+which one is `boot`. Drives in JBOD state are not touched:
 Lenovo/Broadcom adapters can only build a VD from "Unconfigured good"
 drives, so the job asks for the conversion instead of guessing.
 
@@ -132,7 +134,14 @@ def _pick(free, select, n):
 def _adopt(vol, volumes, claimed, spec_names, free, drive_by_path):
     """Find an unclaimed existing volume that IS this spec entry: same RAID
     type, same drive count, and its drives are exactly what the entry's
-    capacity rule would pick from (free drives + its own drives)."""
+    capacity rule picks from the free drives PLUS the drives of every
+    unclaimed same-shape candidate. Evaluating each candidate against only
+    its own drives made every mirror "the smallest pair" of its own pool when
+    no drive was free — a hand-built unit listing its data VD first got the
+    data VD adopted as `boot`. An ambiguous pick (another drive in the pool
+    shares the picked size) refuses rather than letting the listing order
+    decide."""
+    cands = []
     for cand in volumes:
         if cand.get("path") in claimed or cand.get("name") in spec_names:
             continue
@@ -142,10 +151,25 @@ def _adopt(vol, volumes, claimed, spec_names, free, drive_by_path):
         cand_drives = [drive_by_path.get(p) for p in (cand.get("drives") or [])]
         if not cand_drives or any(d is None for d in cand_drives) or len(cand_drives) != vol["count"]:
             continue
-        pool = sorted(free + cand_drives, key=lambda d: (_capacity(d), str(d.get("id"))))
-        pick, _ = _pick(pool, vol["select"], vol["count"])
-        if {d["path"] for d in pick} == {d["path"] for d in cand_drives}:
-            return cand
+        cands.append((cand, cand_drives))
+    if not cands:
+        return None
+    pool = {d["path"]: d for d in free}
+    for _, cand_drives in cands:
+        pool.update((d["path"], d) for d in cand_drives)
+    pool = sorted(pool.values(), key=lambda d: (_capacity(d), str(d.get("id"))))
+    pick, rest = _pick(pool, vol["select"], vol["count"])
+    picked = {d["path"] for d in pick}
+    for cand, cand_drives in cands:
+        if picked != {d["path"] for d in cand_drives}:
+            continue
+        sizes = {_capacity(d) for d in pick}
+        if len(sizes) == 1 and any(_capacity(d) in sizes for d in rest):
+            raise StorageLayoutError(
+                f"volume {vol['name']!r}: existing volume {cand.get('name')!r} would be adopted, but "
+                f"other drives share its {vol['select']} size {sizes.pop()} — ambiguous role, refusing"
+            )
+        return cand
     return None
 
 
@@ -219,21 +243,19 @@ def plan_volumes(spec, drives, volumes):
     return plan
 
 
-def _boot_position_warning(spec, boot_id, volumes_after):
-    """The install profile pins the boot VD by SCSI target (ID_PATH
-    *-scsi-0:2:0:0 = the adapter's first VD; confirmed on a hand-built
-    SE455 V3: VD target 0 -> sda, target 1 -> sdb). Warn when the resolved
-    boot volume is not the first one the adapter lists."""
-    if not spec["volumes"] or not volumes_after or boot_id is None:
-        return None
-    order = [(v.get("id"), v.get("name")) for v in volumes_after]
-    if str(order[0][0]) != str(boot_id):
-        return (
-            f"boot volume (adapter id {boot_id}) is not the adapter's first VD "
-            f"(order: {order}) — the profile's ID_PATH pin assumes target 0; "
-            "verify with the host-verification job before installing"
-        )
-    return None
+def _boot_position(boot_id, volumes):
+    """(boot_is_first, warning). The install profile pins the boot VD by SCSI
+    target (ID_PATH *-scsi-0:2:0:0 = the adapter's first VD; confirmed on a
+    hand-built SE455 V3: VD target 0 -> sda, target 1 -> sdb). Fail closed:
+    an unresolved boot volume or an empty listing is NOT first."""
+    order = [(v.get("id"), v.get("name")) for v in volumes or []]
+    if boot_id is not None and order and str(order[0][0]) == str(boot_id):
+        return True, None
+    return False, (
+        f"boot volume (adapter id {boot_id}) is not the adapter's first VD "
+        f"(order: {order}) — the profile's ID_PATH pin assumes target 0, so the "
+        "installer would wipe another volume"
+    )
 
 
 # ---- apply ------------------------------------------------------------------------
@@ -275,7 +297,9 @@ def _wait(predicate, timeout, poll, sleep=time.sleep):
 
 def apply_storage_layout(redfish, spec, logger, dry_run=False, sleep=time.sleep):
     """Ensure the adapter presents the profile's volumes. Returns a summary
-    dict: {controller, plan, created, kept, warnings}. dry_run plans only."""
+    dict: {controller, plan, created, kept, warnings, boot_is_first}. dry_run
+    plans only. boot_is_first is False whenever the boot volume is (or would
+    be) anything but the adapter's first VD — the install job refuses then."""
     warnings = []
     redfish.discover_paths()
     power = redfish.get_power_state()
@@ -324,17 +348,23 @@ def apply_storage_layout(redfish, spec, logger, dry_run=False, sleep=time.sleep)
     boot_name = spec["volumes"][0]["name"]
     resolved = {s["name"]: s["existing_id"] for s in plan if s["action"] == "keep"}
     if dry_run:
-        if plan[0]["action"] == "create" and volumes:
-            warnings.append(
-                f"boot volume {boot_name!r} would be created AFTER existing volume(s) "
-                f"{[(v.get('id'), v.get('name')) for v in volumes]} and so would not be the "
-                "adapter's first VD — the profile's ID_PATH pin assumes target 0"
-            )
-        warning = _boot_position_warning(spec, resolved.get(boot_name), volumes)
-        if warning:
-            warnings.append(warning)
+        if plan[0]["action"] == "create":
+            # Created on an empty adapter it becomes target 0; after existing
+            # volumes it cannot be.
+            boot_is_first = not volumes
+            if volumes:
+                warnings.append(
+                    f"boot volume {boot_name!r} would be created AFTER existing volume(s) "
+                    f"{[(v.get('id'), v.get('name')) for v in volumes]} and so would not be the "
+                    "adapter's first VD — the profile's ID_PATH pin assumes target 0"
+                )
+        else:
+            boot_is_first, warning = _boot_position(resolved.get(boot_name), volumes)
+            if warning:
+                warnings.append(warning)
         return {"controller": controller.get("id"), "plan": plan, "created": created,
-                "kept": kept, "warnings": warnings, "dry_run": True}
+                "kept": kept, "warnings": warnings, "dry_run": True,
+                "boot_is_first": boot_is_first}
     for step in plan:
         if step["action"] != "create":
             continue
@@ -356,10 +386,10 @@ def apply_storage_layout(redfish, spec, logger, dry_run=False, sleep=time.sleep)
         logger.info("Volume %s created (adapter id %s, %s bytes)", step["name"],
                     appeared.get("id"), appeared.get("capacity_bytes"))
     volumes_after = redfish.controller_volumes(controller["path"])
-    warning = _boot_position_warning(spec, resolved.get(boot_name), volumes_after)
+    boot_is_first, warning = _boot_position(resolved.get(boot_name), volumes_after)
     if warning:
         warnings.append(warning)
-        logger.warning("%s", warning)
     return {"controller": controller.get("id"), "plan": plan, "created": created,
             "kept": kept, "warnings": warnings, "dry_run": False, "resolved": resolved,
+            "boot_is_first": boot_is_first,
             "volumes": [(v.get("id"), v.get("name"), v.get("raid_type")) for v in volumes_after]}

@@ -11,11 +11,15 @@ re-created — so a reinstall keeps the data volume.
 
 Requires the host to be powered on for the read (the XCC reports RAID
 inventory only then); a non-dry run powers it on into UEFI Setup itself.
+Before anything else it proves the BMC at the `xcc` IP is this Device (its
+system serial = device.serial, decision #52), and it warns when the boot
+volume is not the adapter's first VD — the install job refuses such a unit.
 """
 
 from nautobot.apps.jobs import BooleanVar, Job, ObjectVar, register_jobs
 from nautobot.dcim.models import Device
 
+from ..lib.bmc_identity import BmcIdentityError, verify_bmc_identity
 from ..lib.install_delivery import DeliveryError, load_profile
 from ..lib.nautobot_helpers import CredentialError, resolve_bmc
 from ..lib.redfish_discovery import RedfishDiscovery
@@ -73,12 +77,25 @@ class ApplyStorageLayout(Job):
         except CredentialError as exc:
             raise RuntimeError(str(exc))
         redfish = RedfishDiscovery(bmc_ip=bmc_ip, username=username, password=password)
+        # Identity before anything else (even a dry run's plan would describe
+        # the wrong machine): the xcc IP must lead to THIS Device.
+        try:
+            bmc_serial = verify_bmc_identity(redfish, device.name, device.serial, bmc_ip)
+        except BmcIdentityError as exc:
+            raise RuntimeError(f"BMC identity check refused: {exc}")
+        self.logger.info("BMC at %s reports serial %s = %s", bmc_ip, bmc_serial, device.name)
         try:
             summary = apply_storage_layout(redfish, spec, self.logger, dry_run=dry_run)
         except StorageLayoutError as exc:
             raise RuntimeError(f"Storage layout refused: {exc}")
         for warning in summary["warnings"]:
             self.logger.warning("%s", warning)
+        if not summary.get("boot_is_first"):
+            self.logger.warning(
+                "Install Proxmox Node will REFUSE this unit: the boot volume is not the "
+                "adapter's first virtual drive (the profile's ID_PATH target-0 pin). "
+                "Re-create the volumes in profile order (boot first) by hand"
+            )
         plan = ", ".join(f"{p['action']} {p['name']} ({p['raid']})" for p in summary["plan"])
         if summary["dry_run"]:
             return f"{device.name}: plan on {summary['controller']}: {plan} — dry run, nothing changed."

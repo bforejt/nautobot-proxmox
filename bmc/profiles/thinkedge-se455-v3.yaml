@@ -39,9 +39,9 @@ install:
   # SCSI targets on channel 2 (ID_PATH pci-...-scsi-0:2:<target>:0), and the
   # storage step creates "boot" first on a fresh adapter => target 0. The
   # 1.92 TB data VD is target 1 and can never match this pin. Units whose
-  # volumes were created by hand in another order: the storage step warns
-  # ("boot volume is volume #2"), and the host-verification job evaluates
-  # this filter with the installer's own matcher — confirm before installing.
+  # volumes were created by hand in another order: the install job refuses
+  # (boot is not the adapter's first VD — decision #52); the host-verification
+  # job evaluates this filter with the installer's own matcher.
   disk_filter:
     ID_PATH: "*-scsi-0:2:0:0"
   reboot_mode: reboot         # boot-once CD override clears; falls to the boot VD

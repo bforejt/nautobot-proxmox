@@ -125,6 +125,35 @@ class Plan(unittest.TestCase):
         self.assertEqual([(p["action"], p["adopted_from"], p["existing_id"]) for p in plan],
                          [("keep", "VD_0", "1"), ("keep", "VD_1", "2")])
 
+    def test_adoption_by_role_ignores_listing_order(self):
+        # Hand-built unit whose 1.92T data mirror is listed BEFORE the 480G
+        # boot mirror and no drive is free: boot must still adopt the 480G VD.
+        drives = [drive(1, 1920, "Online", [f"{CTRL}/Volumes/1"]), drive(3, 1920, "Online", [f"{CTRL}/Volumes/1"]),
+                  drive(0, 480, "Online", [f"{CTRL}/Volumes/2"]), drive(2, 480, "Online", [f"{CTRL}/Volumes/2"])]
+        volumes = [
+            {"path": f"{CTRL}/Volumes/1", "id": "1", "name": "VD_0", "raid_type": "RAID1",
+             "drives": [f"{CTRL}/Drives/Disk.1", f"{CTRL}/Drives/Disk.3"], "capacity_bytes": 1920 * GB},
+            {"path": f"{CTRL}/Volumes/2", "id": "2", "name": "VD_1", "raid_type": "RAID1",
+             "drives": [f"{CTRL}/Drives/Disk.0", f"{CTRL}/Drives/Disk.2"], "capacity_bytes": 480 * GB},
+        ]
+        plan = sl.plan_volumes(self.spec, drives, volumes)
+        self.assertEqual([(p["name"], p["action"], p["adopted_from"], p["existing_id"]) for p in plan],
+                         [("boot", "keep", "VD_1", "2"), ("datastore", "keep", "VD_0", "1")])
+
+    def test_adoption_refuses_equal_sized_mirrors(self):
+        # Two mirrors over four equal drives: which one is `boot` would be the
+        # listing order's guess — refuse.
+        drives = [drive(i, 480, "Online", [f"{CTRL}/Volumes/{1 + i // 2}"]) for i in range(4)]
+        volumes = [
+            {"path": f"{CTRL}/Volumes/1", "id": "1", "name": "VD_0", "raid_type": "RAID1",
+             "drives": [f"{CTRL}/Drives/Disk.0", f"{CTRL}/Drives/Disk.1"], "capacity_bytes": 480 * GB},
+            {"path": f"{CTRL}/Volumes/2", "id": "2", "name": "VD_1", "raid_type": "RAID1",
+             "drives": [f"{CTRL}/Drives/Disk.2", f"{CTRL}/Drives/Disk.3"], "capacity_bytes": 480 * GB},
+        ]
+        with self.assertRaises(sl.StorageLayoutError) as ctx:
+            sl.plan_volumes(self.spec, drives, volumes)
+        self.assertIn("ambiguous", str(ctx.exception))
+
     def test_adoption_refuses_wrong_shape(self):
         # One RAID10 over all four drives: nothing matches the boot/datastore roles.
         paths = [f"{CTRL}/Drives/Disk.{i}" for i in range(4)]
@@ -194,6 +223,7 @@ class Apply(unittest.TestCase):
         self.assertEqual(result["created"], ["boot", "datastore"])
         self.assertEqual([v[1] for v in result["volumes"]], ["boot", "datastore"])
         self.assertEqual(result["warnings"], [])
+        self.assertTrue(result["boot_is_first"])
         self.assertNotIn(("power_action", "On"), rf.calls)
 
     def test_powers_on_into_setup_when_off(self):
@@ -209,6 +239,7 @@ class Apply(unittest.TestCase):
         self.assertTrue(result["dry_run"])
         self.assertEqual([c for c in rf.calls if c[0] == "create_volume"], [])
         self.assertEqual([p["action"] for p in result["plan"]], ["create", "create"])
+        self.assertTrue(result["boot_is_first"])  # created first on an empty adapter
 
     def test_dry_run_refuses_when_off(self):
         rf = FakeRedfish(four_drives(), power="Off")
@@ -233,6 +264,7 @@ class Apply(unittest.TestCase):
         self.assertEqual(result["created"], ["boot"])
         self.assertEqual(result["resolved"], {"datastore": "1", "boot": "2"})
         self.assertTrue(result["warnings"] and "first VD" in result["warnings"][0])
+        self.assertFalse(result["boot_is_first"])
 
     def test_dry_run_warns_when_boot_would_not_be_first(self):
         drives = [drive(0, 480), drive(2, 480), drive(1, 1920, "Online", [f"{CTRL}/Volumes/1"]),
@@ -241,6 +273,7 @@ class Apply(unittest.TestCase):
                     "drives": [f"{CTRL}/Drives/Disk.1", f"{CTRL}/Drives/Disk.3"], "capacity_bytes": 1920 * GB}]
         result = sl.apply_storage_layout(FakeRedfish(drives, volumes), self.spec, self.logger, dry_run=True)
         self.assertTrue(result["warnings"] and "first VD" in result["warnings"][0])
+        self.assertFalse(result["boot_is_first"])
 
     def test_adopted_unit_is_a_no_op_without_warning(self):
         drives = [drive(0, 480, "Online", [f"{CTRL}/Volumes/1"]), drive(2, 480, "Online", [f"{CTRL}/Volumes/1"]),
@@ -256,6 +289,26 @@ class Apply(unittest.TestCase):
         self.assertEqual([c for c in rf.calls if c[0] == "create_volume"], [])
         self.assertEqual(result["kept"], ["boot", "datastore"])
         self.assertEqual(result["warnings"], [])
+        self.assertTrue(result["boot_is_first"])
+
+    def test_data_first_hand_built_unit_is_not_boot_first(self):
+        # Data mirror listed (= created) first: adoption is now right (boot =
+        # the 480G VD), and the flag tells the install job to refuse — the
+        # target-0 pin would select the data VD.
+        drives = [drive(1, 1920, "Online", [f"{CTRL}/Volumes/1"]), drive(3, 1920, "Online", [f"{CTRL}/Volumes/1"]),
+                  drive(0, 480, "Online", [f"{CTRL}/Volumes/2"]), drive(2, 480, "Online", [f"{CTRL}/Volumes/2"])]
+        volumes = [
+            {"path": f"{CTRL}/Volumes/1", "id": "1", "name": "VD_0", "raid_type": "RAID1",
+             "drives": [f"{CTRL}/Drives/Disk.1", f"{CTRL}/Drives/Disk.3"], "capacity_bytes": 1920 * GB},
+            {"path": f"{CTRL}/Volumes/2", "id": "2", "name": "VD_1", "raid_type": "RAID1",
+             "drives": [f"{CTRL}/Drives/Disk.0", f"{CTRL}/Drives/Disk.2"], "capacity_bytes": 480 * GB},
+        ]
+        for dry_run in (True, False):
+            result = sl.apply_storage_layout(FakeRedfish(drives, volumes), self.spec, self.logger,
+                                             dry_run=dry_run, sleep=lambda s: None)
+            self.assertEqual(result["kept"], ["boot", "datastore"])
+            self.assertFalse(result["boot_is_first"], msg=f"dry_run={dry_run}")
+            self.assertTrue(any("first VD" in w for w in result["warnings"]))
 
 
 if __name__ == "__main__":

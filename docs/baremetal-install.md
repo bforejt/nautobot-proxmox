@@ -49,6 +49,15 @@ How a blank server becomes a fully registered Proxmox node with **one job run**
   PVE 9.2+) authenticates the answer request itself.
 - The service holds the root password **hash** (never plaintext); per-node API
   tokens go straight into text-file Secrets; nothing secret is logged.
+- **Fail closed on ambiguity** (decision #52): a serial matching several
+  Devices, a static install without the mgmt MAC pinned (or with a MAC the
+  installer did not report) and a broken profile key are refused at answer
+  time; the firstboot phone-home checks the service cert's fingerprint on the
+  same TLS connection that carries the token.
+- **BMC identity**: before any BMC write (RAID layout, media mount, boot
+  override, power) the jobs read the BMC's system serial and refuse unless it
+  is the Device's serial — a stale `xcc` IP can never point an install at
+  another machine.
 
 ## The three knobs: prepared media, answer discovery, boot delivery
 
@@ -278,7 +287,9 @@ Pre-flight, one-time in the lab:
    the mgmt VLAN offers DHCP during install. (Static needs `primary_ip4` +
    a `DefaultGW`-role IP in the prefix + the mgmt interface's MAC pinned so
    the NIC filter is exact — do that on later installs, with real layout
-   data.)
+   data. The pinned MAC is **required** for static: without it the answer
+   service refuses rather than guess a NIC, and the install job refuses
+   before booting anything.)
 
 Device records for the target unit:
 
@@ -289,6 +300,8 @@ Device records for the target unit:
   its post-install life.
 - Interface named **`xcc`** with the BMC IP assigned (contract §4) — the
   delivery adapter reads it. Secrets `xcc_username`/`xcc_password` as before.
+  The BMC at that IP must report this Device's serial; the job checks it
+  before its first BMC write and refuses on a mismatch.
 
 Run **`Install Proxmox Node (SoT-driven)`** with Confirm ticked. Expected:
 mount via PATCH-EXT → one-shot CD → ForceRestart → `ANSWERED` in the service
@@ -363,8 +376,9 @@ a warning — the node, not the worker, is what must reach the service.
    run `proxmox-auto-install-assistant device-match disk
    ID_PATH='*-scsi-0:2:0:0'` — it must list exactly the ~480 GB volume. If the
    layout step warned that `boot` is not the first volume (hand-made units),
-   fix the order (delete and re-create by hand) or pin by `ID_SERIAL` from
-   that shell's `device-info -t disk` output.
+   fix the order (delete and re-create by hand, boot first): the install job
+   **refuses** a unit whose boot volume is not the adapter's first VD,
+   because the target-0 pin would then wipe the data volume.
 5. Run **`Install Proxmox Node (SoT-driven)`** with Confirm. Expected: RAID
    layout ensured (host powered on into UEFI Setup if it was off) → EXT mount
    (XCC2 also takes https URLs) → one-shot CD → `ANSWERED` (source static, fs
@@ -588,9 +602,14 @@ Consequences worth knowing:
   and the answer service adds a **mapping from the SoT**: a Device interface
   that records its MAC gets its Nautobot name as the Linux name (`mgmt` stays
   `mgmt` after every upgrade), the rest keep `nic<N>`. Only MACs the installer
-  actually reported are mapped; names must be 2–15 chars, letter first,
-  alnum/underscore, and may not be `nic<N>` (skipped with a log line
-  otherwise). The `xcc` interface is never a host NIC. The webhook log line
+  actually reported are mapped. Nautobot names that break the Linux rule are
+  **transliterated** deterministically (decision #52): lowercase; each run of
+  characters outside `[a-z0-9_]` becomes `_`; leading/trailing `_` stripped;
+  `p_` prefixed unless the result starts with a letter; truncated to 15 —
+  `OCP-1` → `ocp_1`, `1GbE-4` → `p_1gbe_4` (logged as `'OCP-1' -> 'ocp_1'`).
+  A result shorter than 2 chars, in the installer's `nic<N>` namespace, or
+  already taken (first interface wins) is skipped with a log line and the
+  port keeps `nic<N>`. The `xcc` interface is never a host NIC. The webhook log line
   `INSTALLED <node>: interfaces …` records the final name-to-MAC map.
 
 ### RAID-adapter platforms: two hardware mirrors (SE455 V3, decision #50)
@@ -616,11 +635,14 @@ storage:
 Rules the layout step enforces: the picked drives must be equal-sized and the
 pick unambiguous (a third drive of the same size refuses); volumes that exist
 by name are kept after a RAID-type check, never re-created; nothing is ever
-deleted; JBOD drives are reported, not converted. The XCC reports RAID
+deleted; JBOD drives are reported, not converted. Adoption by role weighs
+every unclaimed hand-made volume at once (the listing order never decides
+which mirror is `boot`) and refuses equal-sized candidates. The XCC reports RAID
 inventory only while the host is powered on, so the step powers it on with a
-one-time boot into UEFI Setup and waits for the adapter to enumerate. It warns
-when `boot` is not the adapter's first volume (hand-made units), because the
-ID_PATH pin assumes it is. `install.data_volume` keys: `vg`, `thinpool`,
+one-time boot into UEFI Setup and waits for the adapter to enumerate. When
+`boot` is not the adapter's first volume (hand-made units) the install job
+**refuses** — the ID_PATH pin assumes target 0 and would wipe the data
+volume — and `Apply Storage Layout` warns that it will. `install.data_volume` keys: `vg`, `thinpool`,
 `pve_storage`, `select: unused-largest`, `min_size_gib`; a volume group of
 that name found on disk (reinstall) is reused, so VM disks survive.
 
@@ -649,9 +671,16 @@ preflight" evaluate the same rules from the host side.
 | Need a shell on the installer | Every mode runs a root shell on **tty3** (`Ctrl+Alt+F3`; tty2 = installer stderr). A failed automated install drops to a debug shell on tty1 (our answers set `reboot-on-error = false`). To pause *before* anything runs, add `proxmox-debug` to the kernel line (press `e` in GRUB on the automated entry, or use the `debug` iPXE entry). Logs: `/tmp/fetch_answer.log`, `/tmp/auto_installer.log`, `/tmp/install-low-level.log` |
 | `Storage layout refused: ... JBOD` / `only N free` | The RAID adapter's drives are not `Unconfigured good` (JBOD, hot spare, or already in a volume of the wrong shape). Convert JBOD drives once in the XCC storage page or UEFI; a volume the step cannot adopt (wrong RAID level or drive set) must be deleted by hand — the step never deletes |
 | `datastore` storage missing on a hand-built unit | Its data VD already carries an LVM signature with a differently named volume group: firstboot creates nothing on a signed disk and registers only a VG named `datastore`. Rename the VG (`vgrename`) or wipe the VD (`wipefs -a`, data loss) before installing |
-| `boot volume 'boot' is volume #2 on the adapter` warning | The volumes were created by hand in the other order; the profile's `ID_PATH *-scsi-0:2:0:0` pin would select the data VD. Re-create in the right order, or pin `ID_SERIAL` from the installer shell's `device-info -t disk` |
+| Install job: `Storage layout refused: the boot volume is not the adapter's first virtual drive` (Apply Storage Layout: `boot volume … is not the adapter's first VD` + `Install Proxmox Node will REFUSE this unit`) | The volumes were created by hand in the other order; the profile's `ID_PATH *-scsi-0:2:0:0` pin would select the data VD and the installer would wipe it. Back up anything on the data VD, delete both volumes by hand (XCC storage page or UEFI — the step never deletes), and re-run: the step re-creates `boot` first |
+| `Storage layout refused: volume 'boot': existing volume … would be adopted, but other drives share its smallest size … — ambiguous role, refusing` | Hand-made mirrors over equal-sized drives: nothing says which one is `boot`. Rename the intended boot VD to `boot` (matched by name first) or delete and let the step create them |
+| `BMC identity check refused: the BMC at … belongs to serial '…', but <node>'s serial is '…'` / `reports no system serial` / `could not read the system serial` | The Device's `xcc` IP leads to another machine (or the Device's serial is wrong): fix the record — the discovery job reports the BMC's serial. A BMC that reports no serial, or cannot be read, is refused too; nothing was written to it |
+| Install job: `… installs static (primary_ip4 …) but the interface carrying it has no MAC address` / log `REFUSED: … installs static … has no MAC — pin the mgmt interface MAC` (installer: `409 static install needs the mgmt interface MAC pinned`) | Static installs need the mgmt port's MAC on the Nautobot interface that carries `primary_ip4` — the service never guesses a NIC (the installer's NIC list carries names, not link state). Record the MAC (installer shell: `proxmox-auto-install-assistant device-info -t network`), or drop `primary_ip4` for a DHCP install |
+| Log `REFUSED: … pinned mgmt MAC … is not among the NICs the installer reported (…)` (installer: `409 pinned mgmt MAC is not present on this machine`) | The MAC on the mgmt interface is a typo or belongs to another unit/card; the log lists every MAC this machine reported — correct the interface's MAC and re-run |
+| Log `REFUSED: serial '…' matches N Devices` (installer: `409 serial matches more than one Device`) | Two Devices carry the same serial (a copied record?). Serials must be unique — fix the duplicate |
+| Installer: `500 profile install.… must be …` at answer fetch | The DeviceType profile's `data_pool` / `data_volume` / `filter_match` is invalid; it is now checked before the installer runs (it used to fail at firstboot). Fix the profile and rebuild the answer service |
 | `datastore` storage missing after an SE455 V3 install | `journalctl -u proxmox-first-boot` on the node: the data-volume step logs why it refused (no unused signature-free disk at the largest size, or LVM error). A reused volume group from a previous install is expected and logged |
-| Installer fails with `duplicate interface name mapping` or `interface name ... is invalid` | The pinning mapping rendered from Nautobot clashed (two interfaces with the same name, or a name the installer's `pve-iface` rule rejects). The answer service skips such names with a log line before rendering; if the installer still complains, check the `ANSWERED ... names=` log line against the Device's interfaces |
+| Installer fails with `duplicate interface name mapping` or `interface name ... is invalid` | The pinning mapping rendered from Nautobot clashed (two interfaces with the same name, or a name the installer's `pve-iface` rule rejects). The answer service transliterates names to the Linux rule and skips what still clashes with a log line before rendering; if the installer still complains, check the `ANSWERED ... names=` log line against the Device's interfaces |
+| A port came up as `nic<N>` although its Nautobot interface records the MAC | Answer-service log: `pin name … is already used` (two Nautobot names transliterate to the same Linux name — first wins), `squats the installer's default nic<N> namespace`, or `is not a valid Linux/pve-iface name` (shorter than 2 chars after transliteration). Rename the interface in Nautobot |
 | `datastore` pool missing after a JBOD (ZFS) install | `journalctl -u proxmox-first-boot` on the node: the data-pool step logs why it refused (fewer/more than `count` equal-sized unused disks, or leftover signatures — `wipefs -a` the intended data disks by hand only if they are truly spare, then `zpool create` + `pvesm add zfspool` per the profile) |
 | `500 root password hash not provisioned` in the log | `secrets/root_password_hash` missing/empty — composer's `./setup.sh` generates it when the answer-service profile is enabled (re-run it), or create manually: `openssl passwd -6 > secrets/root_password_hash` |
 | Install finished but state didn't flip | `docker compose logs answer-service` — webhook arrives before reboot/power-off; payload archived in `/data/install-<serial>.json` |

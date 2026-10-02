@@ -29,6 +29,10 @@ Security model (defense in depth, smallest-possible trust):
     nested profile deliberately powers off between install and first boot.
   - The credentials phone-home is additionally source-checked against the
     node's own management IP (VERIFY_PHONE_HOME_SOURCE).
+  - Fail closed on ambiguity (decision #52): a serial matching several
+    Devices, a static install whose mgmt interface pins no MAC (or a MAC the
+    installer did not report), and an invalid profile key are refused at
+    answer time — never resolved by a guess.
   - Per-DeviceType install profiles (bmc/profiles/<slug>.yaml) are the only
     place hardware policy lives: disk filter / filter-match, filesystem
     options, install.data_pool (JBOD boxes: firstboot builds a ZFS data
@@ -227,54 +231,54 @@ def _nb(method: str, path: str, **kwargs):
 
 
 def device_by_serial(serial: str) -> dict | None:
+    """The ONE Device carrying this serial. Several matches are refused —
+    ambiguity never resolves to a guess (which node's answer, keys, secrets?)."""
     results = _nb("GET", "/dcim/devices/", params={"serial": serial, "depth": 1}).get("results", [])
+    if len(results) > 1:
+        log.warning("REFUSED: serial %r matches %d Devices (%s) — serials must be unique",
+                    serial, len(results), ", ".join(str(d.get("name")) for d in results))
+        raise HTTPException(409, "serial matches more than one Device")
     return results[0] if results else None
 
 
-def default_gateway_for(ip_cidr: str) -> str | None:
+def default_gateway_for(primary: dict) -> str | None:
     """Contract §3: gateway = the DefaultGW-role IP inside the address's prefix.
+    The prefix is the primary IP's OWN parent (IPAddress.parent, a Prefix in
+    the IP's namespace) — never a namespace-blind `contains` search, which
+    could pick an identically numbered prefix from another namespace.
     NOTE: the ip-addresses `parent` filter takes a Prefix PK (UUID), not a
     CIDR string — Nautobot 2.4 rejects the string form with a 400."""
-    addr = ip_cidr.split("/")[0]
-    prefixes = _nb("GET", "/ipam/prefixes/", params={"contains": addr}).get("results", [])
-    if not prefixes:
+    detail = _nb("GET", f"/ipam/ip-addresses/{primary['id']}/")
+    parent = detail.get("parent")
+    parent_id = parent.get("id") if isinstance(parent, dict) else parent
+    if not parent_id:
         return None
-    prefixes.sort(key=lambda p: int(p["prefix"].split("/")[1]))
-    parent = prefixes[-1]
     gws = _nb(
-        "GET", "/ipam/ip-addresses/", params={"parent": parent["id"], "role": "DefaultGW"}
+        "GET", "/ipam/ip-addresses/", params={"parent": parent_id, "role": "DefaultGW"}
     ).get("results", [])
     if not gws:
         return None
     return gws[0]["address"].split("/")[0]
 
 
-def best_nic_mac(nics: list) -> str:
-    """Fallback NIC when the SoT pins no mgmt MAC: the installer lists every
-    NIC it sees, including the XCC's USB Ethernet-over-USB port (seen on a
-    real SE455 V3 with a locally administered MAC). Prefer link-up NICs with
-    a universally administered MAC; stable sort keeps the installer's order
-    among equals. A fallback only — pin the MAC for deterministic installs."""
-    def score(nic):
-        mac = str(nic.get("mac") or "").lower()
-        try:
-            first_octet = int(mac.split(":")[0], 16)
-        except ValueError:
-            first_octet = 0xFF
-        return (0 if nic.get("link") else 1, 1 if first_octet & 0x02 else 0)
-
-    candidates = [n for n in nics or [] if n.get("mac")]
-    if not candidates:
-        return ""
-    return str(sorted(candidates, key=score)[0]["mac"]).lower()
-
-
 # Interface names the installer accepts for pinning (pve-iface: letter first,
 # ASCII alnum/underscore) capped at IFNAMSIZ-1 = 15; the installer's own
 # default namespace nic<N> is off limits — a SoT name clashing with an
 # enumerated default would fail the whole install ("duplicate interface name").
-_IFNAME_RE = re.compile(r"^[a-z][a-z0-9_]{1,14}$", re.IGNORECASE)
-_DEFAULT_PIN_RE = re.compile(r"^nic\d+$", re.IGNORECASE)
+_IFNAME_RE = re.compile(r"^[a-z][a-z0-9_]{1,14}$")
+_DEFAULT_PIN_RE = re.compile(r"^nic\d+$")
+
+
+def pin_name(name: str) -> str:
+    """Nautobot interface name -> Linux pin name, deterministically (decision
+    #51/#52): lowercase; each run of characters outside [a-z0-9_] -> "_";
+    strip leading/trailing "_"; prefix "p_" unless it starts with a letter;
+    truncate to 15. "OCP-1" -> "ocp_1", "1GbE-4" -> "p_1gbe_4", "mgmt" ->
+    "mgmt". The caller still validates the result (2-15 chars, not nic<N>)."""
+    value = re.sub(r"[^a-z0-9_]+", "_", name.lower()).strip("_")
+    if value and not value[0].isalpha():
+        value = "p_" + value
+    return value[:15]
 
 
 def device_interfaces(device: dict) -> list:
@@ -289,8 +293,10 @@ def build_pin_mapping(interfaces: list, nics: list, device_name: str = "") -> di
     Only MACs the installer reported in its identity POST are mapped — the
     answer file names what is really there; every other physical NIC keeps
     the installer's default nic<N> (enumeration order). The `xcc` interface
-    holds the BMC address, not a host NIC. Skipped entries are logged, never
-    guessed."""
+    holds the BMC address, not a host NIC. Names the Linux rule rejects are
+    transliterated by pin_name() (logged); entries still unusable — too
+    short, the nic<N> namespace, a duplicate (first wins) — are skipped with
+    a log line, never guessed."""
     seen = {str(n.get("mac") or "").lower() for n in nics or [] if n.get("mac")}
     mapping: dict[str, str] = {}
     used: dict[str, str] = {}
@@ -303,21 +309,24 @@ def build_pin_mapping(interfaces: list, nics: list, device_name: str = "") -> di
             log.info("%s: interface %s (%s) not reported by the installer — not pinned",
                      device_name, name, mac)
             continue
-        if not _IFNAME_RE.match(name):
-            log.warning("%s: interface name %r is not a valid Linux/pve-iface name "
+        linux = pin_name(name)
+        if not _IFNAME_RE.match(linux):
+            log.warning("%s: interface name %r -> %r is not a valid Linux/pve-iface name "
                         "(letter first, alnum/underscore, 2-15 chars) — %s keeps nic<N>",
-                        device_name, name, mac)
+                        device_name, name, linux, mac)
             continue
-        if _DEFAULT_PIN_RE.match(name):
+        if _DEFAULT_PIN_RE.match(linux):
             log.warning("%s: interface name %r squats the installer's default nic<N> "
                         "namespace — %s keeps its enumerated name", device_name, name, mac)
             continue
-        if name.lower() in used:
-            log.warning("%s: interface name %r is used by %s and %s — second one not pinned",
-                        device_name, name, used[name.lower()], mac)
+        if linux in used:
+            log.warning("%s: pin name %r (from %r) is already used by %s — %s not pinned",
+                        device_name, linux, name, used[linux], mac)
             continue
-        used[name.lower()] = mac
-        mapping[mac] = name
+        if linux != name:
+            log.info("%s: interface name %r -> %r (Linux pin name)", device_name, name, linux)
+        used[linux] = mac
+        mapping[mac] = linux
     return mapping
 
 
@@ -468,6 +477,11 @@ def _answer_impl(identity: dict) -> PlainTextResponse:
 
     profile = load_profile((device.get("device_type") or {}).get("model", ""))
     install = profile.get("install", {})
+    # Validate every profile key the firstboot step will need NOW: a broken
+    # profile must refuse before the installer runs, not one boot later.
+    filter_match = filter_match_for(install)
+    data_pool_spec(install)
+    data_volume_spec(install)
 
     # Network: static from the SoT when primary_ip4 exists, else DHCP.
     network_source = "from-dhcp"
@@ -476,7 +490,7 @@ def _answer_impl(identity: dict) -> PlainTextResponse:
     primary = device.get("primary_ip4")
     if primary and install.get("network_source", "from-answer") == "from-answer":
         cidr = primary["address"]
-        gateway = default_gateway_for(cidr) or ""
+        gateway = default_gateway_for(primary) or ""
         if not gateway:
             log.warning(
                 "REFUSED: %s has primary_ip4 %s but no DefaultGW-role IP in its prefix",
@@ -485,18 +499,25 @@ def _answer_impl(identity: dict) -> PlainTextResponse:
             raise HTTPException(409, "no DefaultGW-role IP in the management prefix (contract §3)")
         dns = DNS_SERVER or gateway
         network_source = "from-answer"
-        pinned = mgmt_interface_mac(device)
-        mac = (pinned or "").lower()
+        # Static installs need the exact mgmt NIC: never guess one from the
+        # installer's list (its "link" field is the interface NAME, not a
+        # carrier state, so nothing in the POST says which port is cabled).
+        mac = (mgmt_interface_mac(device) or "").lower()
         if not mac:
-            mac = best_nic_mac(nics)
-            if mac:
-                log.warning(
-                    "%s pins no mgmt MAC — NIC filter falls back to the installer's best "
-                    "candidate %s (pin the mgmt interface MAC for anything real)",
-                    device["name"], mac,
-                )
-        if mac:
-            net_filter["ID_NET_NAME_MAC"] = f"*{mac.replace(':', '')}"
+            log.warning(
+                "REFUSED: %s installs static (%s) but the interface carrying primary_ip4 "
+                "has no MAC — pin the mgmt interface MAC in Nautobot", device["name"], cidr,
+            )
+            raise HTTPException(409, "static install needs the mgmt interface MAC pinned (contract §4)")
+        reported = sorted({str(n.get("mac") or "").lower() for n in nics if n.get("mac")})
+        if mac not in reported:
+            log.warning(
+                "REFUSED: %s pinned mgmt MAC %s is not among the NICs the installer reported "
+                "(%s) — fix the MAC on the mgmt interface", device["name"], mac,
+                ", ".join(reported) or "none",
+            )
+            raise HTTPException(409, "pinned mgmt MAC is not present on this machine")
+        net_filter["ID_NET_NAME_MAC"] = f"*{mac.replace(':', '')}"
 
     # Interface name pinning (PVE >= 9.1 answer format, decision #51): every
     # physical NIC gets a MAC-pinned name at install time; SoT interface names
@@ -548,7 +569,7 @@ def _answer_impl(identity: dict) -> PlainTextResponse:
         pin_mapping=pin_mapping,
         filesystem=filesystem,
         disk_filter=install.get("disk_filter", {}),
-        filter_match=filter_match_for(install),
+        filter_match=filter_match,
         fs_family=fs_family,
         fs_options=install.get(fs_family, {}),
         firstboot_url=f"{PUBLIC_URL}/firstboot?serial={serial}&key={firstboot_key}",

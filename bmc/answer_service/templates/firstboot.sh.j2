@@ -49,6 +49,15 @@ pveum role list --output-format json | grep -q "\"${ROLE}\"" \
 pveum user list --output-format json | grep -q "\"${SVC_USER}\"" \
   || pveum user add "${SVC_USER}" --comment "NFV automation (firstboot-created)"
 pveum acl modify / --users "${SVC_USER}" --roles "${ROLE}"
+# Re-runnable under set -e: a token left by an earlier run that died before
+# the phone-home was never stored anywhere — its secret is unrecoverable and
+# useless, and `token add` would fail on it. Rotate it: remove, then add anew
+# (the token ACL is re-granted below; removal drops the old one with it).
+if pveum user token list "${SVC_USER}" --output-format json \
+    | python3 -c 'import json,sys; sys.exit(0 if any(t.get("tokenid") == sys.argv[1] for t in json.load(sys.stdin)) else 1)' "${TOKEN_NAME}"; then
+  log "token ${SVC_USER}!${TOKEN_NAME} exists from an unfinished earlier run — rotating it"
+  pveum user token remove "${SVC_USER}" "${TOKEN_NAME}"
+fi
 # Token value is shown exactly once — capture it here or lose it (reinstall
 # re-runs this same bootstrap, which is the designed rebuild path).
 TOKEN_SECRET="$(pveum user token add "${SVC_USER}" "${TOKEN_NAME}" --privsep 1 --output-format json \
@@ -63,40 +72,60 @@ export NFV_URL="${SERVICE_URL}" NFV_SERIAL="${SERIAL}" NFV_KEY="${CRED_KEY}" \
        NFV_NODE="${NODE_NAME}" NFV_FP="${PIN_FP}" \
        NFV_TOKEN_ID="${SVC_USER}!${TOKEN_NAME}" NFV_TOKEN_SECRET="${TOKEN_SECRET}"
 python3 - <<'PYEOF'
-import hashlib, json, os, socket, ssl, sys, time, urllib.request
+import hashlib, http.client, json, os, ssl, sys, time, urllib.parse
 
-url = os.environ["NFV_URL"] + "/firstboot-credentials"
-payload = {
+url = urllib.parse.urlsplit(os.environ["NFV_URL"] + "/firstboot-credentials")
+path = url.path + (f"?{url.query}" if url.query else "")
+body = json.dumps({
     "serial": os.environ["NFV_SERIAL"],
     "key": os.environ["NFV_KEY"],
     "node_name": os.environ["NFV_NODE"],
     "token_id": os.environ["NFV_TOKEN_ID"],
     "token_secret": os.environ["NFV_TOKEN_SECRET"],
-}
-
-ctx = None
+}).encode()
 fp = os.environ.get("NFV_FP", "").replace(":", "").lower()
-if url.startswith("https://") and fp:
-    # Pin the service's (self-signed) cert by SHA256 fingerprint, then send
-    # with CA verification off — the pin IS the verification.
-    host = url.split("/")[2]
-    hostname, _, port = host.partition(":")
-    ctx = ssl._create_unverified_context()
-    with socket.create_connection((hostname, int(port or 443)), timeout=30) as sock:
-        with ctx.wrap_socket(sock, server_hostname=hostname) as tls:
-            der = tls.getpeercert(binary_form=True)
-    seen = hashlib.sha256(der).hexdigest()
-    if seen != fp:
-        sys.exit(f"answer-service cert fingerprint mismatch: {seen} != {fp}")
+pinned = url.scheme == "https" and bool(fp)
+if url.scheme == "https":
+    # Pinned: CA verification off — the fingerprint check below IS the
+    # verification. Unpinned https keeps normal CA verification.
+    ctx = ssl._create_unverified_context() if pinned else ssl.create_default_context()
 
-req = urllib.request.Request(
-    url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}
-)
+
+class PinMismatch(Exception):
+    pass
+
+
+def post_once():
+    # The fingerprint is checked on the SAME connection that then carries the
+    # token — no window between "verified" and "sent" (every retry repeats
+    # connect + verify).
+    if url.scheme == "https":
+        conn = http.client.HTTPSConnection(url.hostname, url.port or 443, timeout=30, context=ctx)
+    else:
+        conn = http.client.HTTPConnection(url.hostname, url.port or 80, timeout=30)
+    try:
+        conn.connect()
+        if pinned:
+            seen = hashlib.sha256(conn.sock.getpeercert(binary_form=True)).hexdigest()
+            if seen != fp:
+                raise PinMismatch(f"answer-service cert fingerprint mismatch: {seen} != {fp}")
+        conn.request("POST", path, body=body, headers={"Content-Type": "application/json"})
+        resp = conn.getresponse()
+        text = resp.read().decode(errors="replace")
+        if resp.status >= 400:
+            raise OSError(f"HTTP {resp.status}: {text[:300]}")
+        return text
+    finally:
+        conn.close()
+
+
 for attempt in range(10):
     try:
-        print(urllib.request.urlopen(req, timeout=30, context=ctx).read().decode())
+        print(post_once())
         break
-    except OSError as exc:
+    except PinMismatch as exc:
+        sys.exit(f"{exc} — token NOT sent")
+    except (OSError, http.client.HTTPException) as exc:
         print(f"phone-home attempt {attempt + 1}/10 failed: {exc}", file=sys.stderr)
         time.sleep(min(60, 5 * (attempt + 1)))
 else:
