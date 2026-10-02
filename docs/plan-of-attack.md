@@ -377,7 +377,9 @@ decisions in §6.
 > SE455 V3 profile, the `Apply Storage Layout` job, and the unverified AMD BIOS
 > skeleton `bmc/se455v3_bios.yaml`. Open: `ApplyBiosPolicyJob`, the firstboot
 > host-baseline steps below (except pinning, which the installer now does), and the
-> first real installs on the SE350 and the SE455 V3 (`[lab-verify]`).
+> first real installs on the SE350 and the SE455 V3 (`[lab-verify]`). The L1/L2
+> host-baseline design (what the tester's post-deploy script becomes) is in
+> [host-baseline.md](host-baseline.md), decision #54.
 
 - Refactor `xcc_client.py` to dual-mode vmedia: `EXT{N}` members present → XCC1 path
   (PATCH on member, select by `Id` prefix "EXT", HTTP-only ISO URL); else XCC2 path (POST
@@ -412,7 +414,7 @@ decisions in §6.
   standard; no ZFS, no ARC reservation), disk filter matched to the RAID volume's
   model/serial string so a data disk can never be selected. SE455 V3 (2026-09-16):
   same boot policy on a RAID 540-8i volume the install job creates over Redfish
-  first (#50); the data volume becomes LVM-thin `datastore` at firstboot.
+  first (#50); the data volume becomes LVM-thin `DataDrive` at firstboot.
 - Firstboot hook (small fetch-and-exec stub): kernel cmdline (C-states, serial console —
   both GRUB and proxmox-boot-tool paths), ethtool/`disable-fw-lldp` systemd oneshot, NIC
   name pinning (done at install time by the answer file since #51 — MAC-pinned, SoT
@@ -561,7 +563,7 @@ nautobot-proxmox/
    (answer.toml disk filter) and degraded-mirror alerting visibility (checklist §4).
    SE455 V3 (2026-09-16, #50): same policy, but the RAID 540-8i volumes are created by
    the install job over XCC2 Redfish (boot = the smaller pair, first VD, pinned by
-   `ID_PATH *-scsi-0:2:0:0`; data → LVM-thin `datastore`); confirmed against a
+   `ID_PATH *-scsi-0:2:0:0`; data → LVM-thin `DataDrive`); confirmed against a
    hand-built unit's udev dump, first automated install `[lab-verify]`.
 5. `[lab-verify]` DMI serial as POSTed by the installer matches Nautobot serials;
    auto-install boot under Secure Boot (default: disable).

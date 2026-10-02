@@ -133,6 +133,7 @@ The minimum loop to prove it in a new lab:
 | [sot-data-contract.md](docs/sot-data-contract.md) | Exactly which Nautobot records the jobs read and write |
 | [baremetal-install.md](docs/baremetal-install.md) | How a blank server becomes a registered Proxmox node — answer service, media forge, nested/PXE/vmedia delivery, runbooks |
 | [deployment-onboarding.md](docs/deployment-onboarding.md) | What's portable vs. what's still manual — the gap register |
+| [host-baseline.md](docs/host-baseline.md) | The L1/L2 host-baseline design: what the hand-built post-deploy steps become (firstboot data vs. the Host Baseline job), the SoT bond/bridge model, fleet conventions (decision #54) |
 | [image-lifecycle.md](docs/image-lifecycle.md) | How golden images are built, versioned, promoted, rolled back (notes which steps are scripted vs. jobs) |
 
 **Design record**:
