@@ -150,7 +150,11 @@ firstboot creates `svc-nfv@pve!deploy` with role NFVAutomation (granted to
 BOTH user and token) and phones the token home → answer service writes the
 text-file Secrets, creates SecretsGroup `<name>-proxmox`, and sets the
 Device's `secrets_group` CF. **The node is now deployable by the existing VM
-jobs with zero manual credential steps.**
+jobs with zero manual credential steps.** On a reinstall the CF already
+names `<name>-proxmox` from the previous install, so the job does not
+trust it: it reports the token stored only once the phone-home has rewritten
+both of that group's Secrets after the job started (their `last_updated`);
+otherwise its result says `credentials=unverified (...)`.
 
 ## The PXE path (real hardware, no BMC needed)
 
@@ -708,6 +712,7 @@ preflight" evaluate the same rules from the host side.
 | `datastore` pool missing after a JBOD (ZFS) install | `journalctl -u proxmox-first-boot` on the node: the data-pool step logs why it refused (fewer/more than `count` equal-sized unused disks, or leftover signatures — `wipefs -a` the intended data disks by hand only if they are truly spare, then `zpool create` + `pvesm add zfspool` per the profile) |
 | `500 root password hash not provisioned` in the log | `secrets/root_password_hash` missing/empty — composer's `./setup.sh` generates it when the answer-service profile is enabled (re-run it), or create manually: `openssl passwd -6 > secrets/root_password_hash` |
 | Install job result: `installer delivered; state machine incomplete within the N-min watch window (webhook=…, credentials=…)` | The job stopped *watching*; the install itself carries on. `webhook=pending`: check the answer-service log for the `ANSWERED` line and the node's console — a vmedia install that is merely slow will still flip `bm_installed` on its own; re-check the Device's `provisioning_state` later. If the unit routinely needs more than the window, set `delivery.watch_timeout_seconds` in its profile. `credentials=pending` only: see "No credentials after first boot" below |
+| Install job result: `... credentials=unverified (pre-existing SecretsGroup '<name>-proxmox' not rewritten by this install's phone-home — it may still hold the previous install's token)` | A reinstall: the Device's `secrets_group` CF already named the group when the job started (the job logs `... already names SecretsGroup ... (reinstall)`), and within the watch window the phone-home did not rewrite both of its Secrets (username + secret `last_updated` at/after the job start). Until it does, the Secrets may point at the previous install's token, which died with the old OS — deploys against the node would get 401. Check the answer-service log for `OVERWRITING stored credentials` followed by `CREDENTIALS STORED` for the node (a `REFUSED credentials` line means the phone-home source did not match the mgmt IP), and the node's `journalctl -u proxmox-first-boot`; see "No credentials after first boot". If the log does show `CREDENTIALS STORED` after the job start, the store succeeded and the result is conservative — e.g. clock skew between the Nautobot worker and web containers |
 | Job log *warning*: `Installer media left mounted on … — the webhook did not land within the N-min watch window` / `Could not eject installer media from …` | The vmedia ISO is still inserted on that `EXT{N}` slot (left on purpose when the webhook had not landed — the installer may still be reading it). Once the node is installed, eject it from the XCC UI or with a discovery-job write-test run, so stale mounts do not fill the EXT slots |
 | Install job refuses: `profile delivery.watch_timeout_seconds must be an integer between 300 and … for …` | The DeviceType profile's watch-window override is not an integer in range (6000 s cap for `redfish-vmedia`, 3600 s for `pve-nested` — the caps keep the job inside its time limit). Fix or drop the key; nothing was booted |
 | Install finished but state didn't flip | `docker compose logs answer-service` — webhook arrives before reboot/power-off; payload archived in `/data/install-<serial>.json` |

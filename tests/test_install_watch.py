@@ -2,9 +2,11 @@
 """
 Unit tests for the install job's state watch (F33): the per-delivery-method
 watch window (jobs/lib/install_delivery.watch_timeout_seconds) and the vmedia
-eject as soon as the webhook lands (jobs/baremetal/install_node.py), and
-the nested reinstall reconciliation (F36,
-jobs/lib/install_delivery.stale_install_vms).
+eject as soon as the webhook lands (jobs/baremetal/install_node.py), the
+nested reinstall reconciliation (F36,
+jobs/lib/install_delivery.stale_install_vms), and the reinstall credentials
+signal (F42: a secrets_group CF already set at job start counts only once
+its Secrets are rewritten).
 Stdlib-only: requests and the nautobot modules are stubbed, and the job
 package is loaded from its file paths.
 
@@ -17,6 +19,7 @@ import re
 import sys
 import types
 import unittest
+from datetime import datetime, timedelta, timezone
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -127,10 +130,12 @@ class Clock:
 
 
 class FakeDevice:
-    """provisioning_state flips at `installed_at`, secrets_group at `creds_at`."""
+    """provisioning_state flips at `installed_at`, secrets_group at `creds_at`;
+    `stale_group` (a reinstall) is the CF value before that."""
 
-    def __init__(self, clock, installed_at=None, creds_at=None):
+    def __init__(self, clock, installed_at=None, creds_at=None, stale_group=None):
         self.clock, self.installed_at, self.creds_at = clock, installed_at, creds_at
+        self.stale_group = stale_group
         self.name = "edge-01"
         self.cf = {}
 
@@ -140,7 +145,7 @@ class FakeDevice:
         self.cf = {
             "provisioning_state": "bm_installed" if installed else "awaiting_install",
             "secrets_group": "edge-01-pve" if self.creds_at is not None and t >= self.creds_at
-            else None,
+            else self.stale_group,
         }
 
 
@@ -217,6 +222,105 @@ class WatchLoop(unittest.TestCase):
         device = FakeDevice(self.clock, installed_at=0, creds_at=60)
         self.job._vmedia_mount = None
         self.assertEqual(self.job._watch_state_machine(device, 1800), (True, True))
+
+
+class ReinstallCredentials(unittest.TestCase):
+    """F42: on a reinstall the CF already names the (deterministic) group,
+    so only a rewrite of its Secrets since the job started counts."""
+
+    setUp, tearDown = WatchLoop.setUp, WatchLoop.tearDown
+
+    def refreshed_at(self, at):
+        calls = []
+
+        def refreshed(group_name, since):
+            calls.append((group_name, since))
+            return at is not None and self.clock.now >= at
+        self.job._credentials_refreshed = refreshed
+        return calls
+
+    def test_stale_group_alone_is_not_stored(self):
+        device = FakeDevice(self.clock, installed_at=60, stale_group="edge-01-pve")
+        calls = self.refreshed_at(None)
+        self.job._vmedia_mount = None
+        result = self.job._watch_state_machine(device, 1800, stale_group="edge-01-pve",
+                                               since="T0")
+        self.assertEqual(result, (True, False))
+        self.assertGreaterEqual(self.clock.now, 1800)  # kept waiting, did not exit early
+        self.assertTrue(calls and all(c == ("edge-01-pve", "T0") for c in calls))
+        self.assertFalse(any("credentials stored" in m for _, m in self.job.logger.records))
+
+    def test_stale_group_counts_once_its_secrets_are_rewritten(self):
+        device = FakeDevice(self.clock, installed_at=60, stale_group="edge-01-pve")
+        self.refreshed_at(40 * 60)
+        self.job._vmedia_mount = None
+        result = self.job._watch_state_machine(device, 4500, stale_group="edge-01-pve",
+                                               since="T0")
+        self.assertEqual(result, (True, True))
+        self.assertGreaterEqual(self.clock.now, 40 * 60)
+        self.assertLess(self.clock.now, 41 * 60)
+
+    def test_first_install_needs_no_refresh_lookup(self):
+        device = FakeDevice(self.clock, installed_at=0, creds_at=60)
+        calls = self.refreshed_at(None)
+        self.job._vmedia_mount = None
+        self.assertEqual(self.job._watch_state_machine(device, 1800), (True, True))
+        self.assertEqual(calls, [])
+
+    def test_renamed_group_is_fresh(self):
+        self.refreshed_at(None)
+        self.assertTrue(self.job._credentials_stored("edge-01-pve", "old-name-proxmox", "T0"))
+        self.assertFalse(self.job._credentials_stored(None, "edge-01-pve", "T0"))
+        self.assertFalse(self.job._credentials_stored("", None, "T0"))
+
+
+class CredentialsRefreshedQuery(unittest.TestCase):
+    """_credentials_refreshed: both token Secrets must postdate the job start."""
+
+    T0 = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)
+
+    def run_with(self, rows):
+        seen = {}
+
+        class Query:
+            def __init__(self, rows):
+                self.rows = rows
+
+            def select_related(self, *fields):
+                return self.rows
+
+        class Objects:
+            @staticmethod
+            def filter(**kwargs):
+                seen.update(kwargs)
+                return Query([
+                    types.SimpleNamespace(secret_type=kind,
+                                          secret=types.SimpleNamespace(last_updated=ts))
+                    for kind, ts in rows
+                ])
+
+        orig = inode.SecretsGroupAssociation
+        inode.SecretsGroupAssociation = types.SimpleNamespace(objects=Objects)
+        try:
+            result = inode.InstallProxmoxNode()._credentials_refreshed("edge-01-proxmox", self.T0)
+        finally:
+            inode.SecretsGroupAssociation = orig
+        self.assertEqual(seen["secrets_group__name"], "edge-01-proxmox")
+        return result
+
+    def test_both_rewritten_after_start(self):
+        later = self.T0 + timedelta(minutes=40)
+        self.assertTrue(self.run_with([("username", later), ("secret", later)]))
+
+    def test_one_stale_secret_is_not_enough(self):
+        later, earlier = self.T0 + timedelta(minutes=40), self.T0 - timedelta(days=30)
+        self.assertFalse(self.run_with([("username", later), ("secret", earlier)]))
+
+    def test_missing_type_or_timestamp_is_not_enough(self):
+        later = self.T0 + timedelta(minutes=40)
+        self.assertFalse(self.run_with([("username", later)]))
+        self.assertFalse(self.run_with([("username", later), ("secret", None)]))
+        self.assertFalse(self.run_with([]))
 
 
 class NestedIsoChecksumGuard(unittest.TestCase):

@@ -18,10 +18,11 @@ docs/baremetal-install.md.
 """
 
 import time
+from datetime import datetime, timezone
 
 from nautobot.apps.jobs import BooleanVar, Job, ObjectVar, register_jobs
 from nautobot.dcim.models import Device
-from nautobot.extras.models import ExternalIntegration
+from nautobot.extras.models import ExternalIntegration, SecretsGroupAssociation
 
 from ..lib.answer_service import (
     INTEGRATION_NAME,
@@ -317,11 +318,40 @@ class InstallProxmoxNode(Job):
                 mount["member_path"], exc,
             )
 
-    def _watch_state_machine(self, device, timeout, poll=30):
+    def _credentials_refreshed(self, group_name, since):
+        """True once both token Secrets (username + secret) of SecretsGroup
+        `group_name` were written at/after `since`. The phone-home PATCHes
+        them on every store (last_updated bumps even when the file path is
+        unchanged), after writing the new token files — so this is the
+        reinstall's fresh signal when the CF already named the group."""
+        fresh = {
+            assoc.secret_type
+            for assoc in SecretsGroupAssociation.objects.filter(
+                secrets_group__name=group_name, secret_type__in=("username", "secret"),
+            ).select_related("secret")
+            if assoc.secret.last_updated is not None and assoc.secret.last_updated >= since
+        }
+        return fresh == {"username", "secret"}
+
+    def _credentials_stored(self, group_name, stale_group, since):
+        """The secrets_group CF counts as this install's phone-home only if
+        it is new (empty or another name at job start) or its Secrets were
+        rewritten since the job started. On a reinstall the CF still names
+        the previous life's group — deterministic name, never cleared — so
+        its mere presence proves nothing (F42)."""
+        if not group_name:
+            return False
+        if group_name != stale_group:
+            return True
+        return self._credentials_refreshed(group_name, since)
+
+    def _watch_state_machine(self, device, timeout, poll=30, stale_group=None, since=None):
         """Follow provisioning_state -> bm_installed (webhook) and the
-        credentials phone-home (secrets_group CF). Informative, not fatal —
-        the install continues without us either way. The vmedia installer
-        media is ejected as soon as the webhook lands, not after the watch."""
+        credentials phone-home (secrets_group CF; when it was already set at
+        job start, a fresh rewrite of its Secrets — see _credentials_stored).
+        Informative, not fatal — the install continues without us either
+        way. The vmedia installer media is ejected as soon as the webhook
+        lands, not after the watch."""
         deadline = time.time() + timeout
         seen_installed = seen_credentials = False
         while time.time() < deadline and not (seen_installed and seen_credentials):
@@ -331,7 +361,9 @@ class InstallProxmoxNode(Job):
                 seen_installed = True
                 self.logger.info("Webhook landed: provisioning_state=bm_installed")
                 self._eject_vmedia()
-            if not seen_credentials and device.cf.get("secrets_group"):
+            if not seen_credentials and self._credentials_stored(
+                device.cf.get("secrets_group"), stale_group, since,
+            ):
                 seen_credentials = True
                 self.logger.info(
                     "Firstboot credentials stored: SecretsGroup %r",
@@ -365,6 +397,17 @@ class InstallProxmoxNode(Job):
             "leading/trailing hyphen, not all digits); rename the Device (the answer "
             "service refuses otherwise)",
         )
+        # Reinstall: the CF still names the previous life's SecretsGroup. Note
+        # it (and the time) before anything boots, so the watch can demand
+        # a fresh phone-home instead of trusting the stale value (F42).
+        stale_group = device.cf.get("secrets_group") or None
+        started = datetime.now(timezone.utc)
+        if stale_group:
+            self.logger.info(
+                "%s already names SecretsGroup %r (reinstall) — its credentials count "
+                "as stored only once this install's phone-home rewrites its Secrets",
+                device.name, stale_group,
+            )
         image = self._resolve_image(device)
         profile = load_profile(device.device_type.model)
         self._preflight_answer_service(device, profile)
@@ -407,7 +450,9 @@ class InstallProxmoxNode(Job):
         except DeliveryError as exc:
             raise RuntimeError(f"Delivery failed: {exc}") from exc
 
-        installed, credentials = self._watch_state_machine(device, watch_timeout)
+        installed, credentials = self._watch_state_machine(
+            device, watch_timeout, stale_group=stale_group, since=started,
+        )
         if getattr(self, "_vmedia_mount", None):
             # The webhook never landed, so the media may still be in use —
             # leave it mounted, but say so: it occupies an EXT slot.
@@ -422,10 +467,20 @@ class InstallProxmoxNode(Job):
                 f"{device.name}: installed, state=bm_installed, per-node API token "
                 f"stored (SecretsGroup {device.cf.get('secrets_group')!r})."
             )
+        if credentials:
+            creds_status = "ok"
+        elif stale_group and device.cf.get("secrets_group") == stale_group:
+            creds_status = (
+                f"unverified (pre-existing SecretsGroup {stale_group!r} not rewritten by "
+                "this install's phone-home — it may still hold the previous install's "
+                "token)"
+            )
+        else:
+            creds_status = "pending"
         return (
             f"{device.name}: installer delivered; state machine incomplete within the "
             f"{watch_timeout // 60}-min watch window (webhook={'ok' if installed else 'pending'}, "
-            f"credentials={'ok' if credentials else 'pending'}) — check the answer "
+            f"credentials={creds_status}) — check the answer "
             "service log and re-check the device's provisioning_state."
         )
 
