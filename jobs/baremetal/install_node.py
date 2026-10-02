@@ -21,12 +21,20 @@ import time
 
 from nautobot.apps.jobs import BooleanVar, Job, ObjectVar, register_jobs
 from nautobot.dcim.models import Device
+from nautobot.extras.models import ExternalIntegration
 
+from ..lib.answer_service import (
+    INTEGRATION_NAME,
+    evaluate_profile_preflight,
+    fetch_info,
+    profile_feature_keys,
+)
 from ..lib.install_delivery import (
     DeliveryError,
     PveNestedDelivery,
     RedfishVmediaDelivery,
     load_profile,
+    slugify,
 )
 from ..lib.nautobot_helpers import (
     CredentialError,
@@ -104,6 +112,31 @@ class InstallProxmoxNode(Job):
             if device.primary_ip4 in iface.ip_addresses.all():
                 return str(iface.mac_address) if iface.mac_address else None
         return None
+
+    # ---- answer-service preflight ----
+
+    def _preflight_answer_service(self, device, profile):
+        """Refuse before touching a BMC when the answer service demonstrably
+        cannot answer this node: its baked-in profile list (GET /info) lacks
+        the DeviceType's profile, or its build predates a feature the profile
+        uses. Found through the `nfv-answer-service` ExternalIntegration (the
+        media forge's plumbing); no integration or an unreachable service is a
+        warning, not a refusal — the node, not this worker, must reach it."""
+        integration = ExternalIntegration.objects.filter(name=INTEGRATION_NAME).first()
+        if integration is None:
+            self.logger.warning(
+                "No ExternalIntegration %r — skipping the answer-service profile preflight",
+                INTEGRATION_NAME,
+            )
+            return
+        base = integration.remote_url.rstrip("/")
+        info = fetch_info(base, verify=integration.verify_ssl)
+        verdict, message = evaluate_profile_preflight(
+            info, slugify(device.device_type.model), profile_feature_keys(profile), base
+        )
+        if verdict == "refuse":
+            raise ContractViolation(message)
+        (self.logger.warning if verdict == "warn" else self.logger.info)("%s", message)
 
     # ---- delivery paths ----
 
@@ -263,6 +296,7 @@ class InstallProxmoxNode(Job):
         )
         image = self._resolve_image(device)
         profile = load_profile(device.device_type.model)
+        self._preflight_answer_service(device, profile)
         method = profile["delivery"].get("method")
 
         try:

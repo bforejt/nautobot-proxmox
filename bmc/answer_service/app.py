@@ -12,6 +12,7 @@ Endpoints (see docs/baremetal-install.md for the full flow):
   GET  /firstboot              one-time-key gated per-node firstboot script
   POST /firstboot-credentials  pveum bootstrap phone-home -> Nautobot Secrets
   POST /webhook                installer post-install webhook -> state flip
+  GET  /info                   identity + baked-in profile list (jobs' preflight)
   GET  /healthz
 
 Security model (defense in depth, smallest-possible trust):
@@ -800,6 +801,13 @@ def info() -> dict:
         "cert_fingerprint": CERT_FINGERPRINT,
         "nfv_role": NFV_ROLE,
         "admin_enabled": ADMIN_ENABLED,
+        # Baked-in install profiles and the profile keys this build understands.
+        # The install job's preflight reads these before it touches a BMC:
+        # profiles bake in at build time while the jobs arrive through the Git
+        # sync, so the two drift after every profile merge (seen live on the
+        # first SE455 V3 run — 403 "no install profile" after a full boot).
+        "profiles": sorted(p.stem for p in PROFILE_DIR.glob("*.yaml")) if PROFILE_DIR.is_dir() else [],
+        "profile_features": ["filter_match", "data_pool", "data_volume", "interface_name_pinning"],
     }
 
 
