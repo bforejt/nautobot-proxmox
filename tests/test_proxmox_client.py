@@ -5,7 +5,8 @@ task that finished with "WARNINGS: <n>" succeeded (exit code 0) and must not
 be treated as a failure (deploy would roll back a VM that started fine).
 Also: transport errors / 5xx / non-JSON bodies surface as ProxmoxError
 (ProxmoxUnreachableError) so the jobs' best-effort guards catch them, and
-wait_task tolerates a few consecutive failed status polls.
+wait_task tolerates a few consecutive failed status polls. Image pulls refuse
+(fail closed, before any node call) when the image record has no checksum.
 Stdlib-only; `requests` is stubbed (the client only needs it at construction)
 and the API is a canned fake -- no network.
 
@@ -347,6 +348,74 @@ class AgentProbe(unittest.TestCase):
                 with self.assertRaises(cls) as cm:
                     c.get("/version")
                 self.assertEqual(cm.exception.status_code, code)
+
+
+class InfoLogger:
+    def __init__(self):
+        self.infos = []
+
+    def info(self, msg, *args):
+        self.infos.append(msg % args)
+
+
+IMG = "ubuntu-jumphost-24.04-v2.qcow2"
+URL = "http://firmware.example/images/" + IMG
+SHA = "a" * 64
+
+
+class ImageChecksumGuard(unittest.TestCase):
+    def test_missing_checksum_refuses(self):
+        for value in (None, "", "   "):
+            with self.subTest(value=value):
+                with self.assertRaises(pc.ImageIntegrityError) as cm:
+                    pc.require_image_checksum(IMG, value, "sha256")
+                self.assertIn("REFUSED", str(cm.exception))
+                self.assertIn("no checksum", str(cm.exception))
+                self.assertIn(IMG, str(cm.exception))
+
+    def test_refusal_is_not_a_swallowable_proxmox_error(self):
+        self.assertTrue(issubclass(pc.ImageIntegrityError, ValueError))
+        self.assertFalse(issubclass(pc.ImageIntegrityError, pc.ProxmoxError))
+
+    def test_returns_stripped_checksum_and_defaults_algorithm(self):
+        self.assertEqual(pc.require_image_checksum(IMG, f" {SHA}\n", None), (SHA, "sha256"))
+        self.assertEqual(pc.require_image_checksum(IMG, SHA, "sha512"), (SHA, "sha512"))
+
+    def test_ensure_image_without_checksum_makes_no_node_call(self):
+        c = client_with_session()  # any request would pop from an empty list
+        with self.assertRaises(pc.ImageIntegrityError):
+            c.ensure_image("pve1", "local", IMG, url=URL, checksum="")
+        self.assertEqual(c.session.calls, [])
+
+    def test_ensure_image_refuses_even_when_already_cached(self):
+        # A filename-keyed cache hit must not launder an unverifiable record.
+        c = client_with_session(FakeResponse(200, {"data": [{"volid": f"local:import/{IMG}"}]}))
+        with self.assertRaises(pc.ImageIntegrityError):
+            c.ensure_image("pve1", "local", IMG, url=URL, checksum=None)
+        self.assertEqual(c.session.calls, [])
+
+    def test_ensure_image_pull_passes_checksum_and_logs_truthfully(self):
+        log = InfoLogger()
+        c = client_with_session(
+            FakeResponse(200, {"data": []}),          # storage content: absent
+            FakeResponse(200, {"data": UPID}),        # download-url
+            FakeResponse(200, {"data": {"status": "stopped", "exitstatus": "OK"}}),
+        )
+        volid = c.ensure_image("pve1", "local", IMG, url=URL, checksum=SHA,
+                               checksum_algorithm="sha256", logger=log)
+        self.assertEqual(volid, f"local:import/{IMG}")
+        post = c.session.calls[1][1]["data"]
+        self.assertEqual(post["checksum"], SHA)
+        self.assertEqual(post["checksum-algorithm"], "sha256")
+        self.assertTrue(any("sha256-verified" in m for m in log.infos))
+
+    def test_cache_hit_log_does_not_claim_verification(self):
+        log = InfoLogger()
+        c = client_with_session(FakeResponse(200, {"data": [{"volid": f"local:import/{IMG}"}]}))
+        c.ensure_image("pve1", "local", IMG, url=URL, checksum=SHA, logger=log)
+        self.assertEqual(len(log.infos), 1)
+        self.assertNotIn("verified", log.infos[0])
+        self.assertIn("matched by filename", log.infos[0])
 
 
 if __name__ == "__main__":

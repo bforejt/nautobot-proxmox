@@ -48,7 +48,7 @@ from ..lib.nautobot_helpers import (
     resolve_hypervisor,
     resolve_proxmox_credentials,
 )
-from ..lib.proxmox_client import ProxmoxClient
+from ..lib.proxmox_client import ImageIntegrityError, ProxmoxClient, require_image_checksum
 from ..lib.redfish_discovery import RedfishDiscovery
 from ..lib.storage_layout import StorageLayoutError, apply_storage_layout, parse_storage_spec
 
@@ -151,6 +151,13 @@ class InstallProxmoxNode(Job):
     # ---- delivery paths ----
 
     def _install_nested(self, device, profile, image):
+        # The carrier pulls the ISO itself (download-url): refuse an image
+        # record without a checksum before touching the carrier.
+        try:
+            iso_checksum, iso_algo = require_image_checksum(
+                image.image_file_name, image.image_file_checksum, image.hashing_algorithm)
+        except ImageIntegrityError as exc:
+            raise ContractViolation(str(exc)) from exc
         carrier = resolve_hypervisor(device)
         _require(
             carrier.primary_ip4 is not None,
@@ -170,8 +177,8 @@ class InstallProxmoxNode(Job):
             vm_cfg.get("iso_storage", "local"),
             image.image_file_name,
             image.download_url,
-            image.image_file_checksum or None,
-            image.hashing_algorithm or "sha256",
+            iso_checksum,
+            iso_algo,
         )
         vmid = device.cf.get("vmid") or client.next_vmid()
         # Reinstall reconciliation: confirm=True is an explicit reinstall

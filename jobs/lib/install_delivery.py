@@ -35,7 +35,7 @@ try:
 except ImportError:  # pragma: no cover — PyYAML ships with Nautobot
     yaml = None
 
-from .proxmox_client import ProxmoxClient
+from .proxmox_client import ProxmoxClient, require_image_checksum
 
 PROFILE_DIR = Path(__file__).resolve().parents[2] / "bmc" / "profiles"
 
@@ -120,11 +120,15 @@ class PveNestedDelivery:
 
     def ensure_iso(self, storage: str, filename: str, url: str,
                    checksum: str | None, checksum_algorithm: str = "sha256") -> str:
+        # Fail closed before any node call: no checksum -> no unverified pull.
+        checksum, checksum_algorithm = require_image_checksum(filename, checksum, checksum_algorithm)
         for item in self.client.storage_content(self.node, storage, "iso"):
             if item.get("volid", "").endswith(f"/{filename}"):
-                self.logger.info("Installer ISO already on %s: %s", self.node, item["volid"])
+                self.logger.info("Installer ISO already on %s: %s (matched by filename)",
+                                 self.node, item["volid"])
                 return item["volid"]
-        self.logger.info("Pulling installer ISO %s onto %s (checksum-verified)", filename, self.node)
+        self.logger.info("Pulling installer ISO %s onto %s (%s-verified by the node)",
+                         filename, self.node, checksum_algorithm)
         return self.client.download_url(
             self.node, storage, url, filename, content="iso",
             checksum=checksum, checksum_algorithm=checksum_algorithm,

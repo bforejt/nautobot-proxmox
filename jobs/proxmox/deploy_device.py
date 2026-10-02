@@ -47,7 +47,13 @@ from ..lib.pa_bootstrap import (
     render_init_cfg,
 )
 from ..lib.platform_facts import get_platform_facts, resolve_nic_order
-from ..lib.proxmox_client import ProxmoxAgentPermissionError, ProxmoxClient, ProxmoxError
+from ..lib.proxmox_client import (
+    ImageIntegrityError,
+    ProxmoxAgentPermissionError,
+    ProxmoxClient,
+    ProxmoxError,
+    require_image_checksum,
+)
 
 # Fleet-wide console password for cloud-init guests (users log in at the
 # desktop/console, never SSH). Proxmox hashes it before storing; the plaintext
@@ -352,6 +358,12 @@ class DeployVnfDevice(Job):
         image = (sv.software_image_files.filter(default_image=True).first()
                  or sv.software_image_files.first())
         _require(image, f"SoftwareImageFile on version {sv.version}")
+        # Integrity before anything touches a node: no checksum -> no pull.
+        try:
+            image_checksum, image_algo = require_image_checksum(
+                image.image_file_name, image.image_file_checksum, image.hashing_algorithm)
+        except ImageIntegrityError as exc:
+            raise ContractViolation(str(exc)) from exc
 
         vcpus = _require(device.cf.get("vcpus"), f"vcpus CF on {device.name}")
         memory_mb = _require(device.cf.get("memory_mb"), f"memory_mb CF on {device.name}")
@@ -390,8 +402,8 @@ class DeployVnfDevice(Job):
 
         volid = client.ensure_image(
             node, import_storage, image.image_file_name,
-            url=image.download_url, checksum=image.image_file_checksum,
-            checksum_algorithm=image.hashing_algorithm or "sha256",
+            url=image.download_url, checksum=image_checksum,
+            checksum_algorithm=image_algo,
             logger=self.logger,
         )
 

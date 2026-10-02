@@ -49,6 +49,33 @@ class ProxmoxAgentPermissionError(ProxmoxError):
 _log = logging.getLogger(__name__)
 
 
+class ImageIntegrityError(ValueError):
+    """An image pull that could not be checksum-verified (refused, fail closed).
+
+    A ValueError, not a ProxmoxError: it is a SoT-contract refusal raised
+    before any node call, and must never be swallowed by the jobs'
+    best-effort ProxmoxError guards."""
+
+
+def require_image_checksum(filename: str, checksum: Optional[str],
+                           checksum_algorithm: Optional[str]) -> tuple[str, str]:
+    """Return (checksum, algorithm) for a node-side pull, or refuse.
+
+    PVE's download-url verifies only when a checksum is passed, and the
+    node-side cache is keyed by filename, so an image record without a
+    checksum would be pulled unverified (possibly over plain HTTP) and then
+    reused forever. Fail closed instead."""
+    value = (checksum or "").strip()
+    if not value:
+        raise ImageIntegrityError(
+            f"REFUSED: image {filename} has no checksum on its SoftwareImageFile — "
+            "the node-side pull would be unverified. Register it via 'Register Image "
+            "from Published Set' (or set image_file_checksum + hashing_algorithm on "
+            "the record)"
+        )
+    return value, (checksum_algorithm or "sha256").strip() or "sha256"
+
+
 def task_exit_outcome(exitstatus: Any) -> tuple[bool, int]:
     """Classify a stopped PVE task's `exitstatus` -> (succeeded, warning_count).
 
@@ -250,14 +277,21 @@ class ProxmoxClient:
     def ensure_image(self, node: str, storage: str, filename: str, url: str,
                      checksum: Optional[str], checksum_algorithm: str = "sha256",
                      logger=None) -> str:
-        """Idempotent: return the import volid, pulling from `url` if absent."""
+        """Idempotent: return the import volid, pulling from `url` if absent.
+
+        Refuses (ImageIntegrityError) when `checksum` is empty — before any
+        node call, so an unverified pull never happens. A volume already on
+        the node is matched by filename and NOT re-hashed (filenames are
+        unique per content; Register Image refuses same-name collisions)."""
+        checksum, checksum_algorithm = require_image_checksum(filename, checksum, checksum_algorithm)
         volid = self.find_import_volume(node, storage, filename)
         if volid:
             if logger:
-                logger.info("Image already present on %s: %s", node, volid)
+                logger.info("Image already present on %s: %s (matched by filename)", node, volid)
             return volid
         if logger:
-            logger.info("Image not on node - pulling %s from %s (checksum-verified)", filename, url)
+            logger.info("Image not on node - pulling %s from %s (%s-verified by the node)",
+                        filename, url, checksum_algorithm)
         return self.download_url(node, storage, url, filename,
                                  checksum=checksum, checksum_algorithm=checksum_algorithm)
 

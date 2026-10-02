@@ -217,5 +217,51 @@ class WatchLoop(unittest.TestCase):
         self.assertEqual(self.job._watch_state_machine(device, 1800), (True, True))
 
 
+class NestedIsoChecksumGuard(unittest.TestCase):
+    """The nested path's carrier pulls the ISO via download-url: an image
+    record with no checksum is refused before the carrier is touched."""
+
+    IMAGE = types.SimpleNamespace(
+        image_file_name="pve-9.2-auto.iso", download_url="http://fw.example/pve-9.2-auto.iso",
+        image_file_checksum="", hashing_algorithm="sha256",
+    )
+
+    def test_install_nested_refuses_before_resolving_the_carrier(self):
+        job = inode.InstallProxmoxNode()
+        job.logger = Logger()
+        orig = inode.resolve_hypervisor
+        touched = []
+        inode.resolve_hypervisor = lambda device: touched.append(device)
+        try:
+            with self.assertRaises(inode.ContractViolation) as cm:
+                job._install_nested(object(), profile("pve-nested"), self.IMAGE)
+        finally:
+            inode.resolve_hypervisor = orig
+        self.assertIn("no checksum", str(cm.exception))
+        self.assertEqual(touched, [])
+
+    def test_ensure_iso_refuses_without_node_calls(self):
+        client = types.SimpleNamespace(calls=[])
+        client.storage_content = lambda *a: client.calls.append(a) or []
+        client.download_url = lambda *a, **k: client.calls.append(a)
+        delivery = idl.PveNestedDelivery(client, "carrier1", Logger())
+        with self.assertRaises(ValueError):
+            delivery.ensure_iso("local", "pve-9.2-auto.iso", "http://fw.example/x.iso", None)
+        self.assertEqual(client.calls, [])
+
+    def test_ensure_iso_passes_checksum_to_the_pull(self):
+        seen = {}
+        client = types.SimpleNamespace(
+            storage_content=lambda *a: [],
+            download_url=lambda *a, **k: seen.update(k) or "local:iso/pve-9.2-auto.iso",
+        )
+        log = Logger()
+        idl.PveNestedDelivery(client, "carrier1", log).ensure_iso(
+            "local", "pve-9.2-auto.iso", "http://fw.example/x.iso", "b" * 64, "sha256")
+        self.assertEqual(seen["checksum"], "b" * 64)
+        self.assertEqual(seen["checksum_algorithm"], "sha256")
+        self.assertTrue(any("sha256-verified" in m for _, m in log.records))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

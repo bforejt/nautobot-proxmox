@@ -24,6 +24,7 @@ refusal. A hand-built worked example using all of them is in
 | VNF interface names | Must match the platform's NIC rule — `ubuntu-jumphost`: exactly one interface named **`eth0`**; `paloalto-panos`: **`mgmt`** plus **`ethernet1/1`…`ethernet1/N`** contiguous from 1, and any other interface name is refused (all with pinned MACs) |
 | VNF Status to deploy | **Planned** (deploy flips it to **Active**; decommission reverses) |
 | `software_version` | Set on the device, and its status must be **Active** (Staged is refused — that's the promotion gate) |
+| Image checksum | The version's `SoftwareImageFile` carries **`image_file_checksum`** (+ `hashing_algorithm`, default `sha256`). Deploy, Ingest Image and the nested install path **refuse** a record without one — the node-side `download-url` pull is only verified when a checksum is passed, and a pulled file is reused by filename afterwards. `Register Image from Published Set` (and the answer service's media forge) always set it |
 | Sizing CFs | `vcpus`, `memory_mb`, `disk_gb` all set on the VNF device (PA-VM: `disk_gb=60` — the image's own virtual size; a too-small value deploys at image size with a warning, never shrinks) |
 | Hypervisor linkage | A **Hosted On** relationship from the hypervisor to the VNF |
 | Hypervisor record | `primary_ip4` set (API endpoint); CFs `vm_bridge`, `vm_storage`, `import_storage` set (optional `mgmt_bridge` for two-bridge hosts; for PA deploys `import_storage` must also allow **ISO** content — the bootstrap CD lives there) |
