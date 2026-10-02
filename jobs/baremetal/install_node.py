@@ -29,6 +29,7 @@ from ..lib.answer_service import (
     fetch_info,
     profile_feature_keys,
 )
+from ..lib.bmc_identity import BmcIdentityError, verify_bmc_identity
 from ..lib.install_delivery import (
     DeliveryError,
     PveNestedDelivery,
@@ -233,6 +234,13 @@ class InstallProxmoxNode(Job):
             f"URLs only — publish the prepared ISO accordingly (got {image.download_url})",
         )
         redfish = RedfishDiscovery(bmc_ip=bmc_ip, username=username, password=password)
+        # Identity before ANY write: the xcc IP must lead to THIS machine, or
+        # the RAID/media/boot/power steps below would act on another server.
+        try:
+            bmc_serial = verify_bmc_identity(redfish, device.name, device.serial, bmc_ip)
+        except BmcIdentityError as exc:
+            raise ContractViolation(f"BMC identity check refused: {exc}")
+        self.logger.info("BMC at %s reports serial %s = %s", bmc_ip, bmc_serial, device.name)
         # Out-of-band RAID layout (profile `storage`, decision #50): the
         # adapter must present the boot/data virtual drives before the
         # installer boots. Creates what is missing, keeps what exists, powers
@@ -249,6 +257,15 @@ class InstallProxmoxNode(Job):
             )
             for warning in summary["warnings"]:
                 self.logger.warning("%s", warning)
+            # The profile pins the boot disk by SCSI target 0: with any other
+            # volume there, the installer would wipe it (the data volume).
+            if not summary.get("boot_is_first"):
+                raise ContractViolation(
+                    "Storage layout refused: the boot volume is not the adapter's first "
+                    "virtual drive — the profile's ID_PATH target-0 pin would install onto "
+                    "another volume. Re-create the volumes in profile order (boot first; "
+                    "the layout step never deletes) and re-run"
+                )
         mount = RedfishVmediaDelivery(redfish, self.logger).boot_installer(image.download_url)
         # Remember the mount so a confirmed install can eject it — otherwise
         # stale media accumulates on the EXT slots across installs.
@@ -297,6 +314,16 @@ class InstallProxmoxNode(Job):
         image = self._resolve_image(device)
         profile = load_profile(device.device_type.model)
         self._preflight_answer_service(device, profile)
+        # Static installs: the answer service refuses to guess the mgmt NIC
+        # (decision #52) — catch the missing MAC here, before a boot cycle.
+        _require(
+            device.primary_ip4 is None
+            or (profile.get("install") or {}).get("network_source", "from-answer") != "from-answer"
+            or self._mgmt_mac(device),
+            f"{device.name} installs static (primary_ip4 {device.primary_ip4}) but the "
+            "interface carrying it has no MAC address — pin the mgmt interface MAC so "
+            "the answer's NIC filter is exact (the answer service refuses otherwise)",
+        )
         method = profile["delivery"].get("method")
 
         try:

@@ -42,8 +42,8 @@ runbooks: [docs/baremetal-install.md](../../docs/baremetal-install.md).
 |---|---|
 | `install.filesystem`, `install.lvm` / `.zfs` / `.btrfs` | `[disk-setup]` filesystem and its option family (`lvm.*` for ext4/xfs) |
 | `install.disk_filter`, `install.filter_match` | udev-property globs selecting the installer's target disk(s); `any` (default) / `all` |
-| `install.network_source` | `from-answer` (static from `primary_ip4` + DefaultGW; NIC filter from the pinned mgmt MAC) or `from-dhcp` |
-| `install.interface_name_pinning` | PVE ≥ 9.1 name pinning; Device interfaces with a MAC supply the Linux names, the rest get `nic<N>` (decision #51) |
+| `install.network_source` | `from-answer` (static from `primary_ip4` + DefaultGW; NIC filter from the pinned mgmt MAC — **required**: no pinned MAC, or one the installer did not report, is a 409 refusal) or `from-dhcp` |
+| `install.interface_name_pinning` | PVE ≥ 9.1 name pinning; Device interfaces with a MAC supply the Linux names (transliterated to the Linux rule, e.g. `OCP-1` → `ocp_1`), the rest get `nic<N>` (decisions #51, #52) |
 | `install.reboot_mode` | `reboot` / `power-off` after install |
 | `install.data_pool` | Firstboot: ZFS mirror over the largest unused disk pair → zfspool storage (JBOD boxes) |
 | `install.data_volume` | Firstboot: LVM-thin on the largest unused disk → lvmthin storage (RAID-adapter boxes, e.g. the SE455 V3's data volume) |
