@@ -42,7 +42,8 @@ class IngestImage(Job):
 
         token_id, token_secret = resolve_proxmox_credentials(hypervisor)
         client = ProxmoxClient(
-            host=str(hypervisor.primary_ip4.address.ip), token_id=token_id, token_secret=token_secret
+            host=str(hypervisor.primary_ip4.address.ip), token_id=token_id, token_secret=token_secret,
+            logger=self.logger,
         )
         volid = client.ensure_image(
             hypervisor.name, str(import_storage), image_file.image_file_name,

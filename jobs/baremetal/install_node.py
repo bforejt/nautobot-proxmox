@@ -152,7 +152,7 @@ class InstallProxmoxNode(Job):
         token_id, token_secret = resolve_proxmox_credentials(carrier)
         client = ProxmoxClient(
             host=str(carrier.primary_ip4.address.ip),
-            token_id=token_id, token_secret=token_secret,
+            token_id=token_id, token_secret=token_secret, logger=self.logger,
         )
         delivery = PveNestedDelivery(client, carrier.name, self.logger)
         vm_cfg = profile["delivery"].get("vm", {})

@@ -11,6 +11,7 @@ No Nautobot imports — testable standalone, same separation as the other libs.
 
 from __future__ import annotations
 
+import logging
 import time
 import urllib.parse
 from dataclasses import dataclass, field
@@ -27,6 +28,35 @@ class ProxmoxTaskError(ProxmoxError):
     pass
 
 
+_log = logging.getLogger(__name__)
+
+
+def task_exit_outcome(exitstatus: Any) -> tuple[bool, int]:
+    """Classify a stopped PVE task's `exitstatus` -> (succeeded, warning_count).
+
+    PVE (pve-common RESTEnvironment fork_worker) ends a task that completed
+    but emitted log_warn() lines with `TASK WARNINGS: <n>` and exit code 0,
+    so its exitstatus is "WARNINGS: <n>" -- a success, not a failure. Only
+    "OK" and "WARNINGS..." are successes; anything else (an error message,
+    "unexpected status", an empty/missing value) is a failure. A "WARNINGS"
+    status whose count does not parse is still a success, reported as at
+    least one warning so it is never silently dropped.
+    """
+    if not isinstance(exitstatus, str):
+        return False, 0
+    status = exitstatus.strip()
+    if status == "OK":
+        return True, 0
+    if status.startswith("WARNINGS"):
+        _, _, tail = status.partition(":")
+        try:
+            count = int(tail.strip())
+        except ValueError:
+            count = 1
+        return True, max(count, 1)
+    return False, 0
+
+
 @dataclass
 class ProxmoxClient:
     host: str
@@ -35,6 +65,7 @@ class ProxmoxClient:
     port: int = 8006
     verify_tls: bool = False
     timeout: int = 60
+    logger: Any = None   # job logger (self.logger) so task warnings reach the JobResult
 
     def __post_init__(self) -> None:
         self.base_url = f"https://{self.host}:{self.port}/api2/json"
@@ -67,14 +98,24 @@ class ProxmoxClient:
     # ---------- tasks ----------
 
     def wait_task(self, node: str, upid: str, timeout: int = 600, poll: int = 3) -> None:
-        """Block until the task finishes; raise ProxmoxTaskError on failure."""
+        """Block until the task finishes; raise ProxmoxTaskError on failure.
+
+        A task that finished with warnings ("WARNINGS: n") succeeded; the
+        count is logged at warning level (see task_exit_outcome)."""
         waited = 0
         while waited <= timeout:
             status = self.get(f"/nodes/{node}/tasks/{urllib.parse.quote(upid, safe='')}/status")
             if status.get("status") == "stopped":
                 exitstatus = status.get("exitstatus", "")
-                if exitstatus != "OK":
+                ok, warnings = task_exit_outcome(exitstatus)
+                if not ok:
                     raise ProxmoxTaskError(f"Task {upid} failed: {exitstatus}")
+                if warnings:
+                    (self.logger or _log).warning(
+                        "Proxmox task %s on %s succeeded with %d warning(s) - "
+                        "see the task log on the node (Tasks panel) for the WARN lines",
+                        upid, node, warnings,
+                    )
                 return
             time.sleep(poll)
             waited += poll

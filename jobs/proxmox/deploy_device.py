@@ -377,7 +377,8 @@ class DeployVnfDevice(Job):
         pa_payload = self._pa_render_payload(device, mgmt_ip) if day0 == "pa-bootstrap" else None
 
         token_id, token_secret = resolve_proxmox_credentials(hyp)
-        client = ProxmoxClient(host=str(api_host.address.ip), token_id=token_id, token_secret=token_secret)
+        client = ProxmoxClient(host=str(api_host.address.ip), token_id=token_id, token_secret=token_secret,
+                               logger=self.logger)
 
         # Idempotency / collision checks against reality
         existing = [v for v in client.list_vms(node) if v.get("name") == device.name]
