@@ -231,7 +231,9 @@ Users reach the jump host at the **desktop/console, never SSH** (team,
   passes it as Proxmox `cipassword`; Proxmox hashes it before storing (verified:
   `$5$` SHA-256), so plaintext only transits the TLS API call, never at rest,
   never in job logs/inputs. Deploy **refuses** (ContractViolation) if a
-  cloud-init platform has no console password Secret — no un-loginable desktop.
+  cloud-init platform has no `console_user` CF or no console password Secret —
+  no un-loginable desktop. Both resolve in preflight, before the image pull or
+  VM create, so the refusal leaves nothing on the node to roll back.
 - **Verified mechanism**: `ciuser`+`cipassword` makes Proxmox emit
   `user: <u>` + `password:` + `users: [default]`, so cloud-init builds the
   baked default_user (groups preserved) and set_passwords unlocks it

@@ -385,9 +385,28 @@ class DeployVnfDevice(Job):
             vcpus, memory_mb, disk_gb, machine, len(nics), ipconfig0,
         )
 
-        # PA day-0 payload renders BEFORE anything touches the node — a
-        # contract/secret refusal must cost nothing (no image pull first).
+        # Day-0 inputs resolve BEFORE anything touches the node — a
+        # contract/secret refusal must cost nothing (no image pull, no VM
+        # create, no rollback): the PA payload renders here, and the
+        # cloud-init console login (user CF + password Secret) resolves here
+        # too; the ci block is only applied after create_vm.
         pa_payload = self._pa_render_payload(device, mgmt_ip) if day0 == "pa-bootstrap" else None
+        ci = None
+        if day0 == "native-cloudinit":
+            # Console login: username from the platform CF (ciuser overrides
+            # only the NAME — the template's baked default_user groups/sudo
+            # still apply), password from the fleet Secret.
+            console_user = _require(platform.cf.get("console_user"), f"console_user on platform {platform.name}")
+            ci = {
+                "ipconfig0": ipconfig0,
+                "ciuser": console_user,
+                "cipassword": self._secret_value(  # never logged
+                    CONSOLE_PASSWORD_SECRET, "Cloud-init platform needs the fleet console password"
+                ),
+            }
+            if ssh_pubkeys:
+                ci["sshkeys"] = ProxmoxClient.encode_sshkeys(str(ssh_pubkeys))
+            self.logger.info("Console login: user %r, password from Secret %r", console_user, CONSOLE_PASSWORD_SECRET)
 
         token_id, token_secret = resolve_proxmox_credentials(hyp)
         client = ProxmoxClient(host=str(api_host.address.ip), token_id=token_id, token_secret=token_secret,
@@ -478,19 +497,7 @@ class DeployVnfDevice(Job):
                     "(set disk_gb to match the image)", disk_gb, current_gb,
                 )
 
-            if day0 == "native-cloudinit":
-                ci = {"ipconfig0": ipconfig0}
-                # Console login: username from the platform CF (ciuser overrides
-                # only the NAME — the template's baked default_user groups/sudo
-                # still apply), password from the fleet Secret.
-                console_user = _require(platform.cf.get("console_user"), f"console_user on platform {platform.name}")
-                ci["ciuser"] = console_user
-                ci["cipassword"] = self._secret_value(  # never logged
-                    CONSOLE_PASSWORD_SECRET, "Cloud-init platform needs the fleet console password"
-                )
-                self.logger.info("Console login: user %r, password from Secret %r", console_user, CONSOLE_PASSWORD_SECRET)
-                if ssh_pubkeys:
-                    ci["sshkeys"] = ProxmoxClient.encode_sshkeys(str(ssh_pubkeys))
+            if ci is not None:  # native-cloudinit; resolved in preflight
                 client.set_vm_config(node, vmid, ci)
             # pa-bootstrap: NO ci block at all — ipconfig/ciuser/sshkeys are
             # cloud-init semantics and PAN-OS reads none of them.
