@@ -160,7 +160,7 @@ This is the exact shape proven live in the dev lab. Prerequisite: a
 | Device type | `ThinkSystem SE350` or `ThinkEdge SE455 V3` (both bootstrap-created; any type works for a lab box) |
 | Interface | `mgmt` (type Virtual) with the node's management IP assigned, set as the device's **primary IPv4** — this is the API endpoint |
 | CF `vm_bridge` | `vmbr0` (SE350 standard: `vmbr1`) |
-| CF `vm_storage` | `local-lvm` (an SE455 V3 installed by the bare-metal loop: `datastore`, the firstboot-created LVM-thin storage) |
+| CF `vm_storage` | `local-lvm` (an SE455 V3 installed by the bare-metal loop: `DataDrive`, the firstboot-created LVM-thin storage) |
 | CF `import_storage` | `local` — a storage with the **Import** content type enabled |
 | CF `secrets_group` | name of its SecretsGroup, or empty to use the global Secrets (step 3) |
 

@@ -70,18 +70,18 @@ a BIOS-policy skeleton for it; what remains is the on-unit verification pass.
   selection, not a udev guess: the layout step sorts the adapter's
   unconfigured drives by `CapacityBytes`, takes the two smallest for `boot`
   (created first → the adapter's first VD) and the two largest for
-  `datastore`, refusing on unequal or ambiguous sizes. In Linux the boot VD is
+  `DataDrive`, refusing on unequal or ambiguous sizes. In Linux the boot VD is
   then `ID_PATH pci-...-scsi-0:2:0:0` (megaraid_sas exposes VDs as SCSI
   targets on channel 2, target = VD number), which the profile pins. The
   installer's identity POST carries no disk data
   (`proxmox-auto-installer/src/sysinfo.rs`), so the answer service itself
   cannot pick disks — the pin plus the layout step's ordering guarantee do.
-- **Data volume**: created at firstboot as LVM-thin (`datastore/data`) on the
+- **Data volume**: created at firstboot as LVM-thin (`big-vg/big-lv`) on the
   largest unused, signature-free whole disk — the data VD — and registered
-  as the lvmthin storage `datastore` (images, rootdir). A volume group of
+  as the lvmthin storage `DataDrive` (images, rootdir). A volume group of
   that name found on disk (reinstall) is reused, not rebuilt, and registered
   only if it holds the thin pool `data` (else firstboot logs why). The node's
-  `vm_storage` CF becomes `datastore`; `import_storage` stays `local`.
+  `vm_storage` CF becomes `DataDrive`; `import_storage` stays `local`.
   (Boxes without an adapter keep the ZFS alternative: `install.data_pool`.)
 - **Networking**: no onboard LOM. OCP 3.0 SFF slot (PCIe 5.0 x16) takes
   Broadcom 5719/57416/57412/57414/57504/57508 or Intel I350/X710/E810 adapters;
@@ -140,9 +140,9 @@ the old way (mirror sets made in UEFI) settled the assumptions above:
 - **Data VD carried LVM** (`ID_FS_TYPE=LVM2_member`) on the hand-built unit —
   the same shape the firstboot `data_volume` step produces. On such units
   the step leaves the signature alone; it registers storage only when the
-  volume group is named `datastore` **and** holds the thin pool `data`
+  volume group is named `big-vg` **and** holds the thin pool `big-lv`
   (rename or recreate to converge; a VG without that pool is logged as
-  `thin pool datastore/data missing — ... NOT registered`).
+  `thin pool big-vg/big-lv missing — ... NOT registered`).
 - **NICs**: four Broadcom BCM5719 1GbE ports (`tg3`, `pci-0000:01:00.0-3`),
   an Intel E810-XXV-2 OCP 3.0 25GbE pair
   (`ice`, `pci-0000:41:00.0/1`), and — notably — the **XCC's USB
@@ -166,7 +166,7 @@ the old way (mirror sets made in UEFI) settled the assumptions above:
 | Piece | Where | Note |
 |---|---|---|
 | DeviceType `ThinkEdge SE455 V3` (Lenovo, 2U) | `jobs/design/bootstrap_schema.py` | Model string = profile key |
-| Install profile | `bmc/profiles/thinkedge-se455-v3.yaml` | `storage` section (boot/datastore RAID1 by capacity), ext4 boot pinned by `ID_PATH *-scsi-0:2:0:0`, `data_volume` (LVM-thin) for the data VD, `redfish-vmedia`, http+https ISO URLs |
+| Install profile | `bmc/profiles/thinkedge-se455-v3.yaml` | `storage` section (boot/DataDrive RAID1 by capacity), ext4 boot pinned by `ID_PATH *-scsi-0:2:0:0`, `data_volume` (LVM-thin) for the data VD, `redfish-vmedia`, http+https ISO URLs |
 | Out-of-band RAID layout | `jobs/lib/storage_layout.py`, `jobs/baremetal/apply_storage_layout.py`, install job step | spec parsing, capacity-based drive planning (refuses on ambiguity), keep-by-name, power-on into UEFI Setup, Redfish volume create + wait; dry-run job; unit tests in `tests/test_storage_layout.py` |
 | Answer file `filter-match` | `answer.toml.j2`, `app.py` | profile `install.filter_match` (any/all) |
 | Firstboot data storage step | `firstboot.sh.j2`, `app.py` | `install.data_volume` (LVM-thin on the data VD, VG reused on reinstall) or `install.data_pool` (ZFS mirror for JBOD boxes); both run after the credentials phone-home and refuse on ambiguity |
@@ -181,10 +181,10 @@ the old way (mirror sets made in UEFI) settled the assumptions above:
 ```
 RAID 540-8i / 940-8i (XCC2 Redfish, created by the install job before the installer boots)
   VD 0 "boot"      RAID1  480G  ← the two smallest unconfigured drives, created first
-  VD 1 "datastore" RAID1  1.92T ← the two largest
+  VD 1 "DataDrive" RAID1  1.92T ← the two largest
 Linux (megaraid_sas):
   /dev/sda  ID_PATH pci-…-scsi-0:2:0:0  → installer: ext4 + LVM-thin (local, local-lvm)   [profile disk_filter]
-  /dev/sdb  ID_PATH pci-…-scsi-0:2:1:0  → firstboot: VG datastore / thin pool data → lvmthin storage "datastore" = vm_storage
+  /dev/sdb  ID_PATH pci-…-scsi-0:2:1:0  → firstboot: VG big-vg / thin pool big-lv → lvmthin storage "DataDrive" = vm_storage
 ```
 
 Why hardware RAID and not ZFS here: the adapter is present anyway, the team's
@@ -235,7 +235,7 @@ proxmox-fetch-answer http > /run/automatic-installer-answers   # re-fetch by han
   order on a clean adapter).
 - Units whose volumes were made by hand: the step adopts them by role
   (RAID1 over the two smallest → `boot`, over the two largest →
-  `datastore`) — confirm against a real hand-built unit's Redfish view that
+  `DataDrive`) — confirm against a real hand-built unit's Redfish view that
   the drive links and RAIDType read as expected.
 - The firstboot LVM-thin step on the data VD, and the reinstall path reusing
   the volume group.

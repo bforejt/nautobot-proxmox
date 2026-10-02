@@ -27,7 +27,7 @@ storage:
       raid: RAID1
       select: smallest        # the two smallest unconfigured drives, equal-sized
       count: 2
-    - name: datastore
+    - name: DataDrive        # the fleet's data-storage name, same on the adapter, in PVE and in Nautobot
       raid: RAID1
       select: largest
       count: 2
@@ -56,12 +56,15 @@ install:
   # ordering, so pvesm works) on the largest unused signature-free whole disk.
   # A volume group of this name found on disk (reinstall) is reused, never
   # rebuilt, and registered only if it holds `thinpool` (else firstboot logs
-  # "thin pool ... missing — ... NOT registered"). Set the node's vm_storage CF to `datastore`; import_storage stays
+  # "thin pool ... missing — ... NOT registered"). Set the node's vm_storage CF to `DataDrive`; import_storage stays
   # `local` (the root LV carries the directory storage for iso/import/backup).
+  # Fleet convention (decision #54): storage id `DataDrive`, VG `big-vg`, thin
+  # pool `big-lv` — the names the hand-built units already carry, so a reinstall
+  # of one of them reuses its volume group and keeps the VM disks.
   data_volume:
-    vg: datastore
-    thinpool: data
-    pve_storage: datastore
+    vg: big-vg
+    thinpool: big-lv
+    pve_storage: DataDrive
     select: unused-largest
     min_size_gib: 1000
 

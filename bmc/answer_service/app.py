@@ -408,7 +408,9 @@ def load_profile(device_type_model: str) -> dict:
     return yaml.safe_load(path.read_text())
 
 
-_POOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,31}$")
+# PVE storage ids, LVM VG/LV names and ZFS pool names: a letter, then letters,
+# digits, "_", "." or "-" (upper case allowed — the fleet storage is `DataDrive`).
+_POOL_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,31}$")
 
 
 def filter_match_for(install: dict) -> str:
@@ -434,7 +436,7 @@ def data_pool_spec(install: dict) -> dict | None:
     raid = str(spec.get("raid") or "mirror")
     select = str(spec.get("select") or "unused-largest")
     if not (_POOL_NAME_RE.match(name) and _POOL_NAME_RE.match(storage)):
-        raise HTTPException(500, "profile install.data_pool name/pve_storage must be a plain lowercase identifier")
+        raise HTTPException(500, "profile install.data_pool name/pve_storage must be a plain identifier (letter first; letters, digits, _ . -)")
     if raid != "mirror":
         raise HTTPException(500, f"profile install.data_pool.raid: only 'mirror' is supported (got {raid!r})")
     if select != "unused-largest":
@@ -473,7 +475,7 @@ def data_volume_spec(install: dict) -> dict | None:
     select = str(spec.get("select") or "unused-largest")
     for value in (vg, thinpool, storage):
         if not _POOL_NAME_RE.match(value):
-            raise HTTPException(500, "profile install.data_volume vg/thinpool/pve_storage must be plain lowercase identifiers")
+            raise HTTPException(500, "profile install.data_volume vg/thinpool/pve_storage must be plain identifiers (letter first; letters, digits, _ . -)")
     if select != "unused-largest":
         raise HTTPException(500, f"profile install.data_volume.select: only 'unused-largest' is supported (got {select!r})")
     try:

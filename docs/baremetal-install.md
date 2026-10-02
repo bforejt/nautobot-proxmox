@@ -256,7 +256,7 @@ automation grows: the unit's four SATA SSDs sit behind a ThinkSystem RAID
 in UEFI are now **created out-of-band by the install job** from the profile's
 `storage` section (decision #50 — `Apply Storage Layout` does the same on its
 own, dry-run first). Boot VD: ext4 + LVM-thin as everywhere (#27); data VD:
-LVM-thin `datastore` at firstboot. See "Disk layout" below and
+LVM-thin `DataDrive` at firstboot. See "Disk layout" below and
 [research/se455-v3-platform-notes.md](research/se455-v3-platform-notes.md).
 
 Other vendors (iDRAC/iLO/Supermicro) = a new profile + at most a small vmedia
@@ -373,14 +373,14 @@ a warning — the node, not the worker, is what must reach the service.
    (failed or foreign) or whose Redfish state is not `Enabled` is never used
    for a new volume: replace it, or clear/import its foreign config, first. Drives already `Online` in
    admin-made volumes are fine: the step **adopts** a RAID1 over the two
-   smallest drives as `boot` and one over the two largest as `datastore`
+   smallest drives as `boot` and one over the two largest as `DataDrive`
    whatever the adapter calls them (Lenovo defaults are `VD_0`/`VD_1`);
    other shapes (a RAID10 over all four, a lone RAID1 over the big pair
    with the small pair also in use) make it refuse.
 2. **Device record**: DeviceType **ThinkEdge SE455 V3** (bootstrap-created),
    role NFV, the XCC-reported serial, `provisioning_state=awaiting_install`,
    `software_version` = the Active prepared ISO, CFs `vm_bridge`,
-   **`vm_storage=datastore`** (the firstboot-created LVM-thin storage),
+   **`vm_storage=DataDrive`** (the firstboot-created LVM-thin storage),
    `import_storage=local`; interface `xcc` with the BMC IP; `mgmt` interface
    with `primary_ip4` and the OCP mgmt port's **MAC pinned** (no onboard NIC
    on this box — the NIC filter is the only thing naming the port, and with
@@ -389,7 +389,7 @@ a warning — the node, not the worker, is what must reach the service.
    names for them too, otherwise they come up as `nic<N>`).
 3. **Storage layout dry run**: `Apply Storage Layout (SoT-driven)` with the
    default dry run prints the plan (`create boot RAID1` over the two 480 GB
-   drives, `create datastore RAID1` over the 1.92 TB pair) without touching
+   drives, `create DataDrive RAID1` over the 1.92 TB pair) without touching
    the adapter. Untick dry run + Confirm to create them now, or let the
    install job do it as its first step — same code, same rules.
 4. **Confirm the boot pin the first time**: the profile selects the boot VD
@@ -405,10 +405,10 @@ a warning — the node, not the worker, is what must reach the service.
    layout ensured (host powered on into UEFI Setup if it was off) → EXT mount
    (XCC2 also takes https URLs) → one-shot CD → `ANSWERED` (source static, fs
    ext4) → install onto the boot VD → webhook → reboot → firstboot: service
-   account, credentials phone-home, then **LVM-thin `datastore/data` on the
-   data VD** + `pvesm add lvmthin datastore` (an existing volume group is
+   account, credentials phone-home, then **LVM-thin `big-vg/big-lv` on the
+   data VD** + `pvesm add lvmthin DataDrive` (an existing volume group is
    reused on reinstall, and registered only if it holds the thin pool `data`). Check `journalctl -u proxmox-first-boot` for the
-   `data volume datastore/data created` / `PVE storage datastore registered`
+   `data volume big-vg/big-lv created` / `PVE storage DataDrive registered`
    lines, then `pvesm status`.
 
 ## Preparing media from Nautobot (the media forge)
@@ -646,13 +646,13 @@ storage:
   controller: "RAID_*"        # Storage member Id glob (Lenovo: RAID_Slot<n>)
   volumes:                    # creation order = VD target order
     - {name: boot,      raid: RAID1, select: smallest, count: 2}
-    - {name: datastore, raid: RAID1, select: largest,  count: 2}
+    - {name: DataDrive, raid: RAID1, select: largest,  count: 2}
 ```
 
 | Piece | What it is |
 |---|---|
 | **`boot`** — RAID1 over the two smallest unconfigured drives, created first | The adapter's first VD (SCSI target 0 → `ID_PATH *-scsi-0:2:0:0`, the profile's boot filter). The installer lays ext4 + LVM-thin on it exactly as on the SE350: `local` (iso/import/backup) and `local-lvm` |
-| **`datastore`** — RAID1 over the two largest unconfigured drives | The data VD. The firstboot hook (`install.data_volume`) makes it VG `datastore` with thin pool `data` and registers the lvmthin storage **`datastore`** (images, rootdir) — the contract's `vm_storage=datastore` |
+| **`DataDrive`** — RAID1 over the two largest unconfigured drives | The data VD. The firstboot hook (`install.data_volume`) makes it VG `big-vg` with thin pool `big-lv` and registers the lvmthin storage **`DataDrive`** (images, rootdir) — the contract's `vm_storage=DataDrive` |
 
 Rules the layout step enforces: the picked drives must be equal-sized and the
 pick unambiguous (a third drive of the same size refuses); volumes that exist
@@ -701,8 +701,8 @@ install.
 | `Storage layout refused: ... JBOD` / `only N free` | The RAID adapter's drives are not `Unconfigured good` (JBOD, hot spare, or already in a volume of the wrong shape). Convert JBOD drives once in the XCC storage page or UEFI; a volume the step cannot adopt (wrong RAID level or drive set) must be deleted by hand — the step never deletes |
 | `Storage layout refused: ... drive(s) are bad or disabled and never used: [...]` (after `only N free` or `free drives differ in size`) | A drive the plan needs is `Unconfigured bad` (failed, or carries a foreign config) or its Redfish `Status.State` is not `Enabled`; the step never builds a volume on it. Replace the drive, or clear/import the foreign config in the XCC storage page or UEFI so it reads `Unconfigured good`, then re-run |
 | `Storage layout refused: volume '…': free drive(s) [...] report no capacity (adapter still enumerating?) — capacity unknown, refusing to pick drives; re-run in a minute` (or `free or adoptable drive(s)`) | The XCC listed the drives but has not reported their `CapacityBytes` yet — typical right after the step powered the host on. Sizing them as 0 would make large drives the "smallest" pair and mirror them as `boot`, so nothing was created. Wait a minute and re-run (the host is now on, so the step reads the inventory directly). If it persists, check the drives on the XCC storage page: a drive that never reports a size must be reseated or replaced |
-| `datastore` storage missing on a hand-built unit | Its data VD already carries an LVM signature: firstboot creates nothing on a signed disk and registers storage only when **both** names match the profile — VG `datastore` **and** thin pool `data` (`datastore/data`). A differently named VG is not touched (`vgrename` it, then see the next row if its pool is not `data`), or wipe the VD (`wipefs -a`, data loss) before installing |
-| Firstboot log `data volume datastore: volume group present but thin pool datastore/data missing — PVE storage datastore NOT registered; ...` | The reused VG `datastore` has no thin pool `data`: a hand-built unit whose pool has another name, or a reinstall after a fresh unit's `lvcreate` failed (the empty VG is then reused on every install). Firstboot never creates or renames anything on a reused VG. On the node: `lvs datastore`; rename an existing pool (`lvrename datastore <pool> data`) or create one (`lvcreate -l 98%FREE --thinpool data datastore`), then `pvesm add lvmthin datastore --vgname datastore --thinpool data --content images,rootdir`. Or wipe the VG (data loss) and reinstall |
+| `DataDrive` storage missing on a hand-built unit | Its data VD already carries an LVM signature: firstboot creates nothing on a signed disk and registers storage only when **both** names match the profile — VG `big-vg` **and** thin pool `big-lv` (`big-vg/big-lv`). A differently named VG is not touched (`vgrename` it, then see the next row if its pool is not `data`), or wipe the VD (`wipefs -a`, data loss) before installing |
+| Firstboot log `data volume big-vg: volume group present but thin pool big-vg/big-lv missing — PVE storage DataDrive NOT registered; ...` | The reused VG `big-vg` has no thin pool `big-lv`: a hand-built unit whose pool has another name, or a reinstall after a fresh unit's `lvcreate` failed (the empty VG is then reused on every install). Firstboot never creates or renames anything on a reused VG. On the node: `lvs big-vg`; rename an existing pool (`lvrename big-vg <pool> big-lv`) or create one (`lvcreate -l 98%FREE --thinpool big-lv big-vg`), then `pvesm add lvmthin DataDrive --vgname big-vg --thinpool big-lv --content images,rootdir`. Or wipe the VG (data loss) and reinstall |
 | Install job: `Storage layout refused: the boot volume is not the adapter's first virtual drive` (Apply Storage Layout: `boot volume … is not the adapter's first VD` + `Install Proxmox Node will REFUSE this unit`) | The volumes were created by hand in the other order; the profile's `ID_PATH *-scsi-0:2:0:0` pin would select the data VD and the installer would wipe it. Back up anything on the data VD, delete both volumes by hand (XCC storage page or UEFI — the step never deletes), and re-run: the step re-creates `boot` first |
 | `Storage layout refused: volume 'boot': existing volume … would be adopted, but other drives share its smallest size … — ambiguous role, refusing` | Hand-made mirrors over equal-sized drives: nothing says which one is `boot`. Rename the intended boot VD to `boot` (matched by name first) or delete and let the step create them |
 | `BMC identity check refused: the BMC at … belongs to serial '…', but <node>'s serial is '…'` / `reports no system serial` / `could not read the system serial` | The Device's `xcc` IP leads to another machine (or the Device's serial is wrong): fix the record — the discovery job reports the BMC's serial. A BMC that reports no serial, or cannot be read, is refused too; nothing was written to it |
@@ -712,10 +712,10 @@ install.
 | Install job: `Device name '…' is not a valid hostname label` / log `REFUSED: Device name '…' (serial …) is not a valid hostname label` (installer: `409 device name is not a valid hostname label`) | The Device name becomes the node's hostname (`<name>.<DOMAIN>` in the answer's `fqdn`), so it must be one DNS label: letters, digits and hyphens, 1-63 chars, no leading/trailing hyphen, not all digits (no spaces, dots or underscores). Rename the Device and re-run — nothing was booted or rendered |
 | Install job / Apply Storage Layout: `<node> has role '…', not 'NFV' — refusing to boot an installer` (`… refusing to touch its RAID adapter`) | The job was given a Device without the `NFV` role — usually an API submission (the form's dropdown only lists NFV-role Devices, but the REST API accepts any Device pk). The role is checked first, so nothing was read from or done to the BMC. If the Device really is an install target, assign it the `NFV` role and re-run; otherwise fix the submitted pk (a production host with a stray `awaiting_install` state would otherwise have been reset into the installer) |
 | Installer: `500 profile install.… must be …` at answer fetch | The DeviceType profile's `data_pool` / `data_volume` / `filter_match` is invalid; it is now checked before the installer runs (it used to fail at firstboot). Fix the profile and rebuild the answer service |
-| `datastore` storage missing after an SE455 V3 install | `journalctl -u proxmox-first-boot` on the node: the data-volume step logs why it refused (no unused signature-free disk at the largest size, LVM error, or a reused volume group without the thin pool `data` — see the `thin pool datastore/data missing` row). A reused volume group from a previous install is expected and logged |
+| `DataDrive` storage missing after an SE455 V3 install | `journalctl -u proxmox-first-boot` on the node: the data-volume step logs why it refused (no unused signature-free disk at the largest size, LVM error, or a reused volume group without the thin pool `big-lv` — see the `thin pool big-vg/big-lv missing` row). A reused volume group from a previous install is expected and logged |
 | Installer fails with `duplicate interface name mapping` or `interface name ... is invalid` | The pinning mapping rendered from Nautobot clashed (two interfaces with the same name, or a name the installer's `pve-iface` rule rejects). The answer service transliterates names to the Linux rule and skips what still clashes with a log line before rendering; if the installer still complains, check the `ANSWERED ... names=` log line against the Device's interfaces |
 | A port came up as `nic<N>` although its Nautobot interface records the MAC | Answer-service log: `pin name … is already used` (two Nautobot names transliterate to the same Linux name — first wins), `squats the installer's default nic<N> namespace`, or `is not a valid Linux/pve-iface name` (shorter than 2 chars after transliteration). Rename the interface in Nautobot |
-| Host Verification: `FAIL: §4 data-pool preflight — data pool '…': the largest remaining disk(s) are not unused and signature-free — /dev/… carries …` (or `§4 data-volume preflight — data volume '…': …`) | The intended data disk(s) carry partitions/holders, a filesystem / `zfs_member` / `LVM2_member` signature or a partition table — firstboot would skip the data step and the node would come up without its `datastore` storage. The job lists what each disk carries (and logs every disk's `signature=` / `partition-table=` in the inventory). A pool or VG of the **profile's** name is fine (imported / reused, the check PASSes with `already exists on …`): a differently named one is not — `zpool export` + `zpool import <old> datastore`, or `vgrename <old> datastore` (then see the thin-pool row above). Otherwise wipe the disk (`wipefs -a`, plus `sgdisk --zap-all` for a partition table — data loss) only if it is truly spare. An `LVM2_member` disk whose VG is not shown may be an inactive VG on a non-root login: `pvs` on the node names it |
+| Host Verification: `FAIL: §4 data-pool preflight — data pool '…': the largest remaining disk(s) are not unused and signature-free — /dev/… carries …` (or `§4 data-volume preflight — data volume '…': …`) | The intended data disk(s) carry partitions/holders, a filesystem / `zfs_member` / `LVM2_member` signature or a partition table — firstboot would skip the data step and the node would come up without its `DataDrive` storage. The job lists what each disk carries (and logs every disk's `signature=` / `partition-table=` in the inventory). A pool or VG of the **profile's** name is fine (imported / reused, the check PASSes with `already exists on …`): a differently named one is not — `zpool export` + `zpool import <old> datastore`, or `vgrename <old> big-vg` (then see the thin-pool row above). Otherwise wipe the disk (`wipefs -a`, plus `sgdisk --zap-all` for a partition table — data loss) only if it is truly spare. An `LVM2_member` disk whose VG is not shown may be an inactive VG on a non-root login: `pvs` on the node names it |
 | Host Verification: `FAIL: §5 DMI serial vs SoT — could not read DMI product_serial` | Almost always a non-root login: `/sys/class/dmi/id/product_serial` is readable by root only, and the job never invokes sudo, so a sudo-capable user still fails here. Point the `host_ssh_username` / `host_ssh_password` Secrets at the node's **root** login (Proxmox VE permits root SSH by default). If it fails as root, the firmware exposes no serial — fix that in the BMC/UEFI before installing, since the installer POSTs this value to the answer service |
 | `datastore` pool missing after a JBOD (ZFS) install | `journalctl -u proxmox-first-boot` on the node: the data-pool step logs why it refused (fewer/more than `count` equal-sized unused disks, or leftover signatures — `wipefs -a` the intended data disks by hand only if they are truly spare, then `zpool create` + `pvesm add zfspool` per the profile) |
 | `500 root password hash not provisioned` in the log | `secrets/root_password_hash` missing/empty — composer's `./setup.sh` generates it when the answer-service profile is enabled (re-run it), or create manually: `openssl passwd -6 > secrets/root_password_hash` |

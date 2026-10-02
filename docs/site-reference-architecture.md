@@ -207,7 +207,7 @@ design. Where a function has no equivalent, the reason is given.
 - Successor units are **ThinkEdge SE455 V3** (AMD EPYC 8004, XCC2, RAID 540-8i with
   2 × 480 GB + 2 × 1.92 TB SATA SSDs, E810 25G OCP + Broadcom 1G ports). Their
   differences live in the per-DeviceType profile, not in the jobs: two RAID1 volumes
-  created out-of-band at install (decision #50), `datastore` LVM-thin as `vm_storage`,
+  created out-of-band at install (decision #50), `DataDrive` LVM-thin as `vm_storage`,
   MAC-pinned interface names from the SoT (#51), no built-in serial port (COM bracket
   or XCC2 SOL). See [research/se455-v3-platform-notes.md](research/se455-v3-platform-notes.md);
   the per-node sizing policy below applies unchanged (core counts differ per SKU).
