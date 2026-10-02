@@ -3,6 +3,9 @@
 Unit tests for jobs/lib/proxmox_client.py task-completion handling: a PVE
 task that finished with "WARNINGS: <n>" succeeded (exit code 0) and must not
 be treated as a failure (deploy would roll back a VM that started fine).
+Also: transport errors / 5xx / non-JSON bodies surface as ProxmoxError
+(ProxmoxUnreachableError) so the jobs' best-effort guards catch them, and
+wait_task tolerates a few consecutive failed status polls.
 Stdlib-only; `requests` is stubbed (the client only needs it at construction)
 and the API is a canned fake -- no network.
 
@@ -27,7 +30,15 @@ if "requests" not in sys.modules:
                 self.headers = {}
                 self.verify = True
 
+        class _RequestException(IOError):
+            pass
+
+        class _ConnectionError(_RequestException):
+            pass
+
         stub.Session = _Session
+        stub.RequestException = _RequestException
+        stub.ConnectionError = _ConnectionError
         stub.packages = types.SimpleNamespace(
             urllib3=types.SimpleNamespace(disable_warnings=lambda *a, **k: None))
         sys.modules["requests"] = stub
@@ -103,6 +114,175 @@ class WaitTask(unittest.TestCase):
         with mock.patch.object(pc.time, "sleep"):
             with self.assertRaises(pc.ProxmoxTaskError):
                 c.wait_task("pve1", UPID, timeout=3, poll=1)
+
+
+SECRET = "s3cr3t-token-value"
+
+
+class FakeResponse:
+    def __init__(self, status_code=200, body=None, text=None, bad_json=False):
+        self.status_code = status_code
+        self._body = body
+        self._bad_json = bad_json
+        self.text = text if text is not None else ("<html>proxy error</html>" if bad_json else "")
+
+    def json(self):
+        if self._bad_json:
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+        return self._body
+
+
+class FakeSession:
+    """Stands in for requests.Session: replays canned responses/exceptions."""
+
+    def __init__(self, *outcomes):
+        self.outcomes = list(outcomes)
+        self.headers = {}
+        self.calls = []
+
+    def _next(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        out = self.outcomes.pop(0)
+        if isinstance(out, BaseException):
+            raise out
+        return out
+
+    request = _next
+    post = _next
+
+
+def client_with_session(*outcomes, logger=None):
+    c = pc.ProxmoxClient(host="192.0.2.10", token_id="svc@pve!t", token_secret=SECRET, logger=logger)
+    c.session = FakeSession(*outcomes)
+    return c
+
+
+class RequestErrorMapping(unittest.TestCase):
+    def test_ok_unwraps_data(self):
+        c = client_with_session(FakeResponse(body={"data": {"release": "9.2"}}))
+        self.assertEqual(c.version(), {"release": "9.2"})
+
+    def test_transport_error_is_proxmox_error(self):
+        c = client_with_session(pc.requests.ConnectionError("Connection refused"))
+        with self.assertRaises(pc.ProxmoxError) as cm:
+            c.list_vms("pve1")
+        self.assertIsInstance(cm.exception, pc.ProxmoxUnreachableError)
+        msg = str(cm.exception)
+        self.assertIn("GET /nodes/pve1/qemu", msg)
+        self.assertIn("transport error", msg)
+        self.assertNotIn(SECRET, msg)
+
+    def test_5xx_is_unreachable(self):
+        for code in (500, 502, 596):
+            with self.subTest(code=code):
+                c = client_with_session(FakeResponse(code, text="Connection refused (596)"))
+                with self.assertRaises(pc.ProxmoxUnreachableError):
+                    c.get("/version")
+
+    def test_4xx_is_plain_proxmox_error(self):
+        c = client_with_session(FakeResponse(403, text="Permission check failed"))
+        with self.assertRaises(pc.ProxmoxError) as cm:
+            c.get("/version")
+        self.assertNotIsInstance(cm.exception, pc.ProxmoxUnreachableError)
+        self.assertIn("403", str(cm.exception))
+
+    def test_non_json_body_is_proxmox_error(self):
+        c = client_with_session(FakeResponse(200, bad_json=True))
+        with self.assertRaises(pc.ProxmoxUnreachableError) as cm:
+            c.get("/version")
+        self.assertIn("not JSON", str(cm.exception))
+
+    def test_json_without_envelope_is_proxmox_error(self):
+        c = client_with_session(FakeResponse(200, body=["not", "an", "envelope"]))
+        with self.assertRaises(pc.ProxmoxUnreachableError):
+            c.get("/version")
+
+    def test_upload_transport_error_is_proxmox_error(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".iso") as fh:
+            c = client_with_session(pc.requests.ConnectionError("reset by peer"))
+            with self.assertRaises(pc.ProxmoxUnreachableError) as cm:
+                c.upload_file("pve1", "local", fh.name, filename="x.iso")
+        self.assertIn("upload x.iso", str(cm.exception))
+
+    def test_upload_non_json_is_proxmox_error(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".iso") as fh:
+            c = client_with_session(FakeResponse(200, bad_json=True))
+            with self.assertRaises(pc.ProxmoxUnreachableError):
+                c.upload_file("pve1", "local", fh.name, filename="x.iso")
+
+
+def unreachable(n=1):
+    return [pc.ProxmoxUnreachableError("GET /nodes/pve1/tasks/... -> 596: proxy restart")] * n
+
+
+class WaitTaskTransientPolls(unittest.TestCase):
+    def setUp(self):
+        self.sleeps = []
+        patcher = mock.patch.object(pc.time, "sleep", side_effect=self.sleeps.append)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def client(self, side_effect, logger=None):
+        c = pc.ProxmoxClient(host="192.0.2.10", token_id="svc@pve!t", token_secret="x",
+                             logger=logger or RecordingLogger())
+        c.get = mock.Mock(side_effect=side_effect)
+        return c
+
+    def test_tolerates_four_failures_then_succeeds(self):
+        log = RecordingLogger()
+        c = self.client(unreachable(4) + [{"status": "stopped", "exitstatus": "OK"}], log)
+        c.wait_task("pve1", UPID, timeout=900, poll=5)
+        self.assertEqual(c.get.call_count, 5)
+        self.assertEqual(len(log.warnings), 4)
+        self.assertIn("status poll failed (1/5 consecutive)", log.warnings[0])
+        self.assertIn("(4/5 consecutive)", log.warnings[3])
+
+    def test_fifth_consecutive_failure_raises_lost_contact(self):
+        c = self.client(unreachable(5) + [{"status": "stopped", "exitstatus": "OK"}])
+        with self.assertRaises(pc.ProxmoxUnreachableError) as cm:
+            c.wait_task("pve1", UPID, timeout=900, poll=5)
+        self.assertNotIsInstance(cm.exception, pc.ProxmoxTaskError)
+        self.assertIsInstance(cm.exception, pc.ProxmoxError)
+        self.assertIn("Lost contact with task", str(cm.exception))
+        self.assertIn("may still be running", str(cm.exception))
+        self.assertEqual(c.get.call_count, 5)
+
+    def test_successful_poll_resets_counter(self):
+        running = {"status": "running"}
+        c = self.client(unreachable(4) + [running] + unreachable(4)
+                        + [{"status": "stopped", "exitstatus": "OK"}])
+        c.wait_task("pve1", UPID, timeout=900, poll=5)
+        self.assertEqual(c.get.call_count, 10)
+
+    def test_backoff_grows_and_is_capped(self):
+        c = self.client(unreachable(4) + [{"status": "stopped", "exitstatus": "OK"}])
+        c.wait_task("pve1", UPID, timeout=900, poll=10)
+        self.assertEqual(self.sleeps, [10, 20, 30, 30])
+
+    def test_4xx_poll_error_raises_at_once(self):
+        c = self.client([pc.ProxmoxError("GET ... -> 403: Permission check failed")])
+        with self.assertRaises(pc.ProxmoxError):
+            c.wait_task("pve1", UPID, timeout=900, poll=5)
+        self.assertEqual(c.get.call_count, 1)
+
+    def test_non_object_status_counts_as_failed_poll(self):
+        c = self.client([None, {"status": "stopped", "exitstatus": "OK"}])
+        c.wait_task("pve1", UPID, timeout=900, poll=5)
+        self.assertEqual(c.get.call_count, 2)
+
+    def test_timeout_still_bounds_failing_polls(self):
+        c = self.client(unreachable(4))
+        with self.assertRaises(pc.ProxmoxTaskError) as cm:
+            c.wait_task("pve1", UPID, timeout=3, poll=1)
+        self.assertIn("did not finish within 3s", str(cm.exception))
+
+    def test_task_failure_after_transient_poll_is_task_error(self):
+        c = self.client(unreachable(1) + [{"status": "stopped", "exitstatus": "storage full"}])
+        with self.assertRaises(pc.ProxmoxTaskError) as cm:
+            c.wait_task("pve1", UPID, timeout=900, poll=5)
+        self.assertIn("failed: storage full", str(cm.exception))
 
 
 if __name__ == "__main__":
