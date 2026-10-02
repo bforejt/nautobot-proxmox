@@ -44,6 +44,57 @@ class DeliveryError(RuntimeError):
     """A delivery step failed or a profile is missing/invalid."""
 
 
+# The nested install VM's ownership marker. boot_installer() sets it; the
+# reinstall reconciliation (stale_install_vms) destroys a same-named VM only
+# when it carries this tag or sits at the Device's recorded vmid, so a VNF VM
+# (tagged nfv;sot-driven by the deploy job) that merely shares the Device's
+# name is never treated as the job's own.
+INSTALL_VM_TAG = "l0-lab"
+INSTALL_VM_TAGS = f"nfv;{INSTALL_VM_TAG}"
+
+
+def vm_tags(vm: dict) -> set[str]:
+    """A PVE VM's tags as a set (the API joins them with ';'; tolerate ','
+    and whitespace too)."""
+    return {t for t in re.split(r"[;,\s]+", str(vm.get("tags") or "").lower()) if t}
+
+
+def stale_install_vms(vms: list[dict], *, node: str, name: str, vmid: int,
+                      recorded_vmid=None) -> list[dict]:
+    """The carrier VMs a confirmed nested reinstall may destroy: those at
+    `vmid` or named `name`, each of which must be this job's install VM.
+
+    Fails closed (DeliveryError, before anything is destroyed) when the VM at
+    `vmid` has another name, or when a VM named `name` carries neither the
+    INSTALL_VM_TAG nor the Device's recorded vmid (`recorded_vmid`, the vmid
+    custom field) — a name match alone is not ownership: Device names are not
+    unique and VNF VMs are named after their Device too."""
+    stale = []
+    for vm in vms:
+        try:
+            this = int(vm.get("vmid", -1))
+        except (TypeError, ValueError):
+            continue
+        vm_name = vm.get("name")
+        if this != int(vmid) and vm_name != name:
+            continue
+        if vm_name != name:
+            raise DeliveryError(
+                f"VMID {vmid} on {node} belongs to {vm_name!r}, "
+                f"not {name} — refusing to touch it"
+            )
+        recorded = recorded_vmid is not None and str(recorded_vmid) == str(this)
+        if INSTALL_VM_TAG not in vm_tags(vm) and not recorded:
+            raise DeliveryError(
+                f"VM {this} on {node} is named {name} but is not this job's install "
+                f"VM (no '{INSTALL_VM_TAG}' tag, and the Device's vmid custom field is "
+                f"{recorded_vmid if recorded_vmid is not None else 'empty'}) — "
+                "refusing to destroy it"
+            )
+        stale.append(vm)
+    return stale
+
+
 def slugify(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
 
@@ -154,7 +205,7 @@ class PveNestedDelivery:
             "serial0": "socket",
             "onboot": 0,
             "smbios1": f"base64=1,serial={_b64(serial)}",
-            "tags": "nfv;l0-lab",
+            "tags": INSTALL_VM_TAGS,
         }
         self.logger.info("Creating nested install VM %s (%s) on %s", vmid, name, self.node)
         self.client.create_vm(self.node, params)

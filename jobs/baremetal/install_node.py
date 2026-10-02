@@ -40,6 +40,7 @@ from ..lib.install_delivery import (
     RedfishVmediaDelivery,
     load_profile,
     slugify,
+    stale_install_vms,
     watch_timeout_seconds,
 )
 from ..lib.nautobot_helpers import (
@@ -180,25 +181,30 @@ class InstallProxmoxNode(Job):
             iso_checksum,
             iso_algo,
         )
-        vmid = device.cf.get("vmid") or client.next_vmid()
+        recorded_vmid = device.cf.get("vmid")
+        vmid = recorded_vmid or client.next_vmid()
         # Reinstall reconciliation: confirm=True is an explicit reinstall
-        # gate, so a stale install VM under our vmid/name is removed — but a
-        # FOREIGN VM owning the vmid is a hard refusal, never collateral.
-        for vm in client.list_vms(carrier.name):
-            if int(vm.get("vmid", -1)) == int(vmid) or vm.get("name") == device.name:
-                _require(
-                    vm.get("name") == device.name,
-                    f"VMID {vmid} on {carrier.name} belongs to {vm.get('name')!r}, "
-                    f"not {device.name} — refusing to touch it",
-                )
-                self.logger.info(
-                    "Confirmed reinstall — destroying stale install VM %s (%s)",
-                    vm["vmid"], vm.get("name"),
-                )
-                if vm.get("status") == "running":
-                    client.stop_vm(carrier.name, int(vm["vmid"]))
-                client.destroy_vm(carrier.name, int(vm["vmid"]))
-                vmid = int(vm["vmid"])
+        # gate, so a stale install VM under our vmid/name is removed — but
+        # only one that is provably ours (l0-lab tag or the recorded vmid).
+        # A FOREIGN VM owning the vmid, or a same-named VM without that
+        # marker (a VNF VM named after another Device), is a hard refusal
+        # before anything is destroyed, never collateral.
+        try:
+            stale = stale_install_vms(
+                client.list_vms(carrier.name), node=carrier.name, name=device.name,
+                vmid=int(vmid), recorded_vmid=recorded_vmid,
+            )
+        except DeliveryError as exc:
+            raise ContractViolation(str(exc)) from exc
+        for vm in stale:
+            self.logger.info(
+                "Confirmed reinstall — destroying stale install VM %s (%s)",
+                vm["vmid"], vm.get("name"),
+            )
+            if vm.get("status") == "running":
+                client.stop_vm(carrier.name, int(vm["vmid"]))
+            client.destroy_vm(carrier.name, int(vm["vmid"]))
+            vmid = int(vm["vmid"])
         delivery.boot_installer(
             vmid=int(vmid),
             name=device.name,

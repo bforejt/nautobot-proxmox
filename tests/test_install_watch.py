@@ -2,7 +2,9 @@
 """
 Unit tests for the install job's state watch (F33): the per-delivery-method
 watch window (jobs/lib/install_delivery.watch_timeout_seconds) and the vmedia
-eject as soon as the webhook lands (jobs/baremetal/install_node.py).
+eject as soon as the webhook lands (jobs/baremetal/install_node.py), and
+the nested reinstall reconciliation (F36,
+jobs/lib/install_delivery.stale_install_vms).
 Stdlib-only: requests and the nautobot modules are stubbed, and the job
 package is loaded from its file paths.
 
@@ -261,6 +263,148 @@ class NestedIsoChecksumGuard(unittest.TestCase):
         self.assertEqual(seen["checksum"], "b" * 64)
         self.assertEqual(seen["checksum_algorithm"], "sha256")
         self.assertTrue(any("sha256-verified" in m for _, m in log.records))
+
+
+class StaleInstallVms(unittest.TestCase):
+    """F36: a confirmed nested reinstall destroys only the job's own install
+    VM (l0-lab tag or the Device's recorded vmid) — a VNF VM that merely
+    shares the Device's name is refused, never purged."""
+
+    def plan(self, vms, vmid=120, recorded=None):
+        return idl.stale_install_vms(vms, node="pve-lab", name="fw-01", vmid=vmid,
+                                     recorded_vmid=recorded)
+
+    def test_boot_installer_sets_the_marker_the_reconciliation_reads(self):
+        self.assertEqual(idl.INSTALL_VM_TAGS, "nfv;l0-lab")
+        self.assertIn(idl.INSTALL_VM_TAG, idl.vm_tags({"tags": idl.INSTALL_VM_TAGS}))
+
+    def test_vm_tags_parsing(self):
+        self.assertEqual(idl.vm_tags({"tags": "l0-lab;nfv"}), {"l0-lab", "nfv"})
+        self.assertEqual(idl.vm_tags({"tags": "nfv, L0-lab"}), {"l0-lab", "nfv"})
+        self.assertEqual(idl.vm_tags({}), set())
+        self.assertEqual(idl.vm_tags({"tags": None}), set())
+
+    def test_same_name_vnf_vm_is_refused(self):
+        vnf = {"vmid": 105, "name": "fw-01", "tags": "nfv;sot-driven", "status": "running"}
+        with self.assertRaises(idl.DeliveryError) as cm:
+            self.plan([vnf])
+        msg = str(cm.exception)
+        self.assertIn("VM 105 on pve-lab is named fw-01 but is not this job's install VM", msg)
+        self.assertIn("no 'l0-lab' tag", msg)
+        self.assertIn("vmid custom field is empty", msg)
+
+    def test_untagged_same_name_vm_at_another_vmid_than_recorded_is_refused(self):
+        with self.assertRaises(idl.DeliveryError) as cm:
+            self.plan([{"vmid": 105, "name": "fw-01"}], vmid=120, recorded=120)
+        self.assertIn("vmid custom field is 120", str(cm.exception))
+
+    def test_tagged_install_vm_is_stale(self):
+        vm = {"vmid": 120, "name": "fw-01", "tags": "l0-lab;nfv"}
+        self.assertEqual(self.plan([vm], recorded=120), [vm])
+        # tag alone suffices (the vmid CF was cleared)
+        vm2 = {"vmid": 130, "name": "fw-01", "tags": "nfv;l0-lab"}
+        self.assertEqual(self.plan([vm2], vmid=140), [vm2])
+
+    def test_untagged_vm_at_the_recorded_vmid_is_stale(self):
+        vm = {"vmid": 120, "name": "fw-01"}  # created before tags, or tags edited away
+        self.assertEqual(self.plan([vm], recorded=120), [vm])
+        self.assertEqual(self.plan([vm], recorded="120"), [vm])
+
+    def test_foreign_vm_at_our_vmid_is_refused(self):
+        with self.assertRaises(idl.DeliveryError) as cm:
+            self.plan([{"vmid": 120, "name": "db-01", "tags": "l0-lab"}], recorded=120)
+        self.assertIn("VMID 120 on pve-lab belongs to 'db-01', not fw-01", str(cm.exception))
+
+    def test_refusal_comes_before_any_stale_vm_is_returned(self):
+        ours = {"vmid": 120, "name": "fw-01", "tags": "nfv;l0-lab"}
+        vnf = {"vmid": 105, "name": "fw-01", "tags": "nfv;sot-driven"}
+        with self.assertRaises(idl.DeliveryError):
+            self.plan([ours, vnf], recorded=120)
+
+    def test_unrelated_vms_are_ignored(self):
+        self.assertEqual(self.plan([{"vmid": 101, "name": "other"}, {"name": "x"}]), [])
+
+
+class NestedReinstallReconcile(unittest.TestCase):
+    """_install_nested refuses a same-named VNF VM before stopping or
+    destroying anything on the carrier."""
+
+    IMAGE = types.SimpleNamespace(
+        image_file_name="pve-9.2-auto.iso", download_url="http://fw.example/pve-9.2-auto.iso",
+        image_file_checksum="a" * 64, hashing_algorithm="sha256",
+    )
+
+    def run_nested(self, vms, recorded=None):
+        self.calls = calls = []
+
+        class Client:
+            def __init__(self, **kwargs):
+                pass
+
+            def next_vmid(self):
+                return 140
+
+            def list_vms(self, node):
+                return vms
+
+            def stop_vm(self, node, vmid):
+                calls.append(("stop", vmid))
+
+            def destroy_vm(self, node, vmid):
+                calls.append(("destroy", vmid))
+
+        class Delivery:
+            def __init__(self, *a):
+                pass
+
+            def ensure_iso(self, *a):
+                return "local:iso/pve-9.2-auto.iso"
+
+            def boot_installer(self, **kw):
+                calls.append(("boot", kw["vmid"]))
+                raise RuntimeError("stop here")
+
+        carrier = types.SimpleNamespace(
+            name="pve-lab", cf={"vm_storage": "local-lvm"},
+            primary_ip4=types.SimpleNamespace(address=types.SimpleNamespace(ip="192.0.2.10")),
+        )
+        device = types.SimpleNamespace(name="fw-01", serial="NESTED-1", cf={"vmid": recorded})
+        patches = {
+            "resolve_hypervisor": lambda d: carrier,
+            "resolve_proxmox_credentials": lambda c: ("t@pve!x", "s"),
+            "ProxmoxClient": Client,
+            "PveNestedDelivery": Delivery,
+        }
+        orig = {k: getattr(inode, k) for k in patches}
+        for k, v in patches.items():
+            setattr(inode, k, v)
+        job = inode.InstallProxmoxNode()
+        job.logger = Logger()
+        job._mgmt_mac = lambda d: None
+        try:
+            job._install_nested(device, profile("pve-nested"), self.IMAGE)
+        finally:
+            for k, v in orig.items():
+                setattr(inode, k, v)
+        return calls
+
+    def test_vnf_vm_with_the_device_name_is_refused_untouched(self):
+        vnf = {"vmid": 105, "name": "fw-01", "tags": "nfv;sot-driven", "status": "running"}
+        with self.assertRaises(inode.ContractViolation) as cm:
+            self.run_nested([vnf])
+        self.assertIn("is not this job's install VM", str(cm.exception))
+        self.assertEqual(self.calls, [])
+
+    def test_own_install_vm_is_destroyed_and_its_vmid_reused(self):
+        ours = {"vmid": 120, "name": "fw-01", "tags": "nfv;l0-lab", "status": "running"}
+        with self.assertRaisesRegex(RuntimeError, "stop here"):
+            self.run_nested([ours], recorded=120)
+        self.assertEqual(self.calls, [("stop", 120), ("destroy", 120), ("boot", 120)])
+
+    def test_fresh_install_takes_next_vmid(self):
+        with self.assertRaisesRegex(RuntimeError, "stop here"):
+            self.run_nested([{"vmid": 101, "name": "other", "tags": "nfv;sot-driven"}])
+        self.assertEqual(self.calls, [("boot", 140)])
 
 
 if __name__ == "__main__":
