@@ -681,7 +681,13 @@ the largest unused signature-free pair and registers it as a zfspool storage,
 importing a same-named pool on reinstall. The hook runs **after** the
 credentials phone-home, so a storage problem can never cost the node its
 token. The host-verification job's "§4 data-pool preflight" / "§4 data-volume
-preflight" evaluate the same rules from the host side.
+preflight" evaluate the same rules from the host side: they PASS when a
+pool / volume group of the profile's name already sits on the non-boot disks
+(firstboot imports / reuses it), and otherwise FAIL unless the largest
+remaining non-removable disk(s) are unused and signature-free — no
+partitions or holders, no filesystem / `zfs_member` / `LVM2_member` signature,
+no partition table — so a layout firstboot would skip is caught before the
+install.
 
 ## Troubleshooting
 
@@ -709,6 +715,7 @@ preflight" evaluate the same rules from the host side.
 | `datastore` storage missing after an SE455 V3 install | `journalctl -u proxmox-first-boot` on the node: the data-volume step logs why it refused (no unused signature-free disk at the largest size, LVM error, or a reused volume group without the thin pool `data` — see the `thin pool datastore/data missing` row). A reused volume group from a previous install is expected and logged |
 | Installer fails with `duplicate interface name mapping` or `interface name ... is invalid` | The pinning mapping rendered from Nautobot clashed (two interfaces with the same name, or a name the installer's `pve-iface` rule rejects). The answer service transliterates names to the Linux rule and skips what still clashes with a log line before rendering; if the installer still complains, check the `ANSWERED ... names=` log line against the Device's interfaces |
 | A port came up as `nic<N>` although its Nautobot interface records the MAC | Answer-service log: `pin name … is already used` (two Nautobot names transliterate to the same Linux name — first wins), `squats the installer's default nic<N> namespace`, or `is not a valid Linux/pve-iface name` (shorter than 2 chars after transliteration). Rename the interface in Nautobot |
+| Host Verification: `FAIL: §4 data-pool preflight — data pool '…': the largest remaining disk(s) are not unused and signature-free — /dev/… carries …` (or `§4 data-volume preflight — data volume '…': …`) | The intended data disk(s) carry partitions/holders, a filesystem / `zfs_member` / `LVM2_member` signature or a partition table — firstboot would skip the data step and the node would come up without its `datastore` storage. The job lists what each disk carries (and logs every disk's `signature=` / `partition-table=` in the inventory). A pool or VG of the **profile's** name is fine (imported / reused, the check PASSes with `already exists on …`): a differently named one is not — `zpool export` + `zpool import <old> datastore`, or `vgrename <old> datastore` (then see the thin-pool row above). Otherwise wipe the disk (`wipefs -a`, plus `sgdisk --zap-all` for a partition table — data loss) only if it is truly spare. An `LVM2_member` disk whose VG is not shown may be an inactive VG on a non-root login: `pvs` on the node names it |
 | `datastore` pool missing after a JBOD (ZFS) install | `journalctl -u proxmox-first-boot` on the node: the data-pool step logs why it refused (fewer/more than `count` equal-sized unused disks, or leftover signatures — `wipefs -a` the intended data disks by hand only if they are truly spare, then `zpool create` + `pvesm add zfspool` per the profile) |
 | `500 root password hash not provisioned` in the log | `secrets/root_password_hash` missing/empty — composer's `./setup.sh` generates it when the answer-service profile is enabled (re-run it), or create manually: `openssl passwd -6 > secrets/root_password_hash` |
 | Install job result: `installer delivered; state machine incomplete within the N-min watch window (webhook=…, credentials=…)` | The job stopped *watching*; the install itself carries on. `webhook=pending`: check the answer-service log for the `ANSWERED` line and the node's console — a vmedia install that is merely slow will still flip `bm_installed` on its own; re-check the Device's `provisioning_state` later. If the unit routinely needs more than the window, set `delivery.watch_timeout_seconds` in its profile. `credentials=pending` only: see "No credentials after first boot" below |
