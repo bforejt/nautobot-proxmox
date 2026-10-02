@@ -184,6 +184,62 @@ class Plan(unittest.TestCase):
         with self.assertRaises(sl.StorageLayoutError):
             sl.plan_volumes(self.spec, drives, volumes)
 
+    def _unsized(self, n, size_bytes):
+        d = drive(n, 0)
+        d["capacity_bytes"] = size_bytes
+        return d
+
+    def test_unreported_capacity_refuses_instead_of_sizing_as_zero(self):
+        # F27: two 1.92 TB drives still enumerating (CapacityBytes null / 0 /
+        # junk) must not sort as the "smallest" pair and become `boot`.
+        for missing in (None, 0, -1, "n/a"):
+            drives = [drive(0, 480), self._unsized(1, missing), drive(2, 480), self._unsized(3, missing)]
+            with self.assertRaises(sl.StorageLayoutError, msg=repr(missing)) as ctx:
+                sl.plan_volumes(self.spec, drives, [])
+            msg = str(ctx.exception)
+            self.assertIn("capacity unknown", msg)
+            self.assertIn("['Disk.1', 'Disk.3']", msg)
+            self.assertIn("'boot'", msg)
+
+    def test_missing_capacity_key_refuses(self):
+        drives = four_drives()
+        del drives[3]["capacity_bytes"]
+        with self.assertRaises(sl.StorageLayoutError) as ctx:
+            sl.plan_volumes(self.spec, drives, [])
+        self.assertIn("Disk.3", str(ctx.exception))
+
+    def test_unsized_drive_ignored_when_no_capacity_rule_runs(self):
+        # Both volumes exist by name: no pick happens, so a spare unsized
+        # drive does not block a reinstall.
+        drives = [drive(0, 480, "Online", [f"{CTRL}/Volumes/1"]), drive(2, 480, "Online", [f"{CTRL}/Volumes/1"]),
+                  drive(1, 1920, "Online", [f"{CTRL}/Volumes/2"]), drive(3, 1920, "Online", [f"{CTRL}/Volumes/2"]),
+                  self._unsized(4, None)]
+        volumes = [
+            {"path": f"{CTRL}/Volumes/1", "id": "1", "name": "boot", "raid_type": "RAID1",
+             "drives": [f"{CTRL}/Drives/Disk.0", f"{CTRL}/Drives/Disk.2"], "capacity_bytes": 480 * GB},
+            {"path": f"{CTRL}/Volumes/2", "id": "2", "name": "datastore", "raid_type": "RAID1",
+             "drives": [f"{CTRL}/Drives/Disk.1", f"{CTRL}/Drives/Disk.3"], "capacity_bytes": 1920 * GB},
+        ]
+        plan = sl.plan_volumes(self.spec, drives, volumes)
+        self.assertEqual([p["action"] for p in plan], ["keep", "keep"])
+
+    def test_adoption_refuses_unsized_member_drive(self):
+        # Hand-made mirrors whose 1.92 TB members are not sized yet would
+        # otherwise be weighed as 0 bytes and the data VD adopted as `boot`.
+        drives = [drive(0, 480, "Online", [f"{CTRL}/Volumes/1"]), drive(2, 480, "Online", [f"{CTRL}/Volumes/1"]),
+                  self._unsized(1, None), self._unsized(3, None)]
+        for d in drives[2:]:
+            d["status"], d["volumes"] = "Online", [f"{CTRL}/Volumes/2"]
+        volumes = [
+            {"path": f"{CTRL}/Volumes/2", "id": "2", "name": "VD_1", "raid_type": "RAID1",
+             "drives": [f"{CTRL}/Drives/Disk.1", f"{CTRL}/Drives/Disk.3"], "capacity_bytes": None},
+            {"path": f"{CTRL}/Volumes/1", "id": "1", "name": "VD_0", "raid_type": "RAID1",
+             "drives": [f"{CTRL}/Drives/Disk.0", f"{CTRL}/Drives/Disk.2"], "capacity_bytes": 480 * GB},
+        ]
+        with self.assertRaises(sl.StorageLayoutError) as ctx:
+            sl.plan_volumes(self.spec, drives, volumes)
+        self.assertIn("capacity unknown", str(ctx.exception))
+
 
 class FakeRedfish:
     """Records write calls; volumes appear after create_volume."""
@@ -253,6 +309,14 @@ class Apply(unittest.TestCase):
         self.assertIn(("set_boot_once", "BiosSetup"), rf.calls)
         self.assertIn(("power_action", "On"), rf.calls)
         self.assertEqual(len([c for c in rf.calls if c[0] == "create_volume"]), 2)
+
+    def test_unsized_drives_create_nothing(self):
+        drives = four_drives()
+        drives[1]["capacity_bytes"] = drives[3]["capacity_bytes"] = None
+        rf = FakeRedfish(drives)
+        with self.assertRaises(sl.StorageLayoutError):
+            sl.apply_storage_layout(rf, self.spec, self.logger, sleep=lambda s: None)
+        self.assertEqual([c for c in rf.calls if c[0] == "create_volume"], [])
 
     def test_dry_run_plans_only(self):
         rf = FakeRedfish(four_drives())
