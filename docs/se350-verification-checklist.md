@@ -111,7 +111,7 @@ install on that hardware revision.
 > 88SE9230 adapters (`05:00.0` boot, `66:00.0` data, `65:00.0` with no
 > volume) — the ID_PATH pin stays unique regardless. Inputs: the host's IP (+ optionally its
 > Nautobot Device for the serial cross-check); Secrets `host_ssh_username`
-> / `host_ssh_password`. It evaluates the profile's disk filter with the
+> / `host_ssh_password` (a root login — the job does not use sudo). It evaluates the profile's disk filter with the
 > same glob semantics the installer uses and fails loudly on no-match or
 > ambiguity.
 

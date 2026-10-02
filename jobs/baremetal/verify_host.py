@@ -26,7 +26,9 @@ of the verification checklist in one pass:
       disable check), cpufreq governor, core count.
 
 Credentials come from Nautobot Secrets named ``host_ssh_username`` /
-``host_ssh_password`` (root or sudo-capable). All commands are READ-ONLY.
+``host_ssh_password``, which must be a ROOT login: the job never invokes
+sudo, and some reads are root-only (/sys/class/dmi/id/product_serial is mode
+0400, so a non-root login FAILs §5). All commands are READ-ONLY.
 Uses paramiko (present in the composer stack via the device-onboarding /
 Nornir dependency chain); host keys are auto-accepted — lab tooling.
 """
@@ -151,7 +153,8 @@ class VerifySe350Host(Job):
             "disk inventory + install disk-filter validation with the installer's "
             "matching rules (checklist §4), data-pool preflight, DMI serial vs "
             "Nautobot (§5), firmware LLDP flags on i40e/ice (§6), Secure Boot state (§9), "
-            "BIOS-effect readbacks. Secrets: host_ssh_username/host_ssh_password."
+            "BIOS-effect readbacks. Secrets: host_ssh_username/host_ssh_password "
+            "(a root login — the job does not use sudo)."
         )
         has_sensitive_variables = False
         soft_time_limit = 300

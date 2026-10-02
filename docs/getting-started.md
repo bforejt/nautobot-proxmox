@@ -42,8 +42,10 @@ nautobot-composer stack, one `./add-secret.sh <name>` per credential
 - `xcc_username` / `xcc_password` — Lenovo XCC login for the physical nodes
   (SE350 / SE455 V3): platform discovery, out-of-band storage layout, and
   vmedia install delivery.
-- `host_ssh_username` / `host_ssh_password` — root (or sudo-capable) login
-  the `SE350 Host Verification (SSH)` job uses against a Linux-booted unit.
+- `host_ssh_username` / `host_ssh_password` — the **root** login the
+  `SE350 Host Verification (SSH)` job uses against a Linux-booted unit. A
+  sudo-capable non-root user is not enough: the job never invokes sudo, and
+  its DMI serial read (`/sys/class/dmi/id/product_serial`) is root-only.
 - `pa_admin_password` — PA-VM admin password (REQUIRED before a PA deploy;
   it ships in bootstrap.xml as a hash so firewalls never come up admin/admin).
 - `pa_authcode` — optional BYOL auth code; leave valueless for unlicensed
