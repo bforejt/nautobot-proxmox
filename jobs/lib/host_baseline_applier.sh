@@ -29,6 +29,9 @@ nfv_paths() {
   : "${NFV_REALM_PW_DIR:=/etc/pve/priv/realm}"
   : "${NFV_IFACES:=/etc/network/interfaces}"
   : "${NFV_RUN_DIR:=/run/nfv-baseline}"
+  : "${NFV_DMI_SERIAL:=/sys/class/dmi/id/product_serial}"
+  : "${NFV_SYSNET:=/sys/class/net}"
+  : "${NFV_BONDING:=/proc/net/bonding}"
 }
 
 nfv_init() {
@@ -42,6 +45,14 @@ nfv_init() {
     nfv_emit init root failed "the applier must run as root (host_ssh_username must be root)"
     exit 1
   fi
+}
+
+nfv_step_paths() {  # read-only: the files and directories this applier works on
+  local name
+  for name in NFV_SNMPD_CONF NFV_SNMP_PERSIST NFV_STATE_DIR NFV_REALM_PW_DIR NFV_IFACES NFV_RUN_DIR \
+              NFV_DMI_SERIAL NFV_SYSNET NFV_BONDING; do
+    nfv_emit paths "$name" info "${!name}"
+  done
 }
 
 # ---- output ------------------------------------------------------------
@@ -135,15 +146,15 @@ nfv_raw() {  # nfv_raw ITEM argv... — stdout of a read-only command, base64, w
 
 nfv_step_observe() {  # inputs: OBS_PKGS (array), OBS_REALM (may be empty)
   nfv_raw identity.hostname hostname
-  nfv_raw identity.serial cat /sys/class/dmi/id/product_serial
+  nfv_raw identity.serial cat "$NFV_DMI_SERIAL"
   nfv_raw identity.uid id -u
   nfv_raw pve.version pveversion
   nfv_raw packages dpkg-query -W -f='${Package} ${db:Status-Abbrev}\n' "${OBS_PKGS[@]}"
   nfv_raw net.interfaces cat "$NFV_IFACES"
   nfv_raw net.pending sh -c 'if [ -e "$1" ]; then echo present; else echo absent; fi' sh "$NFV_IFACES.new"
   nfv_raw net.links ip -o link show
-  nfv_raw net.physical sh -c 'for d in /sys/class/net/*; do [ -e "$d/device" ] && echo "${d##*/}"; done; true'
-  nfv_raw net.bonding sh -c 'for f in /proc/net/bonding/*; do [ -e "$f" ] || continue; echo "=== ${f##*/}"; cat "$f"; done; true'
+  nfv_raw net.physical sh -c 'for d in "$1"/*; do [ -e "$d/device" ] && echo "${d##*/}"; done; true' sh "$NFV_SYSNET"
+  nfv_raw net.bonding sh -c 'for f in "$1"/*; do [ -e "$f" ] || continue; echo "=== ${f##*/}"; cat "$f"; done; true' sh "$NFV_BONDING"
   nfv_raw boot.cmdline cat /proc/cmdline
   nfv_raw pve.realms pvesh get /access/domains --output-format json
   if [ -n "${OBS_REALM:-}" ]; then
@@ -186,9 +197,9 @@ nfv_step_packages() {  # inputs: PKGS (array)
     case "$status" in ii*) ;; *) missing+=("$p") ;; esac
   done
   if [ "${#missing[@]}" -eq 0 ]; then
-    nfv_emit packages installed ok "present: ${PKGS[*]}"
+    nfv_emit packages packages ok "present: ${PKGS[*]}"
   elif nfv_dry; then
-    nfv_emit packages installed would_change "would install: ${missing[*]}"
+    nfv_emit packages packages would_change "would install: ${missing[*]}"
   else
     out=$(DEBIAN_FRONTEND=noninteractive apt-get update -q 2>&1 </dev/null)
     rc=$?
@@ -197,10 +208,10 @@ nfv_step_packages() {  # inputs: PKGS (array)
           -o Dpkg::Options::=--force-confold "${missing[@]}" 2>&1 </dev/null)
     rc=$?
     if [ "$rc" -ne 0 ]; then
-      nfv_emit packages installed failed "apt-get install ${missing[*]} rc=$rc: $(nfv_tail "$out")"
+      nfv_emit packages packages failed "apt-get install ${missing[*]} rc=$rc: $(nfv_tail "$out")"
       return 1
     fi
-    nfv_emit packages installed changed "installed: ${missing[*]}"
+    nfv_emit packages packages changed "installed: ${missing[*]}"
   fi
   nfv_service_enabled packages lldpd
 }
@@ -526,26 +537,27 @@ nfv_step_network_apply() {  # inputs: NEW_IFACES ROLLBACK_SECONDS NET_TS
   nfv_emit network apply changed "ifreload -a applied the SoT render (previous file: $bak); the job must reconnect and cancel $unit.timer"
 }
 
-nfv_step_network_confirm() {  # inputs: NET_UNIT NET_MARKER — from a NEW session on the management IP
-  if [ -e "$NET_MARKER" ]; then
-    nfv_emit network confirm failed "the rollback already ran ($NET_MARKER) — the previous configuration is back"
+nfv_step_network_confirm() {  # inputs: NET_TS (the apply's) — from a NEW session on the management IP
+  local unit="nfv-baseline-net-rollback-$NET_TS" marker="$NFV_RUN_DIR/net-rollback-$NET_TS.done"
+  if [ -e "$marker" ]; then
+    nfv_emit network confirm failed "the rollback already ran ($marker) — the previous configuration is back"
     return 1
   fi
-  systemctl stop "$NET_UNIT.timer" >/dev/null 2>&1 </dev/null
-  if [ -e "$NET_MARKER" ] || systemctl is-active --quiet "$NET_UNIT.service" 2>/dev/null; then
+  systemctl stop "$unit.timer" >/dev/null 2>&1 </dev/null
+  if [ -e "$marker" ] || systemctl is-active --quiet "$unit.service" 2>/dev/null; then
     nfv_emit network confirm failed "the rollback fired while confirming — the previous configuration is (being) restored"
     return 1
   fi
-  if systemctl is-active --quiet "$NET_UNIT.timer" 2>/dev/null; then
-    nfv_emit network confirm failed "could not stop $NET_UNIT.timer — it will restore the previous file"
+  if systemctl is-active --quiet "$unit.timer" 2>/dev/null; then
+    nfv_emit network confirm failed "could not stop $unit.timer — it will restore the previous file"
     return 1
   fi
-  nfv_emit network confirm changed "reconnected on the management IP; $NET_UNIT.timer cancelled"
+  nfv_emit network confirm changed "reconnected on the management IP; $unit.timer cancelled"
 }
 
 nfv_step_network_state() {  # read-only: the applied file, /proc/net/bonding and the links now
   nfv_raw net.interfaces cat "$NFV_IFACES"
-  nfv_raw net.bonding sh -c 'for f in /proc/net/bonding/*; do [ -e "$f" ] || continue; echo "=== ${f##*/}"; cat "$f"; done; true'
+  nfv_raw net.bonding sh -c 'for f in "$1"/*; do [ -e "$f" ] || continue; echo "=== ${f##*/}"; cat "$f"; done; true' sh "$NFV_BONDING"
   nfv_raw net.links ip -o link show
   nfv_raw net.addr ip -o -4 addr show
 }

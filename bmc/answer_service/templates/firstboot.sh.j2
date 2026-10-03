@@ -391,7 +391,7 @@ nfv_zfs_arc() {
   if [ "$(cat /etc/modprobe.d/zfs.conf 2>/dev/null)" = "${want}" ]; then
     log "zfs arc: /etc/modprobe.d/zfs.conf already sets zfs_arc_max=${NFV_ARC_MAX}"
   else
-    printf '%s\n' "${want}" > /etc/modprobe.d/zfs.conf || return 1
+    mkdir -p /etc/modprobe.d && printf '%s\n' "${want}" > /etc/modprobe.d/zfs.conf || return 1
     log "zfs arc: /etc/modprobe.d/zfs.conf now sets zfs_arc_max=${NFV_ARC_MAX}"
     if update-initramfs -u -k all >/dev/null 2>&1; then
       log "zfs arc: initramfs updated"

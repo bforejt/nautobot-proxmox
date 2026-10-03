@@ -527,20 +527,21 @@ class HostBaseline(Job):
         if obs.get("net.pending", {}).get("text", "").strip() == "present":
             self._log("warning", "[7/%d] pending PVE GUI network changes exist in /etc/network/interfaces.new "
                       "— a non-dry run discards them", len(STEPS))
-        if self._dry or not diff:
+        if diff and self._dry:
+            # The running bonds cannot match a file that is not applied yet —
+            # their state is checked once the file is in sync.
+            self._step_line(7, "would change", "diff above; dry run — nothing staged")
+            return client
+        if not diff:
             errors, warnings = self._bond_check(ctx, plan, obs.get("net.bonding", {}).get("text", ""),
                                                 fail_on_errors=not self._dry)
-            if not diff:
-                status = "failed" if errors and not self._dry else ("warning" if errors or warnings else "ok")
-                self._step_line(7, status, "in sync with the SoT render"
-                                + (f"; {len(errors)} bond error(s)" if errors else "")
-                                + (f"; {len(warnings)} bond warning(s)" if warnings else ""))
-                if errors and not self._dry:
-                    raise StepFailed("the running bonds do not match the SoT although the file does — "
-                                     "see the bond-state errors (ifreload -a by hand, or check the NICs)")
-            else:
-                self._step_line(7, "would change", "diff above; dry run — nothing staged (running bond "
-                                f"state: {len(errors)} error(s), {len(warnings)} warning(s) vs the SoT)")
+            status = "failed" if errors and not self._dry else ("warning" if errors or warnings else "ok")
+            self._step_line(7, status, "in sync with the SoT render"
+                            + (f"; {len(errors)} bond error(s)" if errors else "")
+                            + (f"; {len(warnings)} bond warning(s)" if warnings else ""))
+            if errors and not self._dry:
+                raise StepFailed("the running bonds do not match the SoT although the file does — "
+                                 "see the bond-state errors (ifreload -a by hand, or check the NICs)")
             return client
         return self._network_apply(device, cfg, ctx, plan, client, render)
 
@@ -548,8 +549,7 @@ class HostBaseline(Job):
         host = str(device.primary_ip4.address.ip)
         rollback = cfg["network"]["rollback_seconds"]
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        unit = f"nfv-baseline-net-rollback-{ts}"
-        marker = f"/run/nfv-baseline/net-rollback-{ts}.done"
+        unit = f"nfv-baseline-net-rollback-{ts}"  # the applier derives the same unit (and marker) from ts
         start = time.monotonic()
         self._session_error = None
         events = self._apply(client, [("DRY_RUN", "0"), ("NEW_IFACES", render),
@@ -598,8 +598,8 @@ class HostBaseline(Job):
                 f"the rollback timer ({unit}) restores the previous /etc/network/interfaces — {verdict}. "
                 "Fix the SoT model (members, modes, MTU) or the switch side, then re-run"
             )
-        events = self._apply(fresh, [("DRY_RUN", "0"), ("NET_UNIT", unit), ("NET_MARKER", marker)],
-                             [["nfv_step_network_confirm"]], timeout=60)
+        events = self._apply(fresh, [("DRY_RUN", "0"), ("NET_TS", ts)], [["nfv_step_network_confirm"]],
+                             timeout=60)
         status, detail = self._report(7, events)
         if status == "failed":
             self._step_line(7, "failed", detail)

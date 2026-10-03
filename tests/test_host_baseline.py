@@ -684,7 +684,7 @@ class Snmp(unittest.TestCase):
         self.assertIn(f"rocommunity  {COMMUNITY} default -V systemonly", view_any)
 
     def test_location_is_the_location_name(self):
-        self.assertEqual(hb.snmp_location("LAB-Canonsburg-PA"), ("LAB-Canonsburg-PA", None))
+        self.assertEqual(hb.snmp_location("LAB-Example-PA"), ("LAB-Example-PA", None))
         self.assertIsNotNone(hb.snmp_location("Site\nrocommunity x")[1])
         self.assertIsNotNone(hb.snmp_location("")[1])
 
@@ -880,7 +880,11 @@ class Payload(unittest.TestCase):
         self.assertEqual(lines[0], "nfv_lib() { :; }")
         self.assertEqual(lines[-1], "__nfv_payload")
         body = payload[payload.index("__nfv_payload() {"):]
+        self.assertLess(body.index("set +x"), body.index("local DRY_RUN"))
         self.assertLess(body.index("exec </dev/null"), body.index("nfv_run ad"))
+        # nfv_init (path defaults, set +x, the root check) runs before any call
+        self.assertLess(body.index("exec </dev/null"), body.index("  nfv_init\n"))
+        self.assertLess(body.index("  nfv_init\n"), body.index("nfv_run ad"))
         self.assertLess(body.index("nfv_run ad"), body.index("nfv_done"))
         self.assertIn("local -a LIST=('a b' 'c'\"'\"'d')", payload)
         self.assertIn("nfv_run ad 'x y' pveum realm sync R", payload)
@@ -1069,6 +1073,18 @@ class Applier(unittest.TestCase):
         self.assertEqual(events, [])
         self.assertEqual(self.argv_log(), [])
 
+    def test_path_defaults_apply_without_overrides(self):
+        env = {k: v for k, v in self.env.items() if not k.startswith("NFV_") or k == "NFV_ALLOW_NONROOT"}
+        payload = hb.build_payload(self.applier, [], [["nfv_step_paths"]])
+        proc = subprocess.run(["bash", "-s"], input=payload, capture_output=True, text=True, env=env, timeout=60)
+        paths = {e["item"]: e["detail"] for e in hb.parse_events(proc.stdout)[0] if e["step"] == "paths"}
+        self.assertEqual(paths["NFV_SNMPD_CONF"], "/etc/snmp/snmpd.conf")
+        self.assertEqual(paths["NFV_SNMP_PERSIST"], "/var/lib/snmp/snmpd.conf")
+        self.assertEqual(paths["NFV_REALM_PW_DIR"], "/etc/pve/priv/realm")
+        self.assertEqual(paths["NFV_IFACES"], "/etc/network/interfaces")
+        self.assertEqual(paths["NFV_RUN_DIR"], "/run/nfv-baseline")
+        self.assertEqual(paths["NFV_BONDING"], "/proc/net/bonding")
+
     def test_unset_dry_run_means_dry(self):
         events, _ = self.run_payload([], [["nfv_run", "x", "y", "pveum", "realm", "list"]])
         self.assertEqual(events[0]["status"], "would_change")
@@ -1242,13 +1258,11 @@ class Applier(unittest.TestCase):
     def test_network_confirm(self):
         os.makedirs(self.env["NFV_RUN_DIR"])
         marker = os.path.join(self.env["NFV_RUN_DIR"], "net-rollback-9.done")
-        events, _ = self.run_payload([("DRY_RUN", "0"), ("NET_UNIT", "nfv-baseline-net-rollback-9"),
-                                      ("NET_MARKER", marker)], [["nfv_step_network_confirm"]])
+        events, _ = self.run_payload([("DRY_RUN", "0"), ("NET_TS", "9")], [["nfv_step_network_confirm"]])
         self.assertEqual(events[0]["status"], "changed")
         self.assertIn(["systemctl", "stop", "nfv-baseline-net-rollback-9.timer"], self.argv_log())
         open(marker, "w").close()
-        events, _ = self.run_payload([("DRY_RUN", "0"), ("NET_UNIT", "nfv-baseline-net-rollback-9"),
-                                      ("NET_MARKER", marker)], [["nfv_step_network_confirm"]])
+        events, _ = self.run_payload([("DRY_RUN", "0"), ("NET_TS", "9")], [["nfv_step_network_confirm"]])
         self.assertEqual(events[0]["status"], "failed")
         self.assertIn("the rollback already ran", events[0]["detail"])
 

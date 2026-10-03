@@ -1446,9 +1446,10 @@ def build_payload(applier_source, locals_, calls):
     Nothing runs before the last line arrives, so a truncated upload runs
     nothing. Never log the result — log `calls` instead (they carry no
     secret by construction; tests assert it)."""
-    body = ["__nfv_payload() {"]
+    body = ["__nfv_payload() {", "  set +x  # before the locals: no trace ever shows a secret"]
     body += [f"  {sh_local(name, value)}" for name, value in locals_]
     body.append("  exec </dev/null")
+    body.append("  nfv_init")  # set +x, pipefail, LC_ALL, path defaults, the root check
     body += [f"  {sh_call(argv)}" for argv in calls]
     body.append("  nfv_done")
     body.append("}")

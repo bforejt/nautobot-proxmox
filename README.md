@@ -191,6 +191,16 @@ install, and catches the classic silent failure (a directory missing
 
 ```bash
 python3 tests/loader_harness.py
+for t in tests/test_*.py; do python3 "$t"; done   # stdlib unit tests
+```
+
+The host-baseline applier and job-simulation tests drive real bash ≥ 4 on
+Linux (they skip on macOS's bash 3.2); run the suite in the answer-service
+image to include them, plus the template renders and `validate-answer`:
+
+```bash
+docker run --rm -v "$PWD:/repo:ro" -w /repo -e PROFILE_DIR=/repo/bmc/profiles \
+  nautobot-composer-answer-service sh -c 'for t in tests/test_*.py; do python3 "$t"; done'
 ```
 
 ## License
