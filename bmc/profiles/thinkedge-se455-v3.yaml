@@ -52,6 +52,14 @@ install:
   # Linux `mgmt`); everything else — including the XCC's USB NIC — gets the
   # installer's nic<N> by enumeration order, matching the hand-built units.
   interface_name_pinning: true
+  # Serial console (decision #55; Brian 2026-10-02: the fleet hardware has
+  # RS-232 — the COM Port Upgrade Kit's UEFI COM1, i.e. ttyS0 in Linux). The
+  # profile declares only the PORT; the line settings (speed, ...) are site
+  # facts in the config context host_baseline.serial_console. Firstboot then
+  # sets GRUB + kernel console=ttyS0,<speed> and enables serial-getty@ttyS0;
+  # without the config-context block it logs and skips (never refuses).
+  serial_console:
+    unit: 0
   # Data VD -> LVM-thin PVE storage, created by the firstboot hook (fully-up
   # ordering, so pvesm works) on the largest unused signature-free whole disk.
   # A volume group of this name found on disk (reinstall) is reused, never

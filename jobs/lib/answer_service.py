@@ -55,7 +55,12 @@ def nfv_role_refusal(device, action):
 # Profile keys under `install` that older service builds silently ignore —
 # a stale image would answer, but with a degraded layout (no data storage,
 # no pinning). Keep in step with app.py's /info "profile_features".
-PROFILE_FEATURE_KEYS = ("filter_match", "data_pool", "data_volume", "interface_name_pinning")
+PROFILE_FEATURE_KEYS = ("filter_match", "data_pool", "data_volume", "interface_name_pinning",
+                        "serial_console")
+
+# Config-context (host_baseline) keys firstboot renders (decision #55); keep
+# in step with app.py's /info "firstboot_features".
+FIRSTBOOT_FEATURE_KEYS = ("packages", "serial_console", "zfs_arc_max_bytes", "remove_subscription_nag")
 
 
 def fetch_info(base_url, verify=False, timeout=10):
@@ -108,3 +113,23 @@ def evaluate_profile_preflight(info, slug, features=(), base_url=""):
             )
     detail = f" with features {list(features)}" if features else ""
     return "ok", f"{where} carries profile {slug!r}{detail}"
+
+
+def firstboot_inputs_warning(info, context, base_url=""):
+    """A warning (or None) when the Device's config context sets host_baseline
+    firstboot inputs the answer service build does not render — a service
+    image older than decision #55 answers, but silently skips them."""
+    hb = (context or {}).get("host_baseline") if isinstance(context, dict) else None
+    used = sorted(k for k in FIRSTBOOT_FEATURE_KEYS if isinstance(hb, dict) and hb.get(k) is not None)
+    if not used or info is None:
+        return None
+    known = info.get("firstboot_features")
+    missing = used if not isinstance(known, list) else [k for k in used if k not in known]
+    if not missing:
+        return None
+    where = f"answer service at {base_url}" if base_url else "answer service"
+    return (
+        f"{where} does not render the host_baseline firstboot input(s) {missing} set in this "
+        "Device's config context — the node would install without them (the Host Baseline job "
+        "still ensures the packages); rebuild the service image from the current main"
+    )

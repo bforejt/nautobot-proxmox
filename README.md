@@ -29,9 +29,16 @@ everything from the VM layer up.
   host checks) plus **out-of-band RAID layout** (the SE455 V3's mirror sets
   are created over Redfish from the profile, no UEFI trip) for the bare-metal
   track — SE350 (XCC1) and SE455 V3 (XCC2) profiles ship in `bmc/profiles/`.
+- ✅ **Host baseline (L1/L2), built — `[lab-verify]` on hardware**: firstboot
+  installs the baseline packages and sets the serial console, ZFS ARC limit
+  and subscription-nag hook from the SoT; the `Host Baseline` job then applies
+  SNMP, the AD realm with its sync job and admin ACL, service-account tokens
+  (stored as per-node SecretsGroups) and — last, under a rollback timer — the
+  bond/bridge network modelled as Nautobot interfaces. Dry run = drift report.
+  See [docs/host-baseline.md](docs/host-baseline.md).
 - 🚧 **Not yet built**: Palo Alto / Cisco VNF day-0 builders (the deploy engine
-  is pluggable and ready for them), host network/tuning automation,
-  audit/converge jobs. See
+  is pluggable and ready for them), host tuning beyond the baseline (KSM,
+  host-service confinement, NIC firmware-LLDP), audit/converge jobs. See
   [docs/deployment-onboarding.md](docs/deployment-onboarding.md) for the honest
   gap register.
 
@@ -112,7 +119,7 @@ The minimum loop to prove it in a new lab:
 
 | Job | What it does |
 |---|---|
-| `Bootstrap NFV Data Model` ([jobs/design/bootstrap_schema.py](jobs/design/bootstrap_schema.py)) | Idempotently creates the data-model prerequisites (Hosted On relationship, roles, virtual DeviceTypes, platforms, custom fields, platform tunables, the Staged/Retired image statuses). Run once per environment; safe to re-run after every update. |
+| `Bootstrap NFV Data Model` ([jobs/design/bootstrap_schema.py](jobs/design/bootstrap_schema.py)) | Idempotently creates the data-model prerequisites (Hosted On relationship, roles, virtual DeviceTypes, platforms, custom fields incl. the host-baseline interface fields, platform tunables, the Staged/Retired image statuses, Secret records, the `nfv-host-baseline` config-context schema). Run once per environment; safe to re-run after every update. |
 | `Deploy VNF Device (SoT-driven)` ([jobs/proxmox/deploy_device.py](jobs/proxmox/deploy_device.py)) | Deploys one Planned VNF Device reading everything from Nautobot per the contract — hypervisor via Hosted On, Active-gated image, sizing, pinned-MAC NICs; day-0 = console credentials (cloud-init guests) or a per-device bootstrap ISO (PA firewalls). Writes back VMID + flips to Active. |
 | `Decommission VNF Device (SoT-driven)` ([jobs/proxmox/decommission_device.py](jobs/proxmox/decommission_device.py)) | SoT-true teardown: verifies VMID+name match, destroys the VM, writes back Active→Planned. Deploy + decommission = the redeploy primitive. |
 | `Ingest Image onto Proxmox Node` ([jobs/proxmox/ingest_image.py](jobs/proxmox/ingest_image.py)) | Idempotent, checksum-verified pre-stage of an image onto a hypervisor — warm nodes ahead of maintenance windows. Refuses an image record without a checksum. |
@@ -122,6 +129,7 @@ The minimum loop to prove it in a new lab:
 | `Install Proxmox Node (SoT-driven)` ([jobs/baremetal/install_node.py](jobs/baremetal/install_node.py)) | One-input bare-metal install: verifies the BMC is the Device (serial), ensures the profile's RAID layout (when declared), boots the prepared installer (nested VM or XCC virtual media per the DeviceType profile) and follows the state machine to an installed, self-credentialed node. |
 | `Prepare Installer Media (Media Forge)` ([jobs/baremetal/prepare_media.py](jobs/baremetal/prepare_media.py)) | Asks the answer service to prepare, publish, and register (Staged) installer media bound to its own URL/cert identity — decision #44. |
 | `SE350 Host Verification (SSH)` ([jobs/baremetal/verify_host.py](jobs/baremetal/verify_host.py)) | Read-only SSH pass over a Linux-booted edge node (SE350 / SE455 V3): disk-filter validation with the installer's own matching (incl. ZFS-mirror pair counts and the data-pool preflight), DMI serial vs SoT, firmware LLDP flags (i40e/ice), Secure Boot, BIOS-effect readbacks. |
+| `Host Baseline (SoT-driven)` ([jobs/baremetal/host_baseline.py](jobs/baremetal/host_baseline.py)) | Root-SSH baseline of an installed node from the SoT (decision #55): identity check, then packages, SNMP (snmpd.conf + SNMPv3 users), AD realm + sync job + admin ACL + root e-mail, service-account tokens captured into per-node SecretsGroups, and last the bond/bridge network rendered from the Device's interfaces under a rollback timer. Dry run (default) reports drift and writes nothing; success moves the Device to `baseline_done`. |
 
 ## Documentation map
 
@@ -130,10 +138,10 @@ The minimum loop to prove it in a new lab:
 | Doc | What it answers |
 |---|---|
 | [getting-started.md](docs/getting-started.md) | One-time setup for a new environment, step by step, with a worked example |
-| [sot-data-contract.md](docs/sot-data-contract.md) | Exactly which Nautobot records the jobs read and write |
-| [baremetal-install.md](docs/baremetal-install.md) | How a blank server becomes a registered Proxmox node — answer service, media forge, nested/PXE/vmedia delivery, runbooks |
+| [sot-data-contract.md](docs/sot-data-contract.md) | Exactly which Nautobot records the jobs read and write (§4c: the host-baseline interface model, config context `host_baseline`, Secrets, `provisioning_state`) |
+| [baremetal-install.md](docs/baremetal-install.md) | How a blank server becomes a registered, baselined Proxmox node — answer service, media forge, nested/PXE/vmedia delivery, runbooks (incl. the Host Baseline), troubleshooting |
 | [deployment-onboarding.md](docs/deployment-onboarding.md) | What's portable vs. what's still manual — the gap register |
-| [host-baseline.md](docs/host-baseline.md) | The L1/L2 host-baseline design: what the hand-built post-deploy steps become (firstboot data vs. the Host Baseline job), the SoT bond/bridge model, fleet conventions (decision #54) |
+| [host-baseline.md](docs/host-baseline.md) | The L1/L2 host baseline: what the hand-built post-deploy steps became (firstboot inputs vs. the Host Baseline job), the SoT bond/bridge model, fleet conventions (#54), implementation notes, deviations and the `[lab-verify]` list (#55) |
 | [image-lifecycle.md](docs/image-lifecycle.md) | How golden images are built, versioned, promoted, rolled back (notes which steps are scripted vs. jobs) |
 
 **Design record**:
@@ -183,6 +191,16 @@ install, and catches the classic silent failure (a directory missing
 
 ```bash
 python3 tests/loader_harness.py
+for t in tests/test_*.py; do python3 "$t"; done   # stdlib unit tests
+```
+
+The host-baseline applier and job-simulation tests drive real bash ≥ 4 on
+Linux (they skip on macOS's bash 3.2); run the suite in the answer-service
+image to include them, plus the template renders and `validate-answer`:
+
+```bash
+docker run --rm -v "$PWD:/repo:ro" -w /repo -e PROFILE_DIR=/repo/bmc/profiles \
+  nautobot-composer-answer-service sh -c 'for t in tests/test_*.py; do python3 "$t"; done'
 ```
 
 ## License

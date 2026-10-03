@@ -379,7 +379,11 @@ decisions in §6.
 > host-baseline steps below (except pinning, which the installer now does), and the
 > first real installs on the SE350 and the SE455 V3 (`[lab-verify]`). The L1/L2
 > host-baseline design (what the tester's post-deploy script becomes) is in
-> [host-baseline.md](host-baseline.md), decision #54.
+> [host-baseline.md](host-baseline.md), decision #54 — **implemented
+> 2026-10-02 (decision #55)**: firstboot packages / serial console / ARC /
+> nag hook from the SoT, and the `Host Baseline (SoT-driven)` job (SNMP, AD,
+> service tokens, bond/bridge network under a rollback timer), `[lab-verify]`
+> on hardware.
 
 - Refactor `xcc_client.py` to dual-mode vmedia: `EXT{N}` members present → XCC1 path
   (PATCH on member, select by `Id` prefix "EXT", HTTP-only ISO URL); else XCC2 path (POST

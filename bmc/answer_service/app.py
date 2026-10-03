@@ -273,7 +273,13 @@ def _nb(method: str, path: str, **kwargs):
 def device_by_serial(serial: str) -> dict | None:
     """The ONE Device carrying this serial. Several matches are refused —
     ambiguity never resolves to a guess (which node's answer, keys, secrets?)."""
-    results = _nb("GET", "/dcim/devices/", params={"serial": serial, "depth": 1}).get("results", [])
+    # include=config_context: the rendered context carries host_baseline, the
+    # firstboot inputs (packages, serial console, ARC, nag switch) — verified
+    # on the list endpoint of Nautobot 2.4.30; 3.x keeps the parameter.
+    results = _nb(
+        "GET", "/dcim/devices/",
+        params={"serial": serial, "depth": 1, "include": "config_context"},
+    ).get("results", [])
     if len(results) > 1:
         log.warning("REFUSED: serial %r matches %d Devices (%s) — serials must be unique",
                     serial, len(results), ", ".join(str(d.get("name")) for d in results))
@@ -322,9 +328,20 @@ def pin_name(name: str) -> str:
 
 
 def device_interfaces(device: dict) -> list:
-    return _nb(
-        "GET", "/dcim/interfaces/", params={"device_id": device["id"], "limit": 200}
-    ).get("results", [])
+    """Every interface of the Device (all pages). Depth 0: `lag` and `bridge`
+    are FK references ({"id": ...}) — present on 2.4 and 3.x alike (only M2M
+    fields need exclude_m2m=false)."""
+    out, offset = [], 0
+    while True:
+        page = _nb(
+            "GET", "/dcim/interfaces/",
+            params={"device_id": device["id"], "limit": 200, "offset": offset},
+        )
+        results = page.get("results", []) or []
+        out.extend(results)
+        offset += len(results)
+        if not page.get("next") or not results:
+            return out
 
 
 def build_pin_mapping(interfaces: list, nics: list, device_name: str = "") -> dict:
@@ -343,7 +360,7 @@ def build_pin_mapping(interfaces: list, nics: list, device_name: str = "") -> di
     for iface in interfaces or []:
         mac = str(iface.get("mac_address") or "").lower()
         name = str(iface.get("name") or "")
-        if not mac or name == "xcc":
+        if not mac or name == "xcc" or _iface_type(iface) in ("lag", "bridge"):
             continue
         if mac not in seen:
             log.info("%s: interface %s (%s) not reported by the installer — not pinned",
@@ -370,11 +387,108 @@ def build_pin_mapping(interfaces: list, nics: list, device_name: str = "") -> di
     return mapping
 
 
-def mgmt_interface_mac(device: dict) -> str | None:
-    """MAC pinned on the interface carrying primary_ip4, if the SoT has one."""
+def _ref_id(value):
+    """FK reference (dict at depth 0/1, or a bare id) -> id string or None."""
+    if isinstance(value, dict):
+        value = value.get("id")
+    return str(value) if value else None
+
+
+def _iface_type(iface: dict) -> str:
+    value = iface.get("type")
+    return str((value.get("value") if isinstance(value, dict) else value) or "")
+
+
+def _iface_record(iface: dict) -> dict:
+    """REST interface -> the plain record derive_install_interface works on
+    (the same shape jobs/lib/host_baseline.interface_record builds)."""
+    return {
+        "id": str(iface.get("id")),
+        "name": str(iface.get("name") or ""),
+        "type": _iface_type(iface),
+        "lag": _ref_id(iface.get("lag")),
+        "bridge": _ref_id(iface.get("bridge")),
+        "mac": str(iface.get("mac_address") or "").lower() or None,
+        "primary_member": (iface.get("custom_fields") or {}).get("primary_member") is True,
+    }
+
+
+class InstallNicError(ValueError):
+    """The SoT does not name exactly one install port for the node."""
+
+
+def _pick_member(device_name, kind, parent, members):
+    names = sorted(m["name"] for m in members)
+    if not members:
+        field = "Bridge" if kind == "bridge" else "LAG"
+        raise InstallNicError(
+            f"{kind} {parent['name']} on {device_name} has no member interfaces — set the "
+            f"{field} field of its port(s) to {parent['name']}"
+        )
+    flagged = [m for m in members if m.get("primary_member") is True]
+    if len(flagged) > 1:
+        raise InstallNicError(
+            f"{kind} {parent['name']} on {device_name}: primary_member is set on several members "
+            f"({', '.join(sorted(m['name'] for m in flagged))}) — flag exactly one"
+        )
+    if len(members) == 1:
+        return members[0]
+    if flagged:
+        return flagged[0]
+    raise InstallNicError(
+        f"{kind} {parent['name']} on {device_name} has several members ({', '.join(names)}) and "
+        f"none is flagged primary_member — flag the port that carries the install"
+    )
+
+
+def derive_install_interface(device_name, primary_address, primary_ids, interfaces):
+    """The install NIC through the SoT model (decision #55): the interface
+    carrying primary_ip4; a bridge resolves to its single port (or the port
+    flagged primary_member), a LAG to its single member (or the flagged one).
+    -> (interface, chain of names). Raises InstallNicError on any ambiguity.
+    Keep in step with jobs/lib/host_baseline.py derive_install_interface —
+    tests/test_answer_service.py runs both over the same cases."""
+    by_id = {i["id"]: i for i in interfaces}
+    mine = []
+    for iface_id in primary_ids or ():
+        iface = by_id.get(str(iface_id))
+        if iface is not None and iface not in mine:
+            mine.append(iface)
+    if not mine:
+        raise InstallNicError(
+            f"primary_ip4 {primary_address} is not assigned to any interface of {device_name} — "
+            "assign it to the management bridge (or the mgmt port)"
+        )
+    if len(mine) > 1:
+        raise InstallNicError(
+            f"primary_ip4 {primary_address} is assigned to several interfaces of {device_name} "
+            f"({', '.join(sorted(i['name'] for i in mine))}) — ambiguous install NIC; keep it on one"
+        )
+    iface = mine[0]
+    chain = [iface["name"]]
+    if iface["type"] == "bridge":
+        iface = _pick_member(device_name, "bridge", iface,
+                             [i for i in interfaces if i.get("bridge") == iface["id"]])
+        chain.append(iface["name"])
+    if iface["type"] == "lag":
+        iface = _pick_member(device_name, "LAG", iface,
+                             [i for i in interfaces if i.get("lag") == iface["id"]])
+        chain.append(iface["name"])
+    if iface["type"] in ("bridge", "lag"):
+        raise InstallNicError(
+            f"install NIC derivation for {device_name} reached {iface['name']} (type {iface['type']}) "
+            f"via {' -> '.join(chain)} — only bridge -> LAG -> port nesting is supported"
+        )
+    return iface, chain
+
+
+def install_interface(device: dict, interfaces: list | None = None):
+    """(record, chain) of the SoT install NIC, or (None, []) without
+    primary_ip4. An ambiguous model is a 409 refusal (logged REFUSED) — the
+    install never lands on a guessed port."""
     primary = device.get("primary_ip4")
     if not primary:
-        return None
+        return None, []
     # exclude_m2m=false: Nautobot 3.x omits many-to-many fields (the
     # `interfaces` list included) from REST responses by default; 2.4 accepts
     # the parameter and returns them either way. Without it a pinned mgmt MAC
@@ -384,11 +498,19 @@ def mgmt_interface_mac(device: dict) -> str | None:
         f"/ipam/ip-addresses/{primary['id']}/",
         params={"depth": 1, "exclude_m2m": "false"},
     )
-    for assignment in detail.get("interfaces", []) or []:
-        iface = _nb("GET", f"/dcim/interfaces/{assignment['id']}/")
-        if iface.get("mac_address"):
-            return iface["mac_address"]
-    return None
+    ids = [_ref_id(a) for a in detail.get("interfaces", []) or [] if _ref_id(a)]
+    records = [_iface_record(i) for i in (interfaces if interfaces is not None else device_interfaces(device))]
+    try:
+        return derive_install_interface(device["name"], primary.get("address"), ids, records)
+    except InstallNicError as exc:
+        log.warning("REFUSED: %s", exc)
+        raise HTTPException(409, f"install NIC: {exc}")
+
+
+def mgmt_interface_mac(device: dict, interfaces: list | None = None) -> str | None:
+    """MAC of the SoT install NIC (derived through bridge/LAG), if recorded."""
+    iface, _ = install_interface(device, interfaces)
+    return (iface or {}).get("mac") or None
 
 
 # ---- profiles (bmc/profiles/<device-type-slug>.yaml) ----
@@ -493,6 +615,123 @@ def data_volume_spec(install: dict) -> dict | None:
     }
 
 
+def serial_console_spec(install: dict) -> dict | None:
+    """Validate install.serial_console — the DeviceType declares that its
+    hardware HAS a serial port and which unit (ttyS<unit>); the line
+    parameters (speed, ...) are site facts from the config context."""
+    spec = install.get("serial_console")
+    if spec is None or spec is False:
+        return None
+    if not isinstance(spec, dict):
+        raise HTTPException(500, "profile install.serial_console must be a mapping like {unit: 0}")
+    extra = sorted(set(spec) - {"unit"})
+    if extra:
+        raise HTTPException(500, f"profile install.serial_console accepts only `unit` (got {extra}) — "
+                                 "speed and framing come from the config context host_baseline.serial_console")
+    unit = spec.get("unit")
+    if isinstance(unit, bool) or not isinstance(unit, int) or not 0 <= unit <= 7:
+        raise HTTPException(500, "profile install.serial_console.unit must be an integer 0-7 (ttyS<unit>)")
+    return {"unit": unit, "tty": f"ttyS{unit}"}
+
+
+# ---- host_baseline firstboot inputs (config context, decision #55) ----
+# Packages the baseline itself depends on (the Host Baseline job configures
+# snmpd; lldpd is the fleet's neighbour discovery). Keep in step with
+# jobs/lib/host_baseline.py REQUIRED_PACKAGES.
+REQUIRED_PACKAGES = ("lldpd", "snmpd")
+_PKG_RE = re.compile(r"^[a-z0-9][a-z0-9+.-]{1,62}$")
+SERIAL_SPEEDS = (9600, 19200, 38400, 57600, 115200)
+ARC_MIN_BYTES = 64 * 1024 * 1024  # ZFS refuses a smaller zfs_arc_max
+
+
+class FirstbootInputError(ValueError):
+    pass
+
+
+def _serial_console(port: dict | None, sc) -> tuple[dict | None, str]:
+    if port is None and sc is None:
+        return None, "the DeviceType profile declares no serial port (install.serial_console) — skipped"
+    if port is None:
+        return None, ("the SoT sets host_baseline.serial_console but the DeviceType profile declares "
+                      "no serial port (install.serial_console) — skipped")
+    if sc is None:
+        return None, (f"the DeviceType profile declares {port['tty']} but the SoT has no "
+                      "host_baseline.serial_console (speed) — serial console NOT configured")
+    if not isinstance(sc, dict):
+        raise FirstbootInputError("host_baseline.serial_console must be a mapping like {speed: 115200}")
+    extra = sorted(set(sc) - {"speed", "word", "parity", "stop"})
+    if extra:
+        raise FirstbootInputError(f"host_baseline.serial_console has unknown key(s) {extra}")
+    speed, word = sc.get("speed"), sc.get("word", 8)
+    parity, stop = sc.get("parity", "no"), sc.get("stop", 1)
+    if isinstance(speed, bool) or speed not in SERIAL_SPEEDS:
+        raise FirstbootInputError(f"host_baseline.serial_console.speed must be one of {list(SERIAL_SPEEDS)} "
+                                  f"(got {speed!r})")
+    if isinstance(word, bool) or word not in (5, 6, 7, 8):
+        raise FirstbootInputError(f"host_baseline.serial_console.word must be 5-8 (got {word!r})")
+    if parity not in ("no", "odd", "even"):
+        raise FirstbootInputError(f"host_baseline.serial_console.parity must be no, odd or even (got {parity!r})")
+    if isinstance(stop, bool) or stop not in (1, 2):
+        raise FirstbootInputError(f"host_baseline.serial_console.stop must be 1 or 2 (got {stop!r})")
+    tty, unit = port["tty"], port["unit"]
+    return {
+        "tty": tty,
+        "unit": unit,
+        "speed": speed,
+        "console_arg": f"{tty},{speed}{parity[0]}{word}",
+        "grub_command": f"serial --speed={speed} --unit={unit} --word={word} --parity={parity} --stop={stop}",
+    }, f"{tty} at {speed} {word}{parity[0].upper()}{stop}"
+
+
+def host_baseline_firstboot(device: dict, install: dict) -> dict:
+    """The firstboot inputs from the Device's rendered config context
+    (host_baseline) + the profile: packages, serial console, ZFS ARC limit,
+    subscription-nag hook. Absent keys mean "not configured" (logged by
+    firstboot); a malformed value is a 409 refusal at answer time — before
+    the installer runs, like a broken profile key."""
+    name = device.get("name")
+    ctx = device.get("config_context")
+    hb = ctx.get("host_baseline") if isinstance(ctx, dict) else None
+    try:
+        if hb is None:
+            hb = {}
+        if not isinstance(hb, dict):
+            raise FirstbootInputError("config context host_baseline must be a mapping")
+        packages = list(REQUIRED_PACKAGES)
+        extra = hb.get("packages")
+        if extra is not None:
+            if not isinstance(extra, list):
+                raise FirstbootInputError("host_baseline.packages must be a list of Debian package names")
+            for pkg in extra:
+                if not isinstance(pkg, str) or not _PKG_RE.match(pkg):
+                    raise FirstbootInputError(f"host_baseline.packages: {pkg!r} is not a valid Debian package name")
+                if pkg not in packages:
+                    packages.append(pkg)
+        serial, serial_note = _serial_console(serial_console_spec(install), hb.get("serial_console"))
+        arc = hb.get("zfs_arc_max_bytes")
+        if arc is not None and (isinstance(arc, bool) or not isinstance(arc, int) or arc < ARC_MIN_BYTES):
+            raise FirstbootInputError(f"host_baseline.zfs_arc_max_bytes must be an integer >= {ARC_MIN_BYTES} "
+                                      f"(64 MiB; got {arc!r})")
+        nag = hb.get("remove_subscription_nag", False)
+        if not isinstance(nag, bool):
+            raise FirstbootInputError(f"host_baseline.remove_subscription_nag must be true or false (got {nag!r})")
+    except FirstbootInputError as exc:
+        log.warning("REFUSED: %s: %s (config context)", name, exc)
+        raise HTTPException(409, f"config context: {exc}")
+    return {
+        "packages": packages,
+        "serial": serial,
+        "serial_note": serial_note,
+        "zfs_arc_max_bytes": arc,
+        "remove_nag": nag,
+    }
+
+
+def firstboot_summary(fb: dict) -> str:
+    return (f"packages={','.join(fb['packages'])} serial={fb['serial_note'] if fb['serial'] else 'off'} "
+            f"arc={fb['zfs_arc_max_bytes'] or 'default'} nag={'remove' if fb['remove_nag'] else 'keep'}")
+
+
 # ---- endpoints ----
 
 def _check_bearer(authorization: str | None) -> None:
@@ -539,6 +778,9 @@ def _answer_impl(identity: dict) -> PlainTextResponse:
     filter_match = filter_match_for(install)
     data_pool_spec(install)
     data_volume_spec(install)
+    firstboot_inputs = host_baseline_firstboot(device, install)
+    pinning = bool(install.get("interface_name_pinning", False))
+    interfaces = None
 
     # Network: static from the SoT when primary_ip4 exists, else DHCP.
     network_source = "from-dhcp"
@@ -559,7 +801,19 @@ def _answer_impl(identity: dict) -> PlainTextResponse:
         # Static installs need the exact mgmt NIC: never guess one from the
         # installer's list (its "link" field is the interface NAME, not a
         # carrier state, so nothing in the POST says which port is cabled).
-        mac = (mgmt_interface_mac(device) or "").lower()
+        # Derived through the SoT model (decision #55): primary_ip4's
+        # interface; a bridge -> its port, a LAG -> its primary member.
+        interfaces = device_interfaces(device)
+        nic, chain = install_interface(device, interfaces)
+        mac = ((nic or {}).get("mac") or "").lower()
+        if not mac and len(chain) > 1:
+            log.warning(
+                "REFUSED: %s installs static (%s) but its install NIC %s (via %s) has no MAC — "
+                "record the port's MAC on its Nautobot interface", device["name"], cidr,
+                nic["name"], " -> ".join(chain),
+            )
+            raise HTTPException(409, "static install needs the install port's MAC (derived through the "
+                                     "management bridge/LAG) recorded in Nautobot (contract §4)")
         if not mac:
             log.warning(
                 "REFUSED: %s installs static (%s) but the interface carrying primary_ip4 "
@@ -579,8 +833,9 @@ def _answer_impl(identity: dict) -> PlainTextResponse:
     # Interface name pinning (PVE >= 9.1 answer format, decision #51): every
     # physical NIC gets a MAC-pinned name at install time; SoT interface names
     # apply where the Device records the MAC, the rest default to nic<N>.
-    pinning = bool(install.get("interface_name_pinning", False))
-    pin_mapping = build_pin_mapping(device_interfaces(device), nics, device["name"]) if pinning else {}
+    if pinning and interfaces is None:
+        interfaces = device_interfaces(device)
+    pin_mapping = build_pin_mapping(interfaces, nics, device["name"]) if pinning else {}
 
     root_hash = ""
     try:
@@ -634,9 +889,9 @@ def _answer_impl(identity: dict) -> PlainTextResponse:
         webhook_url=f"{PUBLIC_URL}/webhook?serial={serial}&key={webhook_key}",
     )
     log.info(
-        "ANSWERED: %s (serial %s) source=%s fs=%s pinning=%s%s",
+        "ANSWERED: %s (serial %s) source=%s fs=%s pinning=%s%s firstboot: %s",
         device["name"], serial, network_source, filesystem, pinning,
-        f" names={pin_mapping}" if pin_mapping else "",
+        f" names={pin_mapping}" if pin_mapping else "", firstboot_summary(firstboot_inputs),
     )
     return PlainTextResponse(rendered, media_type="application/toml")
 
@@ -660,6 +915,7 @@ def _firstboot_impl(serial: str, key: str) -> PlainTextResponse:
     profile = load_profile((device.get("device_type") or {}).get("model", ""))
     data_pool = data_pool_spec(profile.get("install", {}))
     data_volume = data_volume_spec(profile.get("install", {}))
+    firstboot_inputs = host_baseline_firstboot(device, profile.get("install", {}))
     cred_key = issue_key(serial, "credentials")
     rendered = TEMPLATES.get_template("firstboot.sh.j2").render(
         node_name=device["name"],
@@ -673,6 +929,11 @@ def _firstboot_impl(serial: str, key: str) -> PlainTextResponse:
         pve_privs=PVE_ROLE_PRIVS,
         pve_user=PVE_SERVICE_USER,
         pve_token=PVE_TOKEN_NAME,
+        packages=firstboot_inputs["packages"],
+        serial_console=firstboot_inputs["serial"],
+        serial_console_note=firstboot_inputs["serial_note"],
+        zfs_arc_max_bytes=firstboot_inputs["zfs_arc_max_bytes"],
+        remove_nag=firstboot_inputs["remove_nag"],
     )
     # Consume last: rendering succeeded, the script (with its credentials
     # key) is about to leave — only now is the firstboot key spent.
@@ -702,6 +963,22 @@ def _write_secret_file(path: Path, content: str, mode: int) -> None:
                   "read this secret", path, NAUTOBOT_FS_UID, NAUTOBOT_FS_GID, exc)
 
 
+def node_token_names(device_name: str, account: str = "proxmox") -> dict:
+    """Names of a node's API-token Secrets: SecretsGroup <node>-<account>,
+    text-file Secrets <slug>-<account>-token-username / -secret over the files
+    <slug>_<account>_token_id / _secret. The Host Baseline job stores its
+    service-account tokens with the same scheme (jobs/lib/host_baseline.py
+    node_token_names — tests/test_answer_service.py keeps the two equal)."""
+    slug = slugify(device_name)
+    return {
+        "group": f"{device_name}-{account}",
+        "secret_username": f"{slug}-{account}-token-username",
+        "secret_secret": f"{slug}-{account}-token-secret",
+        "file_id": f"{slug}_{account}_token_id",
+        "file_secret": f"{slug}_{account}_token_secret",
+    }
+
+
 def _firstboot_credentials_impl(body: dict, client_host: str | None) -> dict:
     serial = body.get("serial", "")
     key = body.get("key", "")
@@ -725,21 +1002,21 @@ def _firstboot_credentials_impl(body: dict, client_host: str | None) -> dict:
         raise HTTPException(400, "token_id and token_secret are required")
 
     name = device["name"]
-    slug = slugify(name)
+    names = node_token_names(name)
     if (device.get("custom_fields") or {}).get("secrets_group"):
         # Reinstall path (designed): a fresh install re-runs the bootstrap and
         # the old token died with the old OS — overwriting is correct, but say so.
         log.warning("OVERWRITING stored credentials for %s (reinstall)", name)
     SECRETS_DIR.mkdir(parents=True, exist_ok=True)
-    id_file = SECRETS_DIR / f"{slug}_proxmox_token_id"
-    secret_file = SECRETS_DIR / f"{slug}_proxmox_token_secret"
+    id_file = SECRETS_DIR / names["file_id"]
+    secret_file = SECRETS_DIR / names["file_secret"]
     _write_secret_file(id_file, token_id + "\n", 0o640)
     _write_secret_file(secret_file, token_secret + "\n", 0o640)
 
-    group_name = f"{name}-proxmox"
+    group_name = names["group"]
     secret_ids = {}
     for kind, path in (("username", id_file), ("secret", secret_file)):
-        secret_name = f"{slug}-proxmox-token-{kind}"
+        secret_name = names[f"secret_{kind}"]
         existing = _nb("GET", "/extras/secrets/", params={"name": secret_name}).get("results", [])
         payload = {
             "name": secret_name,
@@ -885,7 +1162,12 @@ def info() -> dict:
         # sync, so the two drift after every profile merge (seen live on the
         # first SE455 V3 run — 403 "no install profile" after a full boot).
         "profiles": sorted(p.stem for p in PROFILE_DIR.glob("*.yaml")) if PROFILE_DIR.is_dir() else [],
-        "profile_features": ["filter_match", "data_pool", "data_volume", "interface_name_pinning"],
+        "profile_features": ["filter_match", "data_pool", "data_volume", "interface_name_pinning",
+                             "serial_console"],
+        # Config-context (host_baseline) inputs firstboot renders — a build
+        # without this key silently ignores them.
+        "firstboot_features": ["packages", "serial_console", "zfs_arc_max_bytes",
+                               "remove_subscription_nag"],
     }
 
 

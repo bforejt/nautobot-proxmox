@@ -33,6 +33,7 @@ refusal. A hand-built worked example using all of them is in
 | PA admin password | Secret `pa_admin_password` has a value (pa-bootstrap platforms — ships as a phash in bootstrap.xml) |
 | Static-IP guests | Their prefix contains exactly one IP with role **DefaultGW** (DHCP guests don't need it) |
 | PA static mgmt | The mgmt prefix additionally contains at least one IP with role **DNS** (lowest address = dns-primary, next = dns-secondary), and `primary_ip4`, when set, must equal the `mgmt` interface's IP |
+| Host Baseline (hypervisors, §4c) | `provisioning_state` **`bm_installed`** or **`baseline_done`** (dry run: any installed state); config-context key **`host_baseline`** with `root_email`, `snmp`, `ad`, `service_accounts`, `network` (a section may say `enabled: false`, never be absent); `primary_ip4` on a **bridge** interface named `vmbr<N>`, bonds are **LAG** interfaces named `bond<N>` with CF `lag_mode` (and `lag_xmit_hash` for `802.3ad`/`balance-xor`), every physical member with its `mac_address`, one member flagged `primary_member` on a multi-port active-backup bond; Secrets `ad_bind_password`, the community Secret the context names, `snmpv3_<user>_auth` / `_priv`, and the root login in `host_ssh_username` / `host_ssh_password` |
 
 ## 1. The roster — which VMs exist where
 
@@ -53,7 +54,7 @@ refusal. A hand-built worked example using all of them is in
 | Sizing (vcpus / memory / disk) | The device's own CFs (`vcpus`, `memory_mb`, `disk_gb`) — **REQUIRED on every VNF device, set by the layout engine at creation**. There is no external sizing profile: the SoT record is complete, consumers read one place. Deploy **refuses** if any sizing CF is unset (same discipline as software_version) | **Settled (2026-08-08)** — team direction: fully materialized per-device values; the "define once" DRY lives in the layout engine's templates, not in runtime lookups. Fleet-wide change flow (SoT-first): bulk-update the CFs (Nautobot bulk edit or a small job) → run the converge job to resize actual VMs to the updated intent. Never the reverse |
 | Platform behavior (day-0 builder, machine type, serial console, NIC model) | `device.platform` → facts in code ([jobs/lib/platform_facts.py](../jobs/lib/platform_facts.py)) + tunables as Platform CFs | Settled — see "Platform behavior" in §3. The platform *name* must have a facts entry or deploy refuses |
 | Proxmox VMID | CF `vmid` — **written back** by the deploy job after create | Settled (bootstrapped) |
-| Host lifecycle stage | CF `provisioning_state` (hypervisors) | Settled (bootstrapped) |
+| Host lifecycle stage | CF `provisioning_state` (hypervisors) — states, writers and readers in the §4c state table | Settled (bootstrapped) |
 
 ## 3. Networking — interfaces, VLANs, addresses
 
@@ -175,8 +176,8 @@ stored once.** The line it draws here:
 | API endpoint | `device.primary_ip4` | **Settled (2026-08-08)** |
 | API credentials | Per-hypervisor **SecretsGroup** named by the device's `secrets_group` CF (Generic/Username = token id, Generic/Secret = token UUID) — each standalone node has its own token; **falls back** to the global `proxmox_token_id`/`proxmox_token_secret` Secret pair when the CF is empty (single-host quickstart) | **Settled (2026-08-08)** |
 | BMC/XCC address | **Settled (2026-08-08)**: a dedicated interface named `xcc` on the physical device (SE350, SE455 V3) with its IP assigned — native, visible, cable-truthful. Never a host NIC: it is excluded from NIC-name pinning. The BMC at that IP must report the Device's `serial` (Redfish system SerialNumber, trimmed, case-insensitive): the install and storage-layout jobs refuse before any BMC write otherwise, and when the BMC reports no serial (decision #52) | Layout process creates it |
-| Install identity (bare-metal loop) | Device role **`NFV`** — re-checked server-side by Install Proxmox Node and Apply Storage Layout before any BMC action (the form filter is UI-only) and by the answer service's allowlist; `device.serial` = the DMI system serial the installer POSTs (the answer service's allowlist key) — **unique**: a serial matching several Devices is refused; `device_type.model` selects the install profile `bmc/profiles/<slug>.yaml`; CF `provisioning_state=awaiting_install` gates the answer; `primary_ip4` (static) needs a DefaultGW-role IP in its own parent prefix (the IP's namespace) and the carrying interface's `mac_address` — **required** for static installs (the answer service never guesses the mgmt NIC) and it must be a MAC the installer actually reports (decision #52) | **Settled (2026-08-09)** — [baremetal-install.md](baremetal-install.md) |
-| Host NIC names (physical nodes) | Profiles with `install.interface_name_pinning` (SE455 V3) pin every physical NIC's Linux name by MAC at install: a Device interface that records its `mac_address` gets its **Nautobot name** as the Linux name (`mgmt` → `mgmt`), unmapped ports get the installer's `nic<N>`. Nautobot names outside the Linux rule are transliterated deterministically: lowercase; each run of characters outside `[a-z0-9_]` → `_`; leading/trailing `_` stripped; `p_` prefixed unless it starts with a letter; truncated to 15 (`OCP-1` → `ocp_1`, `1GbE-4` → `p_1gbe_4`). Results must still be 2–15 chars, not `nic<N>`, unique (first wins) — otherwise the port keeps `nic<N>` | **Settled (2026-09-16, decision #51; transliteration #52)** |
+| Install identity (bare-metal loop) | Device role **`NFV`** — re-checked server-side by Install Proxmox Node and Apply Storage Layout before any BMC action (the form filter is UI-only) and by the answer service's allowlist; `device.serial` = the DMI system serial the installer POSTs (the answer service's allowlist key) — **unique**: a serial matching several Devices is refused; `device_type.model` selects the install profile `bmc/profiles/<slug>.yaml`; CF `provisioning_state=awaiting_install` gates the answer; `primary_ip4` (static) needs a DefaultGW-role IP in its own parent prefix (the IP's namespace) and the install port's `mac_address` — **required** for static installs (the answer service never guesses the mgmt NIC) and it must be a MAC the installer actually reports (decision #52). The install port is **derived through the model** (decision #55): the interface carrying `primary_ip4`; a bridge resolves to its single port or the port flagged `primary_member`, a LAG to its single member or the flagged one — the install job and the answer service refuse an ambiguous model (several members without one flag, two flags, the IP on several interfaces) | **Settled (2026-08-09)**; derivation 2026-10-02 (#55) — [baremetal-install.md](baremetal-install.md) |
+| Host NIC names (physical nodes) | Profiles with `install.interface_name_pinning` (SE455 V3) pin every physical NIC's Linux name by MAC at install: a Device interface that records its `mac_address` gets its **Nautobot name** as the Linux name (`mgmt` → `mgmt`), unmapped ports get the installer's `nic<N>`; a MAC recorded on a bond (LAG) or bridge interface is never used for pinning (decision #55). Nautobot names outside the Linux rule are transliterated deterministically: lowercase; each run of characters outside `[a-z0-9_]` → `_`; leading/trailing `_` stripped; `p_` prefixed unless it starts with a letter; truncated to 15 (`OCP-1` → `ocp_1`, `1GbE-4` → `p_1gbe_4`). Results must still be 2–15 chars, not `nic<N>`, unique (first wins) — otherwise the port keeps `nic<N>` | **Settled (2026-09-16, decision #51; transliteration #52)** |
 | Storage layout (physical nodes) | Not in Nautobot: the DeviceType profile's `storage` (out-of-band RAID volumes, decision #50) and `install` (filesystem, disk filter, data pool/volume) sections — hardware policy as data (#14). Nautobot records only the consequence: `vm_storage`/`import_storage` below | **Settled (2026-09-16)** |
 | VM bridge + storage targets | Hypervisor-device CFs `vm_bridge`, `vm_storage`, `import_storage` — set by the layout engine per node (SE350 standard: `vmbr1`/`local-lvm`/`local`; SE455 V3 installed by the loop: `vmbr1`/`DataDrive`/`local`, `DataDrive` being the firstboot-created LVM-thin storage (VG `big-vg`, thin pool `big-lv`) on the data volume); deploy refuses if unset. For PA deploys `import_storage` also holds the per-device bootstrap ISO, so it must allow **ISO** content | **Settled (2026-08-08)** — desired state, stored once, on the object it describes |
 | Mgmt bridge (optional) | Hypervisor CF `mgmt_bridge` — the dedicated mgmt NIC (position 0 of pattern platforms only) lands here when set (two-bridge hosts, SE350 standard: `vmbr0`); empty = everything on `vm_bridge`; fixed-list guests always use `vm_bridge` | **Settled (2026-08-27)** |
@@ -241,6 +242,183 @@ Users reach the jump host at the **desktop/console, never SSH** (team,
 - **Rotation** (future): update the Secret → converge job re-pushes
   `cipassword` (applies next boot; pairs with the twin-safe reboot guardrail).
 
+## 4c. Host baseline (decisions #54/#55)
+
+What the `Host Baseline (SoT-driven)` job and the install's firstboot read
+to turn an installed node into a fleet node — design and placement in
+[host-baseline.md](host-baseline.md), runbook in
+[baremetal-install.md](baremetal-install.md#host-baseline-after-verification).
+Principle (Brian, 2026-10-02): **the SoT is the repository of facts.**
+Per-node facts sit on the Device and its interfaces, fleet/site settings in
+config contexts, credentials in Secrets, hardware policy in the DeviceType
+profile; the code carries mechanics only, and a missing or ambiguous fact is
+a named refusal before anything touches the node.
+
+### The interface model (native fields first)
+
+| Need | Source | Notes |
+|---|---|---|
+| Physical ports | Device interfaces with a physical `type` and **`mac_address`** | Matched to the node's NICs **by MAC** (the permanent address when enslaved), never by name; the Linux name is whatever the node calls that MAC (pinned at install, #51) |
+| Bonds | Interfaces of type **`lag`** named **`bond<N>`**; members via each port's native **LAG** field (`Interface.lag`) | PVE types bonds by name. Mode/hash in the custom fields below; MTU on the record (`mtu`); a member's MTU, when set, must equal its bond's |
+| Bridges | Interfaces of type **`bridge`** named **`vmbr<N>`**; ports via the native **Bridge** field (`Interface.bridge`) — a bond or a physical port | `mode: tagged-all` → VLAN-aware (`bridge-vids 2-4094`); `mode: tagged` → VLAN-aware with the interface's tagged VLANs; no mode → plain bridge; `access` is refused |
+| Management address | `device.primary_ip4`, assigned to the **management bridge** (e.g. `vmbr0`) | Rendered as the bridge's `address`; the gateway is the DefaultGW-role IP in the IP's own parent prefix (exactly one, §3). No other address may sit on the topology, and an interface outside it carrying an address is refused (except `xcc`) |
+| Install NIC | Derived: `primary_ip4`'s bridge → its port (or the port flagged `primary_member`) → if a bond, its member flagged `primary_member` (or its only member) | Feeds the answer's NIC filter and the nested VM's MAC; the same port stays the bond's primary afterwards, so the cable that carried the install keeps carrying management |
+
+Custom fields on **dcim.interface** (bootstrap-created, grouping NFV):
+
+| Key | Type | On | Values / rule |
+|---|---|---|---|
+| `lag_mode` | select | LAG interfaces (**required** on each) | `balance-rr`, `active-backup`, `balance-xor`, `broadcast`, `802.3ad`, `balance-tlb`, `balance-alb` — the bootstrap creates exactly the code's choices (it never deletes one you added). Fleet: data bond `802.3ad` (+ MTU 9000, #54), management bond `active-backup` |
+| `lag_xmit_hash` | select | LAG interfaces | `layer2`, `layer2+3`, `layer3+4`, `encap2+3`, `encap3+4`, `vlan+srcmac`. **Required** for `802.3ad` and `balance-xor` (must match the switch side), refused on modes that do not use it |
+| `primary_member` | boolean | member ports (of a bond or a bridge) | Exactly one per multi-member `active-backup` bond (→ `bond-primary`); on any bond or multi-port bridge it names the install port. Two flags in one group are refused |
+
+Fleet-uniform bond settings come from the config context (below):
+`network.bond_miimon` (required when a bond exists) and `network.lacp_rate`
+(required when an `802.3ad` bond exists).
+
+### Config context `host_baseline`
+
+One top-level key, partial contexts merged by Nautobot (fleet → site →
+device). The bootstrap keeps a ConfigContextSchema **`nfv-host-baseline`**
+equal to the code's shape (types, enums, patterns — no `required`, because
+contexts are partial); attach it to the contexts that carry the key. The
+job checks required-ness on the merged result.
+
+| Key | Required | Consumer | Meaning |
+|---|---|---|---|
+| `packages` | no | firstboot + job | Extra Debian packages; **`lldpd` and `snmpd` are always installed** (the baseline's own dependencies) |
+| `serial_console.speed` (`word`, `parity`, `stop`) | no | firstboot | Line settings for the port the DeviceType profile declares (`install.serial_console.unit`). Speed ∈ 9600/19200/38400/57600/115200; 8N1 unless set. Profile port + this block → GRUB + kernel console + `serial-getty`; either side missing → logged and skipped, never a refusal |
+| `zfs_arc_max_bytes` | no | firstboot | `options zfs zfs_arc_max=` (≥ 64 MiB) + initramfs rebuild; absent = ZFS default |
+| `remove_subscription_nag` | no (default false) | firstboot | Installs the project's subscription-nag hook (script + apt post-invoke) |
+| `root_email` | **yes** | job (AD step) | `root@pam` e-mail |
+| `snmp` | **yes** (or `{enabled: false}`) | job | `contact` (**required**, sysContact); `community_secret` (Secret name of the v2c read-only community; absent = no community); `community_source` (CIDR the community is limited to); `community_view` / per-user `view` (`systemonly`, the only view the rendered file defines; absent = full read-only); `v3_users` (names, or `{name, auth_protocol: SHA/SHA-224/256/384/512, priv_protocol: AES/AES-192/AES-256, auth_secret, priv_secret}` — default SHA/AES and Secrets `snmpv3_<name>_auth` / `_priv`). At least a community or one v3 user. **sysLocation is the Device's Location name** (not the path: a reorganised hierarchy never churns monitoring tags) |
+| `ad` | **yes** (or `{enabled: false}`) | job | `realm`, `domain`, `servers` (1–2), `mode` (`ldap` / `ldaps` / `ldap+starttls`), `base_dn`, `bind_dn` (the bind user), `sync_job.name`, `sync_job.schedule` (systemd calendar event), `admin_group` (the **PVE group id**: synced AD groups are named `<group>-<realm>`), `admin_role` — all **required**. Optional: `port` (PVE default per mode), `verify`, `bind_password_secret` (default `ad_bind_password`), `user_filter`, `group_filter`, `sync_attributes` (e.g. `email=mail`), `sync_defaults_options`, `case_sensitive`, `comment`, `admin_path` (default `/`), `default_realm` (default **true** — AD is the default login realm, #54), `sync_job.scope` (default `both`), `sync_job.enable_new`, `sync_job.remove_vanished`. Options the SoT leaves out are not managed |
+| `service_accounts` | **yes** (`[]` = none) | job | List of `{user, token, role, path, privsep, name}`: `user` in the `pam` or `pve` realm (never `root@pam` or the firstboot `svc-nfv@pve`), `token` id, `role` (must exist on the node), `path` (default `/`), `privsep` **required** boolean, `name` = SecretsGroup suffix (default: the user part, e.g. `datadog`; `proxmox` is reserved). The job owns these identities' ACLs: entries not in the SoT are removed |
+| `network` | **yes** (or `{enabled: false}`) | job | `bond_miimon` (required with any bond), `lacp_rate` (`slow`/`fast`, required with an `802.3ad` bond), `rollback_seconds` (60–900, default 180 — the window in which the job must reconnect after the apply) |
+
+Recommended service accounts (decision #54): `datadog@pam` → `PVEAuditor` on
+`/`; `pdm@pve` → `Administrator` on `/` with `privsep: false` (what Proxmox
+Datacenter Manager's own enrollment produces; revisit when PDM documents a
+minimum).
+
+### Secrets
+
+| Secret (record name) | Created by | Used for |
+|---|---|---|
+| `host_ssh_username` / `host_ssh_password` | bootstrap (existing) | The job's root SSH login (the same pair the host-verification job uses) |
+| `ad_bind_password` (or `ad.bind_password_secret`) | bootstrap | Written on the node to PVE's realm credential file `/etc/pve/priv/realm/<realm>.pw` — where `pveum --password` would store it — never on an argv |
+| `snmp_community` (the name `snmp.community_secret` gives) | bootstrap (the conventional name, plus any name a context references) | `rocommunity`/`rocommunity6` in `/etc/snmp/snmpd.conf` (mode 0600). 1–64 printable characters, no spaces/quotes/`#`/backslash |
+| `snmpv3_<user>_auth` / `snmpv3_<user>_priv` (or the names a v3 user gives) | bootstrap, for every v3 user named in a config context at bootstrap time | `createUser` in snmpd's persistent file with snmpd stopped; 8–128 printable characters, no double quote or backslash |
+
+All are text-file records (`/opt/nautobot/secrets/<name>`, values via
+`./add-secret.sh` on composer stacks). Values resolve with the Device as
+`obj`, so a record's path may be templated per site (e.g.
+`/opt/nautobot/secrets/{{ obj.location.name }}-snmp-community`).
+
+**Per-node token SecretsGroups** — written by the job, named exactly like
+the firstboot deploy token's `<node>-proxmox`: **`<node>-<name>`** (e.g.
+`pve-se455-01-datadog`, `pve-se455-01-pdm`) with Generic/**Username** = the
+token id (`datadog@pam!datadog`) and Generic/**Secret** = the value, over
+text-file Secrets `<slug>-<name>-token-username` / `-secret` in
+`/opt/nautobot/secrets/nodes/` (the Celery worker's read-write mount —
+nautobot-composer#66). A token that exists on the node
+while its Secrets are missing (or rejected by the node with 401) is
+**rotated**.
+
+### provisioning_state
+
+| State | Set by | Read by |
+|---|---|---|
+| `awaiting_install` | the operator (intent) | answer service allowlist; Install Proxmox Node |
+| `bm_installed` | answer service (post-install webhook, or the credentials phone-home) | Host Baseline (eligible); the install job's watch |
+| `baseline_done` | **Host Baseline** after a complete, non-dry run (from `bm_installed`; a re-run keeps it) | Host Baseline (re-runnable, drift checks) |
+| `fabric_done`, `vms_deployed`, `handed_off` | planned layers (plan-of-attack §3) | Host Baseline accepts them for a **dry run** only |
+
+### Example config context (fictional values)
+
+A fleet context (weight 1000, all NFV-role devices) plus a per-site one
+would split this; shown merged. Values are example-only:
+
+```yaml
+host_baseline:
+  packages: [snmp]
+  serial_console: {speed: 115200}
+  zfs_arc_max_bytes: 17179869184        # 16 GiB
+  remove_subscription_nag: true
+  root_email: noc@example.net
+  snmp:
+    contact: "Example NOC <noc@example.net>"
+    community_secret: snmp_community
+    community_source: 192.0.2.0/24
+    v3_users:
+      - {name: datadog, auth_protocol: SHA, priv_protocol: AES}
+  ad:
+    realm: EXAMPLE-AD
+    domain: example.net
+    servers: [192.0.2.10, 192.0.2.11]
+    mode: ldap
+    port: 389
+    base_dn: DC=example,DC=net
+    bind_dn: CN=svc-pve,OU=Service Accounts,DC=example,DC=net
+    user_filter: (memberOf=CN=PVE-Admins,OU=Groups,DC=example,DC=net)
+    group_filter: (cn=PVE-Admins)
+    sync_attributes: email=mail
+    sync_defaults_options: remove-vanished=acl;entry;properties
+    case_sensitive: false
+    comment: Example AD realm
+    default_realm: true
+    sync_job: {name: pve-admins-sync, schedule: "*-*-* 06:00:00", scope: both, enable_new: true}
+    admin_group: PVE-Admins-EXAMPLE-AD
+    admin_role: Administrator
+  service_accounts:
+    - {user: datadog@pam, token: datadog, role: PVEAuditor, path: /, privsep: false}
+    - {user: pdm@pve, token: pdm, role: Administrator, path: /, privsep: false}
+  network:
+    bond_miimon: 100
+    lacp_rate: fast
+    rollback_seconds: 180
+```
+
+Where each setting of the tester's post-deploy script now lives (its
+values are that site's facts: they go into that site's Nautobot, never into
+code or this public repo):
+
+| Script variable | SoT home |
+|---|---|
+| `AD_REALM`, `AD_DOMAIN`, `AD_SERVER1`/`AD_SERVER2`, `AD_BASE_DN`, `AD_BIND_DN`, `AD_USER_FILTER`, `AD_GROUP_FILTER` | `ad.realm`, `ad.domain`, `ad.servers`, `ad.base_dn`, `ad.bind_dn`, `ad.user_filter`, `ad.group_filter` (+ `mode: ldap`, `port: 389`, `case_sensitive: false`, `comment`, `sync_defaults_options: remove-vanished=acl;entry;properties` as the script passed them) |
+| `AD_BIND_PASSWORD` | Secret `ad_bind_password` |
+| `AD_SYNC_NAME`, `AD_SYNC_SCHEDULE` (`--scope both --enable-new 1`) | `ad.sync_job.name`, `.schedule`, `.scope: both`, `.enable_new: true` |
+| `PVE_ADMIN_GROUP` (+ the hard-coded `Administrator`) | `ad.admin_group` (the synced `<group>-<realm>` id), `ad.admin_role` |
+| `ROOT_EMAIL` | `root_email` |
+| `SNMP_LOCATION` | the Device's **Location name** |
+| `SNMP_CONTACT` | `snmp.contact` |
+| `SNMP_COMMUNITY` | Secret named by `snmp.community_secret` (conventionally `snmp_community`) |
+| `SNMPV3_USERS` (`name:authpass:privpass`, SHA/AES, `-V systemonly`) | `snmp.v3_users: [{name, view: systemonly}]` + Secrets `snmpv3_<name>_auth` / `_priv` |
+| `SERIAL_UNIT`, `SERIAL_SPEED` | profile `install.serial_console.unit`; `serial_console.speed` |
+| `ZFS_ARC_MAX_BYTES` | `zfs_arc_max_bytes` |
+| `DATADOG_ROLE`, `PDM_ROLE` and the `datadog-token` / `pdm-token` ids | `service_accounts` (roles per decision #54: PVEAuditor / Administrator) |
+| `MGMT_NICS`, `TRUNK_NICS`, `MGMT_CIDR`, `MGMT_GW` | the interface model above: LAG members by MAC, `primary_ip4` on the management bridge, the DefaultGW-role IP |
+| `DATA_DISK`, `DATA_VG`, `DATA_POOL`, `DATA_STORAGE_ID` | the DeviceType profile (`install.data_volume`, decision #54 names) — firstboot, already built |
+
+### Example interface model (an SE455 V3)
+
+| Interface | Type | LAG / Bridge field | MAC | Other |
+|---|---|---|---|---|
+| `mgmt0` | 1000base-t | LAG `bond1` | port MAC | `primary_member: true` |
+| `mgmt1` | 1000base-t | LAG `bond1` | port MAC | |
+| `data0`, `data1` | 10gbase-x-sfpp | LAG `bond0` | port MACs | `mtu 9000` |
+| `bond1` | lag | Bridge `vmbr0` | — | `lag_mode: active-backup` |
+| `bond0` | lag | Bridge `vmbr1` | — | `lag_mode: 802.3ad`, `lag_xmit_hash: layer3+4`, `mtu 9000` |
+| `vmbr0` | bridge | — | — | `primary_ip4` assigned here |
+| `vmbr1` | bridge | — | — | `mode: tagged-all`, `mtu 9000` |
+| `xcc` | 1000base-t | — | BMC MAC | the BMC IP (never rendered, never pinned) |
+
+Rendered on the node (Linux names from the MAC match): `bond1`
+(active-backup, `bond-primary mgmt0`, miimon 100) under `vmbr0`
+(`address`/`gateway`), `bond0` (802.3ad, layer3+4, lacp-rate fast, MTU 9000)
+under the VLAN-aware `vmbr1` (`bridge-vids 2-4094`, MTU 9000) — the
+tester's layout, with every value from the SoT.
+
 ## 5. Normalization guardrails (the standing rule, operationalized)
 
 - Job inputs are **object references** (Device, SoftwareVersion), never
@@ -250,6 +428,12 @@ Users reach the jump host at the **desktop/console, never SSH** (team,
 - Standards (sizing, port maps, storage/bridge names) are **stamped onto the
   objects they describe** by the layout process — fully materialized per-device
   and per-platform records, no runtime file or config-context lookups. The
-  "define once" DRY lives in the layout engine's templates.
+  "define once" DRY lives in the layout engine's templates. **One scoped
+  exception (decisions #54/#55):** fleet and site settings of the host
+  baseline (AD realm, SNMP, service accounts, serial line settings, ...) live
+  in config contexts under the single key `host_baseline` (§4c) — they are
+  genuinely shared by every node of a site or the fleet and have no native
+  slot; the per-node facts (bonds, bridges, MACs, addresses) stay on the
+  Device's own interfaces.
 - Anything a consumer reads that is not in this document is a bug in this
   document.
