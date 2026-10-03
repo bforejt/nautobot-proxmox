@@ -49,6 +49,7 @@ EXPECTED_JOBS = {
     "InstallProxmoxNode",
     "PrepareInstallerMedia",
     "VerifySe350Host",
+    "HostBaseline",
 }
 
 REGISTRY = []

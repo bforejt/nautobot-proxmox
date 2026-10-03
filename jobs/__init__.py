@@ -7,6 +7,7 @@ when Nautobot syncs this repo as a Git Repository providing "jobs".
 from .baremetal import (  # noqa: F401
     apply_storage_layout,
     discover_platform,
+    host_baseline,
     install_node,
     prepare_media,
     verify_host,
