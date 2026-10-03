@@ -7,8 +7,13 @@
 # Scope: apt repos, the pveum service-account bootstrap, the credentials
 # phone-home, and the profile's data storage step: install.data_pool (JBOD
 # boxes: ZFS data mirror) or install.data_volume (RAID-adapter boxes such as
-# the SE455 V3: LVM-thin on the data virtual drive), registered as PVE storage. Physical-node tuning steps
-# (BIOS-effect checks, NIC quirks) remain plan-of-attack Phase 3.
+# the SE455 V3: LVM-thin on the data virtual drive), registered as PVE storage.
+# Then the host-baseline inputs (decision #55): packages, serial console, ZFS
+# ARC limit and the subscription-nag hook, from the Device's config context
+# (host_baseline) and the profile (install.serial_console). Everything else of
+# the baseline (SNMP, AD, service accounts, bonds/bridges) is the Host Baseline
+# job's. Physical-node tuning steps (BIOS-effect checks, NIC quirks) remain
+# plan-of-attack Phase 3.
 set -euo pipefail
 log() { echo "[nfv-firstboot] $*"; }
 
@@ -274,5 +279,182 @@ elif vgs "${VG}" >/dev/null 2>&1; then
 fi
 
 {% endif -%}
+# --- host-baseline inputs (decision #55): packages, serial console, ZFS ARC
+#     limit and the subscription-nag hook — from the Device's config context
+#     (host_baseline) and the DeviceType profile (install.serial_console).
+#     Like the storage step they run AFTER the credentials phone-home; each is
+#     idempotent, logs what it did, and never stops the script (set -e is
+#     bypassed via ||; the Host Baseline job re-ensures the packages). ---
+nfv_count() { echo "$#"; }   # array length helper (bash ${ #arr[@] } would open a Jinja comment)
+NFV_PKGS=({% for pkg in packages %} {{ pkg | shquote }}{% endfor %} )
+nfv_packages() {
+  local pkg
+  local missing=()
+  for pkg in "${NFV_PKGS[@]}"; do
+    case "$(dpkg-query -W -f='${db:Status-Abbrev}' "${pkg}" 2>/dev/null)" in
+      ii*) ;;
+      *) missing+=("${pkg}") ;;
+    esac
+  done
+  if [ "$(nfv_count "${missing[@]}")" -eq 0 ]; then
+    log "packages: ${NFV_PKGS[*]} already installed"
+  else
+    apt-get update -q >/dev/null 2>&1 || log "packages: apt-get update reported errors — trying the install anyway"
+    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -q -o Dpkg::Options::=--force-confdef \
+         -o Dpkg::Options::=--force-confold "${missing[@]}" >/dev/null 2>&1; then
+      log "packages: apt-get install ${missing[*]} FAILED — the Host Baseline job retries it"
+      return 1
+    fi
+    log "packages: installed ${missing[*]}"
+  fi
+  if systemctl enable --now lldpd >/dev/null 2>&1; then
+    log "packages: lldpd enabled"
+  else
+    log "packages: could not enable lldpd"
+  fi
+}
+nfv_packages || log "packages step incomplete — continuing"
+
+{% if serial_console -%}
+# Serial console: the profile declares the port, the SoT the line settings.
+# GRUB gets a drop-in (sourced after /etc/default/grub); systemd-boot layouts
+# (proxmox-boot-tool, ZFS on UEFI) also /etc/kernel/cmdline. Refreshed through
+# proxmox-boot-tool when it manages the ESPs (/etc/kernel/proxmox-boot-uuids),
+# else update-grub — on ext4/LVM installs the tool is present but manages
+# nothing, and its refresh would skip GRUB entirely.
+NFV_SERIAL_TTY={{ serial_console.tty | shquote }}
+NFV_SERIAL_CONSOLE={{ serial_console.console_arg | shquote }}
+NFV_SERIAL_GRUB={{ serial_console.grub_command | shquote }}
+nfv_serial_console() {
+  local dropin=/etc/default/grub.d/nfv-serial-console.cfg tmp cmdline changed=0
+  mkdir -p /etc/default/grub.d || return 1
+  tmp="$(mktemp)" || return 1
+  cat > "${tmp}" <<EOF
+# Managed by nfv-firstboot: serial console from the SoT — the DeviceType
+# profile's install.serial_console (port) + the config context's
+# host_baseline.serial_console (line settings). A reinstall regenerates it.
+GRUB_CMDLINE_LINUX="\${GRUB_CMDLINE_LINUX} console=tty0 console=${NFV_SERIAL_CONSOLE} 8250.nr_uarts=8"
+GRUB_TERMINAL="console serial"
+GRUB_SERIAL_COMMAND="${NFV_SERIAL_GRUB}"
+EOF
+  if cmp -s "${tmp}" "${dropin}"; then
+    rm -f "${tmp}"
+    log "serial console: ${dropin} already up to date"
+  elif install -m 0644 "${tmp}" "${dropin}"; then
+    rm -f "${tmp}"
+    changed=1
+    log "serial console: wrote ${dropin} (console=${NFV_SERIAL_CONSOLE}; ${NFV_SERIAL_GRUB})"
+  else
+    rm -f "${tmp}"
+    return 1
+  fi
+  if [ -f /etc/kernel/cmdline ]; then
+    cmdline="$(sed -E 's/(^| )(console=[^ ]*|8250\.nr_uarts=[^ ]*)//g; s/  +/ /g; s/^ //; s/ $//' /etc/kernel/cmdline) console=tty0 console=${NFV_SERIAL_CONSOLE} 8250.nr_uarts=8"
+    if [ "$(cat /etc/kernel/cmdline)" != "${cmdline}" ]; then
+      printf '%s\n' "${cmdline}" > /etc/kernel/cmdline || return 1
+      changed=1
+      log "serial console: /etc/kernel/cmdline updated"
+    fi
+  fi
+  if [ "${changed}" -eq 1 ]; then
+    if command -v proxmox-boot-tool >/dev/null 2>&1 && [ -s /etc/kernel/proxmox-boot-uuids ]; then
+      if proxmox-boot-tool refresh >/dev/null 2>&1; then
+        log "serial console: proxmox-boot-tool refresh done"
+      else
+        log "serial console: proxmox-boot-tool refresh FAILED"
+        return 1
+      fi
+    elif update-grub >/dev/null 2>&1; then
+      log "serial console: update-grub done"
+    else
+      log "serial console: update-grub FAILED"
+      return 1
+    fi
+  fi
+  if ! systemctl enable "serial-getty@${NFV_SERIAL_TTY}.service" >/dev/null 2>&1; then
+    log "serial console: could not enable serial-getty@${NFV_SERIAL_TTY}"
+    return 1
+  fi
+  if [ -e "/dev/${NFV_SERIAL_TTY}" ]; then
+    systemctl start "serial-getty@${NFV_SERIAL_TTY}.service" >/dev/null 2>&1 || true
+  fi
+  log "serial console: serial-getty@${NFV_SERIAL_TTY} enabled; kernel and GRUB output on ${NFV_SERIAL_TTY} from the next reboot"
+}
+nfv_serial_console || log "serial console step incomplete — continuing"
+{% else -%}
+log {{ ("serial console: " ~ serial_console_note) | shquote }}
+{% endif %}
+{% if zfs_arc_max_bytes -%}
+NFV_ARC_MAX={{ zfs_arc_max_bytes }}
+nfv_zfs_arc() {
+  local want="options zfs zfs_arc_max=${NFV_ARC_MAX}"
+  if [ "$(cat /etc/modprobe.d/zfs.conf 2>/dev/null)" = "${want}" ]; then
+    log "zfs arc: /etc/modprobe.d/zfs.conf already sets zfs_arc_max=${NFV_ARC_MAX}"
+  else
+    printf '%s\n' "${want}" > /etc/modprobe.d/zfs.conf || return 1
+    log "zfs arc: /etc/modprobe.d/zfs.conf now sets zfs_arc_max=${NFV_ARC_MAX}"
+    if update-initramfs -u -k all >/dev/null 2>&1; then
+      log "zfs arc: initramfs updated"
+    else
+      log "zfs arc: update-initramfs FAILED — the limit applies only once the initramfs is rebuilt"
+      return 1
+    fi
+  fi
+  if [ -w /sys/module/zfs/parameters/zfs_arc_max ]; then
+    if echo "${NFV_ARC_MAX}" > /sys/module/zfs/parameters/zfs_arc_max; then
+      log "zfs arc: runtime limit set as well"
+    fi
+  fi
+}
+nfv_zfs_arc || log "zfs arc step incomplete — continuing"
+{% else -%}
+log "zfs arc: no host_baseline.zfs_arc_max_bytes in the SoT — left at the ZFS default"
+{% endif %}
+{% if remove_nag -%}
+# Subscription nag (host_baseline.remove_subscription_nag): the project's own
+# idempotent hook — a script patching the widget toolkit the standard PVE 8/9
+# way plus an apt post-invoke hook that re-applies it after every package run.
+nfv_subscription_nag() {
+  cat > /usr/local/sbin/nfv-remove-subscription-nag <<'NAGEOF' || return 1
+#!/bin/sh
+# Managed by nfv-firstboot (host_baseline.remove_subscription_nag in the SoT).
+# Removes the "No valid subscription" dialog from the Proxmox VE web UI by
+# neutralising the widget toolkit's subscription check — the standard edit for
+# PVE 8/9, restricted to the exact expression. Idempotent; re-run by the apt
+# hook /etc/apt/apt.conf.d/86nfv-remove-subscription-nag after every package
+# run (a proxmox-widget-toolkit upgrade restores the stock file). ALWAYS exits
+# 0, so it can never fail apt; logs to the journal (tag below).
+JS=/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js
+TAG=nfv-remove-subscription-nag
+say() { logger -t "$TAG" -- "$*" 2>/dev/null; echo "$TAG: $*" >&2; }
+[ -f "$JS" ] || { say "$JS not found - nothing to patch"; exit 0; }
+grep -q 'NoMoreNagging' "$JS" && exit 0
+if grep -qF "data.status.toLowerCase() !== 'active'" "$JS"; then
+  if sed -i "s/data\.status\.toLowerCase() !== 'active'/data.status.toLowerCase() === 'NoMoreNagging'/" "$JS" \
+     && grep -q 'NoMoreNagging' "$JS"; then
+    say "subscription dialog removed from $JS"
+  else
+    say "patching $JS FAILED - the UI keeps the subscription dialog"
+  fi
+else
+  say "pattern not found in $JS (proxmox-widget-toolkit $(dpkg-query -W -f='${Version}' proxmox-widget-toolkit 2>/dev/null)) - the UI keeps the subscription dialog; this toolkit version needs a new pattern"
+fi
+exit 0
+NAGEOF
+  chmod 0755 /usr/local/sbin/nfv-remove-subscription-nag || return 1
+  cat > /etc/apt/apt.conf.d/86nfv-remove-subscription-nag <<'APTEOF' || return 1
+// Managed by nfv-firstboot (host_baseline.remove_subscription_nag): re-apply
+// the subscription-nag patch after every dpkg run. The script always exits 0
+// and `|| true` keeps apt safe even if it is missing or broken.
+DPkg::Post-Invoke { "if [ -x /usr/local/sbin/nfv-remove-subscription-nag ]; then /usr/local/sbin/nfv-remove-subscription-nag || true; fi"; };
+APTEOF
+  log "subscription nag: hook installed (/usr/local/sbin/nfv-remove-subscription-nag + apt post-invoke)"
+  /usr/local/sbin/nfv-remove-subscription-nag 2>&1 | while read -r line; do log "subscription nag: ${line}"; done
+  systemctl try-reload-or-restart pveproxy.service >/dev/null 2>&1 || true
+}
+nfv_subscription_nag || log "subscription nag step incomplete — continuing"
+{% else -%}
+log "subscription nag: not requested (host_baseline.remove_subscription_nag is not true) — UI unchanged"
+{% endif %}
 # Single-use package: remove so the hook can never re-run on later boots.
 apt-get -y purge proxmox-first-boot >/dev/null 2>&1 || true

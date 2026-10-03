@@ -29,10 +29,12 @@ from ..lib.answer_service import (
     NFV_ROLE,
     evaluate_profile_preflight,
     fetch_info,
+    firstboot_inputs_warning,
     is_hostname_label,
     nfv_role_refusal,
     profile_feature_keys,
 )
+from ..lib import host_baseline as hb
 from ..lib.bmc_identity import BmcIdentityError, verify_bmc_identity
 from ..lib.install_delivery import (
     WATCH_TIMEOUT_DEFAULTS,
@@ -118,12 +120,26 @@ class InstallProxmoxNode(Job):
         return image
 
     def _mgmt_mac(self, device):
+        """MAC of the SoT install NIC — derived exactly as the answer service
+        derives it (decision #55): primary_ip4's interface; a bridge resolves
+        to its port, a LAG to its primary member. An ambiguous model refuses
+        here, before anything boots (the answer service would 409 it)."""
         if device.primary_ip4 is None:
             return None
-        for iface in device.interfaces.all():
-            if device.primary_ip4 in iface.ip_addresses.all():
-                return str(iface.mac_address) if iface.mac_address else None
-        return None
+        records = [
+            hb.interface_record(
+                id=iface.pk, name=iface.name, type=iface.type, lag=iface.lag_id,
+                bridge=iface.bridge_id, mac=iface.mac_address, custom_fields=iface.cf,
+            )
+            for iface in device.interfaces.all()
+        ]
+        ids = [str(i.pk) for i in device.primary_ip4.interfaces.filter(device=device)]
+        try:
+            nic, _ = hb.derive_install_interface(device.name, str(device.primary_ip4.address), ids, records)
+        except hb.InstallNicError as exc:
+            raise ContractViolation(f"Install NIC: {exc}")
+        # The nested adapter renders it into the VM's net0 (virtio=<mac>).
+        return nic["mac"].upper() if nic.get("mac") else None
 
     # ---- answer-service preflight ----
 
@@ -149,6 +165,9 @@ class InstallProxmoxNode(Job):
         if verdict == "refuse":
             raise ContractViolation(message)
         (self.logger.warning if verdict == "warn" else self.logger.info)("%s", message)
+        warning = firstboot_inputs_warning(info, device.get_config_context(), base)
+        if warning:
+            self.logger.warning("%s", warning)
 
     # ---- delivery paths ----
 
@@ -419,7 +438,8 @@ class InstallProxmoxNode(Job):
             or self._mgmt_mac(device),
             f"{device.name} installs static (primary_ip4 {device.primary_ip4}) but the "
             "interface carrying it has no MAC address — pin the mgmt interface MAC so "
-            "the answer's NIC filter is exact (the answer service refuses otherwise)",
+            "the answer's NIC filter is exact (the answer service refuses otherwise; with a "
+            "bridge/LAG model the MAC belongs on the port the derivation reaches)",
         )
         method = profile["delivery"].get("method")
         watch_timeout = None

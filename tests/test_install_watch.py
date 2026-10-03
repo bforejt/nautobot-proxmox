@@ -511,5 +511,61 @@ class NestedReinstallReconcile(unittest.TestCase):
         self.assertEqual(self.calls, [("boot", 140)])
 
 
+class _Qs(list):
+    def all(self):
+        return self
+
+    def filter(self, **kwargs):
+        return self
+
+
+def _orm_iface(pk, name, type, lag=None, bridge=None, mac=None, primary=None):
+    return types.SimpleNamespace(pk=pk, name=name, type=type, lag_id=lag, bridge_id=bridge, mac_address=mac,
+                                 cf={} if primary is None else {"primary_member": primary})
+
+
+class MgmtMacDerivation(unittest.TestCase):
+    """Decision #55: the install job's static-install precheck (and the nested
+    VM's NIC MAC) derive the install port exactly like the answer service."""
+
+    def device(self, primary_ids, rows):
+        by_pk = {r.pk: r for r in rows}
+        primary = types.SimpleNamespace(address="10.40.3.10/23",
+                                        interfaces=_Qs(by_pk[i] for i in primary_ids))
+        return types.SimpleNamespace(name="pve-se455-01", primary_ip4=primary, interfaces=_Qs(rows))
+
+    def fleet(self, **flags):
+        return [
+            _orm_iface("v0", "vmbr0", "bridge"),
+            _orm_iface("b1", "bond1", "lag", bridge="v0"),
+            _orm_iface("m0", "mgmt0", "1000base-t", lag="b1", mac="3c:ec:ef:00:00:01",
+                       primary=flags.get("m0", True)),
+            _orm_iface("m1", "mgmt1", "1000base-t", lag="b1", mac="3c:ec:ef:00:00:02",
+                       primary=flags.get("m1")),
+        ]
+
+    def test_bridge_model_resolves_the_primary_member(self):
+        job = inode.InstallProxmoxNode()
+        self.assertEqual(job._mgmt_mac(self.device(["v0"], self.fleet())), "3C:EC:EF:00:00:01")
+
+    def test_plain_port_unchanged(self):
+        job = inode.InstallProxmoxNode()
+        rows = [_orm_iface("p", "mgmt", "virtual", mac="aa:bb:cc:dd:ee:ff")]
+        self.assertEqual(job._mgmt_mac(self.device(["p"], rows)), "AA:BB:CC:DD:EE:FF")
+        self.assertIsNone(job._mgmt_mac(self.device(["p"], [_orm_iface("p", "mgmt", "virtual")])))
+
+    def test_ambiguity_refuses_before_booting(self):
+        job = inode.InstallProxmoxNode()
+        with self.assertRaises(inode.ContractViolation) as ctx:
+            job._mgmt_mac(self.device(["v0"], self.fleet(m0=None)))
+        self.assertIn("Install NIC: LAG bond1 on pve-se455-01 has several members", str(ctx.exception))
+        with self.assertRaises(inode.ContractViolation):
+            job._mgmt_mac(self.device(["v0"], self.fleet(m1=True)))
+
+    def test_no_primary_ip_is_a_dhcp_install(self):
+        job = inode.InstallProxmoxNode()
+        self.assertIsNone(job._mgmt_mac(types.SimpleNamespace(name="n", primary_ip4=None)))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
