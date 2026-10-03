@@ -20,6 +20,11 @@ Created here (decision log #8, Device-only modeling):
   - Custom fields: platform tunables (day0_builder/machine_type/console_user)
     and dcim.device fields (provisioning_state, vmid, sizing, hypervisor
     targets incl. mgmt_bridge, secrets_group, pa_mgmt_mode)
+  - Host baseline (decision #55): dcim.interface fields lag_mode /
+    lag_xmit_hash (select, choices = the code's) and primary_member (bool);
+    the Secret records ad_bind_password / snmp_community plus every Secret a
+    config context's host_baseline block names (SNMPv3 passphrases); the
+    ConfigContextSchema nfv-host-baseline (kept equal to the code's)
 """
 
 from django.contrib.contenttypes.models import ContentType
@@ -31,6 +36,8 @@ from nautobot.extras.choices import (
     SecretsGroupSecretTypeChoices,
 )
 from nautobot.extras.models import (
+    ConfigContext,
+    ConfigContextSchema,
     CustomField,
     CustomFieldChoice,
     ExternalIntegration,
@@ -41,6 +48,8 @@ from nautobot.extras.models import (
     SecretsGroupAssociation,
     Status,
 )
+
+from ..lib import host_baseline as hb
 
 PROVISIONING_STATES = [
     "awaiting_install",
@@ -327,7 +336,74 @@ class BootstrapNfvSchema(Job):
                     if ch_created:
                         self._log_result("  choice", mode, True)
 
+        self._host_baseline()
+
         return "NFV data model bootstrapped (idempotent — safe to re-run)."
+
+    def _host_baseline(self):
+        """Decision #55: the SoT model the Host Baseline job reads."""
+        # ---- interface custom fields: the bond/bridge model ----
+        # Bonds and bridges are native interfaces (type lag/bridge, members via
+        # Interface.lag / Interface.bridge, mtu, mode tagged-all); only what
+        # Nautobot has no slot for is a custom field. The select choice lists
+        # are maintained to equal the code's (the day0_builder handshake).
+        interface_ct = ContentType.objects.get(app_label="dcim", model="interface")
+        for key, cf_type, label, choices in (
+            (hb.CF_LAG_MODE, "select", "Bond Mode", hb.LAG_MODES),
+            (hb.CF_LAG_XMIT_HASH, "select", "Bond Transmit Hash Policy", hb.XMIT_HASH_POLICIES),
+            (hb.CF_PRIMARY_MEMBER, "boolean", "Primary Member", ()),
+        ):
+            cf, created = CustomField.objects.get_or_create(
+                key=key, defaults={"type": cf_type, "label": label, "grouping": "NFV"},
+            )
+            cf.content_types.add(interface_ct)
+            self._log_result("CustomField", f"{key} (interface)", created)
+            for i, value in enumerate(choices):
+                _, ch_created = CustomFieldChoice.objects.get_or_create(
+                    custom_field=cf, value=value, defaults={"weight": (i + 1) * 10}
+                )
+                if ch_created:
+                    self._log_result("  choice", value, True)
+
+        # ---- Secret RECORDS the baseline resolves (values never) ----
+        # The two conventional names always; plus every name a config
+        # context's host_baseline block references (SNMPv3 passphrases are
+        # per user: snmpv3_<user>_auth / _priv unless the context names
+        # others). Create-only, text-file provider at the standard path.
+        names = [hb.DEFAULT_AD_BIND_SECRET, hb.DEFAULT_SNMP_COMMUNITY_SECRET]
+        for context in ConfigContext.objects.all():
+            names += hb.referenced_secret_names(context.data)
+        for secret_name in dict.fromkeys(names):
+            _, created = Secret.objects.get_or_create(
+                name=secret_name,
+                defaults={
+                    "provider": "text-file",
+                    "parameters": {"path": f"/opt/nautobot/secrets/{secret_name}"},
+                },
+            )
+            self._log_result("Secret", f"{secret_name} (record only)", created)
+
+        # ---- ConfigContextSchema for host_baseline (shape only) ----
+        # Code-owned like the choice lists: brought back to the code's schema
+        # on every run. Attach it to the contexts that carry host_baseline for
+        # edit-time validation; the job enforces required-ness on the merge.
+        schema = ConfigContextSchema.objects.filter(name=hb.CONTEXT_SCHEMA_NAME).first()
+        description = (
+            "Shape of the NFV host_baseline config-context key (Host Baseline job + firstboot "
+            "inputs; nautobot-proxmox decision #55). Maintained by Bootstrap NFV Data Model."
+        )
+        if schema is None:
+            schema = ConfigContextSchema(name=hb.CONTEXT_SCHEMA_NAME, description=description,
+                                         data_schema=hb.CONTEXT_JSON_SCHEMA)
+            schema.validated_save()
+            self._log_result("ConfigContextSchema", hb.CONTEXT_SCHEMA_NAME, True)
+        elif schema.data_schema != hb.CONTEXT_JSON_SCHEMA:
+            schema.data_schema = hb.CONTEXT_JSON_SCHEMA
+            schema.description = description
+            schema.validated_save()
+            self.logger.info("ConfigContextSchema %r: updated to this release's shape", hb.CONTEXT_SCHEMA_NAME)
+        else:
+            self._log_result("ConfigContextSchema", hb.CONTEXT_SCHEMA_NAME, False)
 
 
 register_jobs(BootstrapNfvSchema)
