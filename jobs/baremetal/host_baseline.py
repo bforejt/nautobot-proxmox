@@ -270,7 +270,7 @@ class HostBaseline(Job):
             problems.append(
                 f"the worker cannot write {NODE_SECRETS_DIR} — service-account tokens are stored there "
                 "as text-file Secrets (the answer service's mechanism); mount secrets/nodes read-write "
-                "into the Celery worker (nautobot-composer host-baseline-support) or point "
+                "into the Celery worker (nautobot-composer#66) or point "
                 "NFV_NODE_SECRETS_DIR at a writable directory both Nautobot containers see"
             )
         if cfg["network"] is not None and device.primary_ip4 is not None:

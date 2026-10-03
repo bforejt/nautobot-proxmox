@@ -113,7 +113,7 @@ def resolve_bmc(device):
 # see them. The answer service writes the firstboot deploy token there
 # (<slug>_proxmox_token_*); the Host Baseline job writes the service-account
 # tokens beside them — composer mounts this directory read-write into the
-# Celery worker only (nautobot-composer: host-baseline-support).
+# Celery worker only (nautobot-composer#66).
 NODE_SECRETS_DIR = os.environ.get("NFV_NODE_SECRETS_DIR", "/opt/nautobot/secrets/nodes")
 
 

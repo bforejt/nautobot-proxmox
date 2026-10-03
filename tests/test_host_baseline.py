@@ -466,6 +466,10 @@ class NetworkModel(unittest.TestCase):
                          "eno5 carries address(es) 10.8.8.8/24 but is not part of the bond/bridge topology"),
             "no gateway": (dict(gateway=None), "no DefaultGW-role IP in primary_ip4's parent prefix"),
             "gateway outside": (dict(gateway="192.0.2.1"), "DefaultGW 192.0.2.1 is outside primary_ip4's network 10.40.2.0/23"),
+            "bridge two flags": (dict(rows=fleet_interfaces(
+                bond1=iface("b1", "bond1", "lag", bridge="v0", lag_mode="active-backup", primary_member=True),
+                spare=iface("s", "eno9", "1000base-t", mac="3c:ec:ef:00:00:09", bridge="v0", primary_member=True))),
+                "bridge vmbr0: primary_member is set on several ports (bond1, eno9)"),
             "virtual member": (dict(rows=fleet_interfaces(data1=iface("d1", "data1.10", "virtual", lag="b0",
                                                                        mac="3c:ec:ef:00:00:04"))),
                                "data1.10 (type virtual) is a member of LAG bond0 but is not a physical port"),
@@ -1368,6 +1372,184 @@ class Job(unittest.TestCase):
         status, _ = job._report(6, events)
         self.assertEqual(status, "changed")
         self.assertNotIn(value, json.dumps(job.logger.lines))
+
+
+# ------------------------------------------- docs <-> code (troubleshooting)
+
+# Stable fragments of every refusal/warning the baseline adds (job, library,
+# applier, answer service, firstboot). Each must still exist in the code AND
+# be quoted in docs/baremetal-install.md's troubleshooting table — so a
+# reworded message cannot silently orphan its row (or the reverse).
+MESSAGE_FRAGMENTS = [
+    # config context + secrets (jobs/lib/host_baseline.py)
+    "config context has no 'host_baseline' block",
+    "to skip that step on purpose",
+    "contains a control character (newline, tab, ...) — not allowed",
+    "grants no access",
+    "is not managed by the Host Baseline",
+    "is reserved (<node>-proxmox holds the deploy token)",
+    "would collide",
+    "is not a SecretsGroup suffix",
+    "is a built-in PVE realm",
+    "must be 1-64 printable ASCII characters without spaces, quotes, '#' or backslashes (snmpd.conf token)",
+    "must be 8-128 printable ASCII characters without double quotes or backslashes (net-snmp createUser)",
+    "contains a line break or NUL — PVE reads only its first line",
+    "the Device has no Location name for SNMP sysLocation",
+    "contains a control character — cannot be sysLocation",
+    # install NIC derivation (library + answer service)
+    "is not assigned to any interface of",
+    "ambiguous install NIC; keep it on one",
+    "has no member interfaces — set the",
+    "none is flagged primary_member — flag the port that carries the install",
+    "primary_member is set on several members",
+    "only bridge -> LAG -> port nesting is supported",
+    # network model
+    "must sit on exactly one interface of the device",
+    "not on a bridge — model the management bridge (vmbr0, type bridge)",
+    "no DefaultGW-role IP in primary_ip4's parent prefix (contract §3)",
+    "is outside primary_ip4's network",
+    "contract §3 allows exactly one",
+    "is outside 576-9216",
+    "but is not a physical port",
+    "is both a LAG member and a bridge port",
+    "has no MAC address — the baseline matches ports to the node's NICs by MAC, never by name",
+    "must be named bond<N>",
+    "must be named vmbr<N>",
+    "has no valid lag_mode custom field",
+    "but has no lag_xmit_hash — set the transmit hash policy in the SoT (it must match the switch side)",
+    "does not use it — clear the field or fix the mode",
+    "needs host_baseline.network.bond_miimon in the config context",
+    "is 802.3ad but host_baseline.network.lacp_rate is not set",
+    "(the kernel forces the bond's MTU onto members)",
+    "has another bridge",
+    "is set on several ports",
+    "is mode tagged but carries no tagged VLANs",
+    "has mode access — use tagged-all (VLAN-aware) or no mode (plain bridge)",
+    "besides primary_ip4",
+    "is not part of the bond/bridge topology — the baseline would drop it",
+    "is not among the node's physical NICs",
+    "wrong MAC in Nautobot, or the card is missing",
+    "appears on several node NICs",
+    "(duplicate MAC in Nautobot)",
+    # identity + planning
+    "wrong primary_ip4 or wrong Device; refusing to touch it",
+    "could not read the node's hostname",
+    "could not read the node's DMI serial",
+    "refusing to touch that machine",
+    "exists on the node with type",
+    "a sync job's realm is fixed",
+    "could not list the node's PVE roles (pveum role list)",
+    "(named in host_baseline) does not exist on the node",
+    # bond state
+    "is missing — the bond is not up",
+    "running mode",
+    "running members",
+    "LACP has no partner",
+    "the switch ports are not running LACP for this bundle yet",
+    "check the switch-side channel",
+    "is not carrying traffic (its link down?)",
+    # the job (jobs/baremetal/host_baseline.py)
+    "refusing to baseline it",
+    "Dry run is off but Confirm is not ticked — refusing to change the node",
+    "the Host Baseline applies to",
+    "has no serial — the identity check compares it with the node's DMI serial",
+    "has no primary_ip4 — the job connects to it and renders it onto the management bridge",
+    "does not exist — re-run Bootstrap NFV Data Model",
+    "has no readable value",
+    "the worker cannot write",
+    "could not open an SSH session to",
+    "login is not root",
+    "Could not verify the stored",
+    "the node returned no usable value for",
+    "but the node rejects it (401)",
+    "the SSH session ended during the apply",
+    "the SSH session to the node ended mid-step",
+    "the applier did not finish",
+    "network apply lost management reachability",
+    "the rollback timer fired before the job could cancel it",
+    "the apply did not take effect",
+    "but the running bonds do not match the SoT",
+    "the running bonds do not match the SoT although the file does",
+    "pending PVE GUI network changes exist in /etc/network/interfaces.new",
+    "failed on the node — see the log",
+    # the applier (jobs/lib/host_baseline_applier.sh)
+    "the applier must run as root",
+    "(trying the install anyway)",
+    "(SNMPv3 users are created with snmpd stopped)",
+    "could not append createUser to",
+    "snmpd is not active after the restart",
+    "systemctl enable snmpd failed",
+    "the payload carries no bind password",
+    "initial realm sync failed",
+    "sync --dry-run failed",
+    "(realm sync failed, or the group filter excludes it)",
+    "token remove rc=",
+    "(a re-run rotates a token left without stored Secrets)",
+    "token add printed no value",
+    "discarding pending PVE GUI network changes staged in",
+    "ifupdown2 rejected the rendered file",
+    "could not arm the rollback timer",
+    "nothing applied, timer cancelled",
+    "the rollback already ran",
+    "the rollback fired while confirming",
+    "it will restore the previous file",
+    # answer service + firstboot (bmc/answer_service)
+    "static install needs the install port's MAC (derived through the management bridge/LAG) recorded in Nautobot (contract §4)",
+    "record the port's MAC on its Nautobot interface",
+    "parity must be no, odd or even",
+    "has unknown key(s)",
+    "zfs_arc_max_bytes must be an integer >= 67108864",
+    "remove_subscription_nag must be true or false",
+    "packages must be a list of Debian package names",
+    "must be a mapping like {speed: 115200}",
+    "word must be 5-8",
+    "stop must be 1 or 2",
+    "config context host_baseline must be a mapping",
+    "must be a mapping like {unit: 0}",
+    "must be an integer 0-7 (ttyS<unit>)",
+    "does not render the host_baseline firstboot input(s)",
+    "serial console NOT configured",
+    "declares no serial port (install.serial_console) — skipped",
+    "FAILED — the Host Baseline job retries it",
+    "update-grub FAILED",
+    "proxmox-boot-tool refresh FAILED",
+    "could not enable serial-getty@",
+    "update-initramfs FAILED",
+    "step incomplete — continuing",
+    "this toolkit version needs a new pattern",
+]
+SOURCES = [
+    ROOT / "jobs" / "lib" / "host_baseline.py",
+    ROOT / "jobs" / "lib" / "host_baseline_applier.sh",
+    ROOT / "jobs" / "baremetal" / "host_baseline.py",
+    ROOT / "jobs" / "baremetal" / "install_node.py",
+    ROOT / "jobs" / "lib" / "answer_service.py",
+    ROOT / "bmc" / "answer_service" / "app.py",
+    ROOT / "bmc" / "answer_service" / "templates" / "firstboot.sh.j2",
+]
+
+
+def _flatten(text):
+    """Joined f-string pieces / wrapped lines -> one comparable string."""
+    text = re.sub(r'"\s*\n\s*f?"', "", text)  # adjacent string literals across lines
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+class DocsCoverMessages(unittest.TestCase):
+    def test_every_message_is_in_the_code_and_the_runbook(self):
+        code = _flatten("\n".join(path.read_text() for path in SOURCES))
+        code = code.replace("{CF_PRIMARY_MEMBER}", "primary_member").replace("{CF_LAG_MODE}", "lag_mode")
+        code = code.replace("{CF_LAG_XMIT_HASH}", "lag_xmit_hash").replace("{CONTEXT_KEY}", "host_baseline")
+        code = code.replace("{hb.HOST_SSH_USERNAME_SECRET}", "host_ssh_username")
+        code = code.replace("{ARC_MIN_BYTES}", "67108864").replace("{{", "{").replace("}}", "}")
+        if 'nfv_role_refusal(device, "baseline it")' in code:  # "... refusing to {action} ..."
+            code += " refusing to baseline it"
+        docs = _flatten((ROOT / "docs" / "baremetal-install.md").read_text())
+        missing_code = [m for m in MESSAGE_FRAGMENTS if m not in code]
+        missing_docs = [m for m in MESSAGE_FRAGMENTS if m not in docs]
+        self.assertEqual(missing_code, [], "fragments no longer in the code")
+        self.assertEqual(missing_docs, [], "fragments missing from docs/baremetal-install.md troubleshooting")
 
 
 if __name__ == "__main__":

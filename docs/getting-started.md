@@ -16,7 +16,10 @@ Sync. Git-synced jobs arrive **disabled** — enable each one under Jobs before
 its Run button works. Then run **`Bootstrap NFV Data Model`** once (it is
 idempotent — re-run any time; re-running after a repo update adds only what is
 new). This creates every role, relationship, DeviceType, platform, status, and
-custom field the other jobs rely on. (These jobs run on Nautobot
+custom field the other jobs rely on — since decision #55 also the interface
+custom fields of the host-baseline bond/bridge model (`lag_mode`,
+`lag_xmit_hash`, `primary_member`), the baseline's Secret records, and the
+ConfigContextSchema `nfv-host-baseline` (see step 8). (These jobs run on Nautobot
 2.4 and 3.x — validated on 2.4.30 and 3.2. Standing up the stack fresh with
 nautobot-composer? Composer can do this **whole step** for you:
 `./setup.sh --with-nfv-jobs` registers this repo, syncs, enables the jobs,
@@ -52,6 +55,11 @@ nautobot-composer stack, one `./add-secret.sh <name>` per credential
   lab boots.
 - `scm_registration_pin_id` / `scm_registration_pin_value` — only needed for
   devices with `pa_mgmt_mode=scm` (Strata Cloud Manager registration).
+- `ad_bind_password`, `snmp_community` and `snmpv3_<user>_auth` /
+  `snmpv3_<user>_priv` — only for the **Host Baseline** job (step 8): the AD
+  realm's bind password, the SNMP v2c community, the SNMPv3 passphrases.
+  The bootstrap creates the per-user records for every v3 user a config
+  context names — re-run it after adding users.
 
 Not on composer? Write each value to the file the record's path names
 (`/opt/nautobot/secrets/<name>`, readable by the Nautobot web and worker
@@ -183,6 +191,19 @@ Jobs → **`Deploy VNF Device (SoT-driven)`**, pick the Planned device. It reads
 the contract, deploys, and writes back the VMID + flips the device to Active.
 Teardown/redeploy: **`Decommission VNF Device (SoT-driven)`**. Pre-stage images
 ahead of a window with **`Ingest Image onto Proxmox Node`**.
+
+## 8. Host baseline (optional — nodes you want fleet-standard)
+
+For Proxmox nodes that should carry the fleet baseline — SNMP, the AD realm
+with its sync job and admin ACL, service-account tokens (Datadog, PDM), and
+the bond/bridge network — model them per
+[sot-data-contract.md §4c](sot-data-contract.md#4c-host-baseline-decisions-5455)
+(config context `host_baseline`, bond and bridge interfaces, the Secrets
+above), set `provisioning_state=bm_installed` on a node built outside the
+install loop, and run **`Host Baseline (SoT-driven)`** — dry run first. The
+job needs the root SSH login (`host_ssh_*`) and, on composer, the worker's
+read-write `secrets/nodes` mount (nautobot-composer#66). Runbook:
+[baremetal-install.md](baremetal-install.md#host-baseline-after-verification).
 
 ---
 

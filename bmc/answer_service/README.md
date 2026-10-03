@@ -47,8 +47,35 @@ runbooks: [docs/baremetal-install.md](../../docs/baremetal-install.md).
 | `install.reboot_mode` | `reboot` / `power-off` after install |
 | `install.data_pool` | Firstboot: ZFS mirror over the largest unused disk pair → zfspool storage (JBOD boxes) |
 | `install.data_volume` | Firstboot: LVM-thin on the largest unused disk → lvmthin storage (RAID-adapter boxes, e.g. the SE455 V3's data volume) |
+| `install.serial_console` | `{unit: N}` — the DeviceType HAS a serial port, `ttyS<N>` (0–7; only `unit` is accepted). The line settings come from the config context (below); with both, firstboot configures GRUB + kernel console and `serial-getty`. On for the SE455 V3 (decision #55) |
 | `delivery.method`, `delivery.iso_url_schemes`, `delivery.vm` | Jobs: `pve-nested` / `redfish-vmedia` / `pxe`; ISO URL schemes the BMC can mount; nested VM sizing |
 | `storage.controller`, `storage.volumes` | Jobs: out-of-band RAID volumes to ensure via the BMC before the installer boots (decision #50) |
+
+## Config-context inputs (`host_baseline`, decision #55)
+
+The Device is fetched with `?include=config_context`; firstboot renders these
+keys of the rendered context (contract §4c). Absent keys are logged and
+skipped; a malformed one is a `409 config context: …` at answer time, before
+the installer runs:
+
+| Key | Firstboot does |
+|---|---|
+| `packages` | Installs `lldpd` + `snmpd` (always) plus these Debian packages; enables `lldpd` |
+| `serial_console` (`speed`; optional `word`, `parity`, `stop`) | With the profile's port: GRUB drop-in `/etc/default/grub.d/nfv-serial-console.cfg` (`console=tty0 console=ttyS<N>,<speed><parity><word>`, `GRUB_TERMINAL="console serial"`, `GRUB_SERIAL_COMMAND`), `/etc/kernel/cmdline` on systemd-boot layouts, `proxmox-boot-tool refresh` when it manages the ESPs else `update-grub`, `serial-getty@ttyS<N>` |
+| `zfs_arc_max_bytes` | `/etc/modprobe.d/zfs.conf` + `update-initramfs -u -k all` (and the runtime limit when ZFS is loaded) |
+| `remove_subscription_nag` | `/usr/local/sbin/nfv-remove-subscription-nag` + apt `DPkg::Post-Invoke` hook (`/etc/apt/apt.conf.d/86nfv-remove-subscription-nag`); never fails apt, logs when the pattern is not found |
+
+These steps run after the credentials phone-home and the data-storage step,
+each idempotent and non-fatal. The install NIC for static installs is
+derived through the Device's bridge/LAG model (primary IP → bridge → port or
+bond → member flagged `primary_member`); an ambiguous model is a
+`409 install NIC: …`.
+
+`GET /info` lists `profile_features` (now with `serial_console`) and
+`firstboot_features` (`packages`, `serial_console`, `zfs_arc_max_bytes`,
+`remove_subscription_nag`): the install job refuses a stale image that lacks a
+profile feature the DeviceType uses, and warns when the Device's config
+context sets a firstboot input the image would ignore.
 
 ## Media forge (decision #44 — **off by default**, lab/build instances only)
 

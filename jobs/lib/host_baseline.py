@@ -38,8 +38,8 @@ CF_LAG_MODE = "lag_mode"
 CF_LAG_XMIT_HASH = "lag_xmit_hash"
 CF_PRIMARY_MEMBER = "primary_member"
 
-# Linux bonding modes / transmit hash policies — the bootstrap keeps the two
-# select custom fields' choice lists equal to these (code<->data handshake).
+# Linux bonding modes / transmit hash policies — the bootstrap seeds the two
+# select custom fields with exactly these choices (code<->data handshake).
 LAG_MODES = ("balance-rr", "active-backup", "balance-xor", "broadcast", "802.3ad",
              "balance-tlb", "balance-alb")
 XMIT_HASH_POLICIES = ("layer2", "layer2+3", "layer3+4", "encap2+3", "encap3+4", "vlan+srcmac")
@@ -759,6 +759,10 @@ def build_network_model(device_name, interfaces, primary_address, primary_ids, g
         if not _BRIDGE_NAME_RE.match(name):
             problems.append(f"{where}: bridge {name!r} must be named vmbr<N> (PVE types bridges by name)")
         ports = sorted((i for i in interfaces if i.get("bridge") == bridge["id"]), key=lambda i: i["name"])
+        flagged_ports = [i["name"] for i in ports if i.get("primary_member")]
+        if len(flagged_ports) > 1:
+            problems.append(f"{where}: bridge {name}: {CF_PRIMARY_MEMBER} is set on several ports "
+                            f"({', '.join(flagged_ports)}) — flag exactly one")
         bridge_mtu = mtu_of(bridge)
         port_ids_of_bridge = []
         for port in ports:

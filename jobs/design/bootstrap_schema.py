@@ -21,7 +21,7 @@ Created here (decision log #8, Device-only modeling):
     and dcim.device fields (provisioning_state, vmid, sizing, hypervisor
     targets incl. mgmt_bridge, secrets_group, pa_mgmt_mode)
   - Host baseline (decision #55): dcim.interface fields lag_mode /
-    lag_xmit_hash (select, choices = the code's) and primary_member (bool);
+    lag_xmit_hash (select, seeded with the code's choices) and primary_member (bool);
     the Secret records ad_bind_password / snmp_community plus every Secret a
     config context's host_baseline block names (SNMPv3 passphrases); the
     ConfigContextSchema nfv-host-baseline (kept equal to the code's)
@@ -345,8 +345,8 @@ class BootstrapNfvSchema(Job):
         # ---- interface custom fields: the bond/bridge model ----
         # Bonds and bridges are native interfaces (type lag/bridge, members via
         # Interface.lag / Interface.bridge, mtu, mode tagged-all); only what
-        # Nautobot has no slot for is a custom field. The select choice lists
-        # are maintained to equal the code's (the day0_builder handshake).
+        # Nautobot has no slot for is a custom field. The select choices are
+        # seeded with the code's (the day0_builder handshake; never deleted).
         interface_ct = ContentType.objects.get(app_label="dcim", model="interface")
         for key, cf_type, label, choices in (
             (hb.CF_LAG_MODE, "select", "Bond Mode", hb.LAG_MODES),
