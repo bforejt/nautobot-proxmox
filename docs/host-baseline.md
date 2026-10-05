@@ -15,7 +15,7 @@
 The hand-built fleet node differs from a fresh loop install in eight ways:
 lldpd + snmpd installed; serial console on GRUB and a getty; a ZFS ARC
 limit; an `snmpd.conf` with a community and SNMPv3 users; the data thin pool
-registered as PVE storage `DataDrive`; an Active Directory realm (`EQT-AD`)
+registered as PVE storage `DataDrive`; an Active Directory realm
 with a daily sync job and an admin-group ACL; `datadog` and `pdm` service
 accounts with API tokens; and the bond + bridge network (management
 active-backup bond under `vmbr0`, data bond under a VLAN-aware `vmbr1`).
