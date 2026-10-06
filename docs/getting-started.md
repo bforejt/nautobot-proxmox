@@ -25,6 +25,59 @@ nautobot-composer? Composer can do this **whole step** for you:
 `./setup.sh --with-nfv-jobs` registers this repo, syncs, enables the jobs,
 and runs the bootstrap against a healthy stack.)
 
+The bootstrap's three inputs decide where its Secret records point (decision
+#56) — **Secrets provider** (`text-file`, the default, or
+`environment-variable`), **text-file path prefix** (default
+`/opt/nautobot/secrets`: records point at `<prefix>/<name>`), and
+**environment-variable name prefix** (records name `<PREFIX><NAME>`, the
+secret name upper-cased with `-` → `_`: `NFV_` + `xcc_password` →
+`NFV_XCC_PASSWORD`). One record is the exception to `<prefix>/<name>`: the
+forge admin token record `answer-service-admin-token` points at
+`<prefix>/answer_service_admin_token`, the composer's `./add-secret.sh` file
+name (its variable is `ANSWER_SERVICE_ADMIN_TOKEN`). The defaults reproduce
+the composer layout exactly (`./setup.sh --with-nfv-jobs` runs the job with
+them), so on composer there is nothing to choose. Not on composer? Pick the
+environment-variable provider, or the prefix your deployment mounts the
+secrets at, on the FIRST run: the job is create-only, so a record that
+already exists — repointed by you or not — is never touched, and a re-run
+with other inputs changes nothing already there. The job refuses an unknown
+provider, a relative prefix or a malformed variable prefix (both prefixes
+are checked whichever provider is chosen) — and, under environment-variable,
+a config-context secret name it cannot spell as a variable (one with `.` or
+` `): rename it in the context or keep text-file — before it writes
+anything. What any deployment must provide beyond the jobs, and how the
+composer provides each item: [platform-contract.md](platform-contract.md).
+
+If the bootstrap refuses, nothing was written — fix the input or the config
+context it names and re-run:
+
+- `Secrets provider '…' is not supported — choose text-file or environment-variable`
+  / `text-file path prefix '…' must be an absolute path (start with /)` /
+  `text-file path prefix '…' must not contain '..' — Nautobot's text-file
+  provider refuses such a path` / `text-file path prefix '…' contains a
+  control character (newline, tab, ...) — not allowed` /
+  `environment-variable name prefix '…' must match ^[A-Z_][A-Z0-9_]*$
+  (upper-case letters, digits and '_', not starting with a digit) or be empty`
+  — a job input (the UI form, or the API run's `data`) is unusable; both
+  prefixes are checked whichever provider is chosen.
+- `Secret '…' cannot be an environment-variable record: '…' is not a valid
+  variable name (only letters, digits, '_' and '-' map, and the variable must
+  not start with a digit — a name prefix such as NFV_ fixes that case) —
+  rename it where the config context references it, or use the text-file
+  provider` — a `host_baseline` config context names a secret with `.` or
+  ` ` (its schema allows them) or with a leading digit: rename it in the
+  context, set a name prefix for the leading digit, or keep text-file.
+- `Secret record name '…' must be non-empty and contain no '/', '..' or
+  control character` — a config-context secret name Nautobot's text-file
+  provider could not take as a path; rename it in the context.
+- `Secret records '…' and '…' both resolve from the same variable '…' —
+  rename one where the config context references it, or use the text-file
+  provider` (text-file: `… both resolve from the same file '…' — rename one
+  …`) — two names spell one variable (`a-b` and `a_b`, or a case
+  difference) or point at one file (a context record named
+  `answer_service_admin_token` beside the forge token); rename one in the
+  context.
+
 ## 2. Firmware/image server
 
 Stand up an HTTP(S) server the Proxmox nodes can reach at stable
@@ -35,9 +88,11 @@ at this server unless a specific image lives elsewhere.
 
 ## 3. Secrets
 
-**The Secret records are created by the bootstrap job** (text-file provider,
-standard paths — records only, never values; an existing record you've
-repointed at another provider is left alone). You supply the VALUES — on a
+**The Secret records are created by the bootstrap job** (under the provider
+and prefix chosen in step 1 — by default text-file at
+`/opt/nautobot/secrets/<name>`, the composer layout; records only, never
+values; an existing record you've repointed at another provider is left
+alone). You supply the VALUES — on a
 nautobot-composer stack, one `./add-secret.sh <name>` per credential
 (`./setup.sh --nfv-secrets` prompts through all of them in one pass):
 
@@ -61,10 +116,19 @@ nautobot-composer stack, one `./add-secret.sh <name>` per credential
   The bootstrap creates the per-user records for every v3 user a config
   context names — re-run it after adding users.
 
-Not on composer? Write each value to the file the record's path names
-(`/opt/nautobot/secrets/<name>`, readable by the Nautobot web and worker
-processes), or repoint the record at your own secrets provider — jobs resolve
-by record name, not provider.
+Not on composer? The records follow the provider you chose in step 1:
+text-file — write each value to the file the record's path names
+(`<prefix>/<name>`, readable by the Nautobot web and worker processes);
+environment-variable — export `<PREFIX><NAME>` in every Nautobot container
+(web AND worker: jobs resolve in the worker, the UI tests in web); or repoint
+any record at your own secrets provider — jobs resolve by record name, not
+provider. Whatever the provider, three paths must agree: the per-node token
+records the answer service and the Host Baseline job write stay text-file
+under `<prefix>/nodes`, so the bootstrap's path prefix + `/nodes`, the
+answer service's `NAUTOBOT_SECRETS_PATH` and the worker's
+`NFV_NODE_SECRETS_DIR` must name the same directory (all default to
+`/opt/nautobot/secrets/nodes`; [platform-contract.md](platform-contract.md)
+item 3).
 - **Proxmox API token(s)** — two ways:
   - **Single host (quickstart)**: create Secrets `proxmox_token_id`
     (value = `user@realm!tokenname`) and `proxmox_token_secret` (the UUID). The

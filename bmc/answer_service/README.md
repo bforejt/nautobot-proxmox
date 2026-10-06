@@ -6,6 +6,9 @@ nautobot-composer's `answer-service` profile (the supported deployment)
 maps these from `ANSWER_*` names in its `.env`. This table is the canonical
 list.
 
+Platform contract — what any deployment must provide and how the composer
+does: [docs/platform-contract.md](../../docs/platform-contract.md).
+
 ## Core (every instance)
 
 | Variable | Default | Purpose |
@@ -75,7 +78,50 @@ bond → member flagged `primary_member`); an ambiguous model is a
 `firstboot_features` (`packages`, `serial_console`, `zfs_arc_max_bytes`,
 `remove_subscription_nag`): the install job refuses a stale image that lacks a
 profile feature the DeviceType uses, and warns when the Device's config
-context sets a firstboot input the image would ignore.
+context sets a firstboot input the image would ignore. Both checks run only
+after the version handshake below has passed.
+
+## Versioning and the jobs handshake (decision #56)
+
+The two halves of the install loop reach their hosts by different roads —
+the jobs through Nautobot's Git sync, this service as an image the composer
+pulls — so each states what it is and the oldest counterpart it accepts,
+and the jobs refuse before touching a BMC or the forge when the pair is out
+of step.
+
+| Where | Value | Meaning |
+|---|---|---|
+| `bmc/answer_service/VERSION` | `X.Y.Z` | The one repo version. Copied to `/app/VERSION` by the Dockerfile; `app.py` refuses to start without it (never serves `version: ""`) |
+| `ghcr.io/bforejt/nautobot-proxmox-answer-service:vX.Y.Z` | image tag | Published by the tag workflow on every `vX.Y.Z` tag (`latest` too, but it defeats the pin). The tag must equal `VERSION` and the jobs' `JOBS_VERSION` or the workflow refuses it |
+| `GET /info` → `version` | `X.Y.Z` | What this build is |
+| `GET /info` → `min_jobs_version` | `X.Y.Z` | The oldest jobs this build accepts (`MIN_JOBS_VERSION` in `app.py`) |
+| `jobs/lib/version.py` → `JOBS_VERSION` | `X.Y.Z` | What the synced jobs are — equal to `VERSION` on the same commit |
+| `jobs/lib/version.py` → `MIN_ANSWER_SERVICE_VERSION` | `X.Y.Z` | The oldest service the jobs accept |
+| composer `.env` → `ANSWER_SERVICE_VERSION` | `vX.Y.Z` | The pin the composer pulls (and the git ref it builds from when it builds) |
+
+The handshake (`version_handshake` in `jobs/lib/answer_service.py`, run by
+the install job's preflight and by Prepare Installer Media before any POST):
+`version` missing or not a plain `X.Y.Z` (an optional leading `v` is
+tolerated; `-dev`, `+build`, `latest` do not count) → refuse, the service
+predates the handshake — a build so old that `/info` itself is a 404 lands
+on the same refusal; `version` below
+`MIN_ANSWER_SERVICE_VERSION` → refuse, naming both versions and the fix (set
+`ANSWER_SERVICE_VERSION` to the required tag or newer, pull, `up -d`; a
+checkout rebuilds with `up -d --build`); `min_jobs_version` present and
+above `JOBS_VERSION` → refuse, the fix is a Git-repository sync in Nautobot;
+an unreachable service from the worker is a warning only (the installing
+node is what must reach it). Every refusal text is in
+[docs/baremetal-install.md](../../docs/baremetal-install.md) troubleshooting.
+
+When to bump what: every release bumps `VERSION` and `JOBS_VERSION`
+together (one commit, one `vX.Y.Z` tag). Raise `MIN_ANSWER_SERVICE_VERSION`
+when the jobs start depending on something only a newer service does (a new
+`/info` field, a profile key, a firstboot input they must see rendered).
+Raise `MIN_JOBS_VERSION` when the service starts depending on something only
+newer jobs do (a new `/answer` input, a changed Secret name). Operationally:
+after syncing this repo into Nautobot, move the composer's
+`ANSWER_SERVICE_VERSION` to a tag the jobs accept and pull; after pulling a
+newer service, sync jobs it accepts.
 
 ## Media forge (decision #44 — **off by default**, lab/build instances only)
 

@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-Unit tests for jobs/lib/answer_service.py — the install job's answer-service
-profile preflight — and for the answer service itself
-(bmc/answer_service/app.py): the install-NIC derivation through the SoT's
-bridge/LAG model (decision #55, kept equal to jobs/lib/host_baseline.py's),
-the REST calls behind it, the pin-mapping guard, the install.serial_console
-profile key and the host_baseline config-context firstboot inputs.
+Unit tests for jobs/lib/answer_service.py — the version handshake (decision
+#56: jobs/lib/version.py against the service's /info `version` +
+`min_jobs_version`) and the install job's answer-service profile preflight —
+and for the answer service itself (bmc/answer_service/app.py): the
+install-NIC derivation through the SoT's bridge/LAG model (decision #55, kept
+equal to jobs/lib/host_baseline.py's), the REST calls behind it, the
+pin-mapping guard, the install.serial_console profile key and the
+host_baseline config-context firstboot inputs. The last classes pin the two
+halves' version constants to each other and every refusal text to the
+runbook.
 
 Stdlib-only: fastapi/jinja2/requests are stubbed when absent; the parts that
 render templates (or run proxmox-auto-install-assistant) need the real ones
@@ -34,41 +38,231 @@ spec.loader.exec_module(asvc)
 SLUG = "thinkedge-se455-v3"
 FEATURES = ["data_volume", "interface_name_pinning"]
 URL = "https://answer-service:8800"
+PULL_HINT = "pull or rebuild the service"
+SYNC_HINT = "sync the nautobot-proxmox Git repository"
+
+
+def svc_info(**fields):
+    """/info of a service that passes the handshake (same version as the jobs)."""
+    return {"version": asvc.JOBS_VERSION, "min_jobs_version": asvc.JOBS_VERSION, **fields}
+
+
+class ParseVersion(unittest.TestCase):
+    def test_accepts_plain_and_v_prefixed_triples(self):
+        self.assertEqual(asvc.parse_version("0.1.0"), (0, 1, 0))
+        self.assertEqual(asvc.parse_version("v0.1.0"), (0, 1, 0))
+        self.assertEqual(asvc.parse_version("10.2.33"), (10, 2, 33))
+
+    def test_rejects_everything_else(self):
+        for bad in ("0.1", "0.1.0-dev", "1.0.0+x", "", None, "latest", "v", "0.1.0.0", 1, "0.1.0 ", " 0.1.0",
+                    "0.1.0\n", "v0.1.0\n"):  # `$` would let a trailing newline through; `\Z` does not
+            self.assertIsNone(asvc.parse_version(bad), repr(bad))
+
+    def test_regex_is_the_strict_one(self):
+        self.assertEqual(asvc.VERSION_RE.pattern, r"^v?(\d+)\.(\d+)\.(\d+)\Z")
+
+
+class VersionHandshake(unittest.TestCase):
+    """Decision #56: both halves name their version and the oldest counterpart
+    they accept; out of step = refuse, naming both versions and the fix."""
+
+    def test_equal_versions_are_ok(self):
+        verdict, msg = asvc.version_handshake(svc_info(), URL)
+        self.assertEqual(verdict, "ok")
+        self.assertIn(asvc.JOBS_VERSION, msg)
+
+    def test_newer_service_is_ok(self):
+        verdict, msg = asvc.version_handshake({"version": "99.0.0", "min_jobs_version": "0.1.0"}, URL)
+        self.assertEqual(verdict, "ok")
+        self.assertIn("99.0.0", msg)
+
+    def test_older_service_refuses_with_both_versions_and_the_fix(self):
+        verdict, msg = asvc.version_handshake({"version": "0.0.1", "min_jobs_version": "0.0.1"}, URL)
+        self.assertEqual(verdict, "refuse")
+        self.assertIn("is version 0.0.1, older than the", msg)
+        self.assertIn(f"the {asvc.MIN_ANSWER_SERVICE_VERSION} these jobs (version {asvc.JOBS_VERSION}) require", msg)
+        self.assertIn(PULL_HINT, msg)
+        self.assertIn(f"ANSWER_SERVICE_VERSION to v{asvc.MIN_ANSWER_SERVICE_VERSION} or newer", msg)
+        self.assertIn("docker compose --profile answer-service pull answer-service", msg)
+        self.assertIn("up -d --build answer-service", msg)
+        self.assertIn(URL, msg)
+
+    def test_no_version_refuses(self):
+        for info in ({}, {"public_url": URL, "profiles": [SLUG]}, {"version": None}, {"version": ""}):
+            verdict, msg = asvc.version_handshake(info, URL)
+            self.assertEqual(verdict, "refuse", info)
+            self.assertIn("reports no usable version in GET /info", msg)
+            self.assertIn("predates the version handshake", msg)
+            self.assertIn(f"these jobs (version {asvc.JOBS_VERSION})", msg)
+            self.assertIn(PULL_HINT, msg)
+
+    def test_unparseable_version_refuses(self):
+        for raw in ("latest", "0.1.0-dev", "0.1", "1.0.0+x", 1):
+            verdict, msg = asvc.version_handshake({"version": raw}, URL)
+            self.assertEqual(verdict, "refuse", repr(raw))
+            self.assertIn(f"reports no usable version in GET /info ({raw!r})", msg)
+
+    def test_service_requiring_newer_jobs_refuses_with_the_sync_hint(self):
+        verdict, msg = asvc.version_handshake({"version": "0.1.0", "min_jobs_version": "99.0.0"}, URL)
+        self.assertEqual(verdict, "refuse")
+        self.assertIn("requires jobs version 99.0.0 or newer", msg)
+        self.assertIn(f"these jobs are version {asvc.JOBS_VERSION}", msg)
+        self.assertIn(SYNC_HINT, msg)
+        self.assertNotIn(PULL_HINT, msg)  # the fix is on the Nautobot side, not the composer
+
+    def test_unparseable_min_jobs_version_refuses(self):
+        verdict, msg = asvc.version_handshake({"version": "0.1.0", "min_jobs_version": "latest"}, URL)
+        self.assertEqual(verdict, "refuse")
+        self.assertIn("reports no usable min_jobs_version in GET /info ('latest')", msg)
+        self.assertIn(PULL_HINT, msg)
+
+    def test_absent_min_jobs_version_is_ok(self):
+        self.assertEqual(asvc.version_handshake({"version": asvc.JOBS_VERSION}, URL)[0], "ok")
+
+    def test_unreachable_is_a_warning(self):
+        verdict, msg = asvc.version_handshake(None, URL)
+        self.assertEqual(verdict, "warn")
+        self.assertIn("did not answer GET /info", msg)
+
+    def test_non_dict_info_refuses(self):
+        self.assertEqual(asvc.version_handshake(["not", "a", "dict"], URL)[0], "refuse")
+
+    def test_composer_fix_names_the_pin_or_a_tag(self):
+        self.assertIn("set ANSWER_SERVICE_VERSION to v0.2.0 or newer in .env", asvc.composer_fix("0.2.0"))
+        self.assertIn("set ANSWER_SERVICE_VERSION to a tag carrying it in .env", asvc.composer_fix())
 
 
 class Preflight(unittest.TestCase):
-    def test_unreachable_is_a_warning(self):
+    def test_unreachable_is_exactly_one_warning(self):
         verdict, msg = asvc.evaluate_profile_preflight(None, SLUG, FEATURES, URL)
         self.assertEqual(verdict, "warn")
         self.assertIn("did not answer", msg)
+        self.assertEqual(msg.count("answer service at"), 1)
+
+    def test_handshake_refuses_before_profiles_are_looked_at(self):
+        # The profile list is complete — only the missing version refuses.
+        info = {"profiles": [SLUG, "nuc"], "profile_features": list(asvc.PROFILE_FEATURE_KEYS)}
+        verdict, msg = asvc.evaluate_profile_preflight(info, SLUG, FEATURES, URL)
+        self.assertEqual(verdict, "refuse")
+        self.assertIn("reports no usable version in GET /info", msg)
+        self.assertNotIn("install profile", msg)
+        verdict, msg = asvc.evaluate_profile_preflight(
+            {"version": "0.0.1", "profiles": []}, SLUG, FEATURES, URL)
+        self.assertEqual(verdict, "refuse")
+        self.assertIn("older than the", msg)
+        self.assertNotIn("install profile", msg)
 
     def test_old_service_without_profile_list_warns(self):
-        verdict, msg = asvc.evaluate_profile_preflight({"public_url": URL}, SLUG, FEATURES, URL)
+        verdict, msg = asvc.evaluate_profile_preflight(svc_info(public_url=URL), SLUG, FEATURES, URL)
         self.assertEqual(verdict, "warn")
-        self.assertIn("predates", msg)
+        self.assertIn("predates the profile list in GET /info", msg)
+        self.assertIn(PULL_HINT, msg)
 
     def test_missing_profile_refuses_with_the_rebuild_hint(self):
-        info = {"profiles": ["nested-lab-node", "nuc", "thinksystem-se350"]}
+        info = svc_info(profiles=["nested-lab-node", "nuc", "thinksystem-se350"])
         verdict, msg = asvc.evaluate_profile_preflight(info, SLUG, FEATURES, URL)
         self.assertEqual(verdict, "refuse")
         self.assertIn("no install profile 'thinkedge-se455-v3'", msg)
-        self.assertIn("--build answer-service", msg)
+        self.assertIn(PULL_HINT, msg)
+        self.assertIn("set ANSWER_SERVICE_VERSION to a tag carrying it", msg)
+        self.assertIn("--build answer-service", msg)  # a checkout still rebuilds
+        self.assertNotIn("current main", msg)
 
     def test_missing_feature_refuses(self):
-        info = {"profiles": [SLUG], "profile_features": ["filter_match", "data_pool"]}
+        info = svc_info(profiles=[SLUG], profile_features=["filter_match", "data_pool"])
         verdict, msg = asvc.evaluate_profile_preflight(info, SLUG, FEATURES, URL)
         self.assertEqual(verdict, "refuse")
         self.assertIn("data_volume", msg)
+        self.assertIn(PULL_HINT, msg)
 
     def test_current_service_is_ok(self):
-        info = {"profiles": [SLUG, "nuc"], "profile_features": list(asvc.PROFILE_FEATURE_KEYS)}
+        info = svc_info(profiles=[SLUG, "nuc"], profile_features=list(asvc.PROFILE_FEATURE_KEYS))
         verdict, msg = asvc.evaluate_profile_preflight(info, SLUG, FEATURES, URL)
         self.assertEqual(verdict, "ok")
         self.assertIn(SLUG, msg)
+        self.assertIn(f"(version {asvc.JOBS_VERSION})", msg)
 
     def test_profile_without_features_needs_no_feature_list(self):
-        info = {"profiles": ["nuc"]}
+        info = svc_info(profiles=["nuc"])
         self.assertEqual(asvc.evaluate_profile_preflight(info, "nuc", [], URL)[0], "ok")
+
+
+class FetchInfo(unittest.TestCase):
+    """fetch_info draws the line the handshake relies on: None only when no
+    response arrived (the one warning case); any response that is not a
+    usable JSON object comes back as a dict without `version`, which the
+    handshake refuses — a reachable service that cannot state its version
+    is too old, not unreachable. Runs against a fake `requests` module."""
+
+    RequestException = type("RequestException", (IOError,), {})
+
+    class _Response:
+        def __init__(self, status_code, body=None, json_error=False):
+            self.status_code, self._body, self._json_error = status_code, body, json_error
+
+        def json(self):
+            if self._json_error:
+                raise ValueError("not JSON")
+            return self._body
+
+    def _fetch(self, get):
+        fake = types.ModuleType("requests")
+        fake.RequestException = self.RequestException
+        fake.get = get
+        saved = sys.modules.get("requests")
+        sys.modules["requests"] = fake
+        try:
+            return asvc.fetch_info(URL, verify=False, timeout=3)
+        finally:
+            if saved is None:
+                del sys.modules["requests"]
+            else:
+                sys.modules["requests"] = saved
+
+    def test_a_usable_object_comes_back_as_is(self):
+        seen = {}
+
+        def get(url, timeout, verify):
+            seen.update(url=url, timeout=timeout, verify=verify)
+            return self._Response(200, svc_info(profiles=[SLUG]))
+
+        info = self._fetch(get)
+        self.assertEqual(info["version"], asvc.JOBS_VERSION)
+        self.assertEqual(seen, {"url": f"{URL}/info", "timeout": 3, "verify": False})
+        self.assertEqual(asvc.version_handshake(info, URL)[0], "ok")
+
+    def test_no_response_is_none_and_exactly_one_warning(self):
+        def get(url, timeout, verify):
+            raise self.RequestException("connection refused")
+
+        info = self._fetch(get)
+        self.assertIsNone(info)
+        verdict, msg = asvc.evaluate_profile_preflight(info, SLUG, FEATURES, URL)
+        self.assertEqual(verdict, "warn")
+        self.assertIn("did not answer GET /info", msg)
+        self.assertEqual(msg.count("answer service at"), 1)
+
+    def test_a_build_older_than_info_itself_is_refused_not_warned(self):
+        # A 404 with FastAPI's JSON body (a service from before /info existed),
+        # a proxy's HTML error page, a bare list, a 500: a response arrived, so
+        # the handshake — not the unreachable warning — sees it, and none of
+        # them carries a version. This was the one fail-open path: folding
+        # these into None let the oldest possible service through to the BMC.
+        cases = {
+            "404 json": self._Response(404, {"detail": "Not Found"}),
+            "502 html": self._Response(502, json_error=True),
+            "200 list": self._Response(200, ["not", "an", "object"]),
+            "500 json": self._Response(500, {"detail": "boom"}),
+        }
+        for label, response in cases.items():
+            with self.subTest(label):
+                info = self._fetch(lambda url, timeout, verify, r=response: r)
+                self.assertIsInstance(info, dict)
+                self.assertNotIn("version", info)
+                verdict, msg = asvc.evaluate_profile_preflight(info, SLUG, FEATURES, URL)
+                self.assertEqual(verdict, "refuse")
+                self.assertIn("reports no usable version in GET /info", msg)
+                self.assertNotIn("did not answer", msg)
 
 
 class FeatureKeys(unittest.TestCase):
@@ -450,6 +644,8 @@ class FirstbootInputs(unittest.TestCase):
                                                         CONTEXT))
         message = asvc.firstboot_inputs_warning({"profiles": []}, CONTEXT, "https://svc:8800")
         self.assertIn("does not render the host_baseline firstboot input(s)", message)
+        self.assertIn(PULL_HINT, message)
+        self.assertNotIn("current main", message)
         self.assertIsNone(asvc.firstboot_inputs_warning({"profiles": []}, {}))
         self.assertIsNone(asvc.firstboot_inputs_warning(None, CONTEXT))
 
@@ -530,6 +726,122 @@ class EndToEnd(unittest.TestCase):
                 import ast
                 for block in re.findall(r"<<'PYEOF'\n(.*?)\nPYEOF", script, re.S):
                     ast.parse(block)
+
+
+# ============================================ versions, call order and the docs
+
+VERSION_FILE = REPO / "bmc" / "answer_service" / "VERSION"
+
+
+class VersionsInStep(unittest.TestCase):
+    """One repo version (decision #56): the VERSION file the image carries,
+    the jobs' JOBS_VERSION, and the two minimums must stay consistent."""
+
+    def test_version_file_is_a_bare_triple(self):
+        raw = VERSION_FILE.read_text()
+        self.assertEqual(raw, raw.strip() + "\n", "one line, newline-terminated")
+        version = raw.strip()
+        self.assertRegex(version, asvc.VERSION_RE)
+        self.assertFalse(version.startswith("v"), "the file holds X.Y.Z; the tag adds the v")
+
+    def test_jobs_version_equals_the_version_file(self):
+        self.assertEqual(asvc.JOBS_VERSION, VERSION_FILE.read_text().strip())
+
+    def test_minimums_do_not_exceed_what_is_shipped(self):
+        shipped = asvc.parse_version(VERSION_FILE.read_text().strip())
+        self.assertLessEqual(asvc.parse_version(asvc.MIN_ANSWER_SERVICE_VERSION), shipped)
+        self.assertLessEqual(asvc.parse_version(app.MIN_JOBS_VERSION), asvc.parse_version(asvc.JOBS_VERSION))
+
+    def test_info_serves_the_version_file_and_a_minimum(self):
+        info = app.info()
+        self.assertEqual(info["version"], VERSION_FILE.read_text().strip())
+        self.assertEqual(info["min_jobs_version"], app.MIN_JOBS_VERSION)
+        self.assertIsNotNone(asvc.parse_version(info["min_jobs_version"]))
+        # the two halves accept each other as shipped
+        self.assertEqual(asvc.version_handshake(info, URL)[0], "ok")
+        for key in ("public_url", "cert_fingerprint", "nfv_role", "admin_enabled", "profiles",
+                    "profile_features", "firstboot_features"):
+            self.assertIn(key, info)
+
+    def test_dockerfile_copies_the_version_file(self):
+        dockerfile = (REPO / "bmc" / "answer_service" / "Dockerfile").read_text()
+        self.assertIn("COPY answer_service/VERSION .", dockerfile)
+
+    def test_app_fails_loud_without_a_usable_version_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for content in (None, "", "\n", "latest", "v0.1.0", "0.1.0-dev"):
+                base = pathlib.Path(tmp) / "svc"
+                shutil.rmtree(base, ignore_errors=True)
+                base.mkdir()
+                if content is not None:
+                    (base / "VERSION").write_text(content)
+                real = app.BASE_DIR
+                try:
+                    app.BASE_DIR = base
+                    with self.subTest(content=content), self.assertRaises(RuntimeError):
+                        app._read_service_version()
+                finally:
+                    app.BASE_DIR = real
+
+
+class SourceStructure(unittest.TestCase):
+    """The handshake runs before any BMC or forge action — pinned at the
+    source level, like the role gate."""
+
+    def test_install_job_preflights_before_any_delivery(self):
+        src = (REPO / "jobs" / "baremetal" / "install_node.py").read_text()
+        run = src[src.index("    def run(self"):]
+        self.assertIn("_preflight_answer_service(", run)
+        for delivery in ("_install_nested(", "_install_vmedia("):
+            self.assertLess(run.index("_preflight_answer_service("), run.index(delivery), delivery)
+
+    def test_prepare_media_handshakes_before_the_forge_post(self):
+        src = (REPO / "jobs" / "baremetal" / "prepare_media.py").read_text()
+        self.assertIn("from ..lib.answer_service import INTEGRATION_NAME, version_handshake", src)
+        self.assertNotIn('INTEGRATION_NAME = "', src, "the constant lives in jobs/lib/answer_service.py")
+        run = src[src.index("    def run(self"):]
+        self.assertLess(run.index("version_handshake("), run.index("/admin/prepare"))
+        self.assertLess(run.index("version_handshake("), run.index('info.get("admin_enabled")'))
+        self.assertLess(run.index("version_handshake("), run.index("session.post("))
+
+
+MESSAGE_FRAGMENTS = [
+    # version handshake (jobs/lib/answer_service.py)
+    "these jobs (version",
+    "pull or rebuild the service",
+    "reports no usable version in GET /info",
+    "reports no usable min_jobs_version in GET /info",
+    "requires jobs version",
+    "sync the nautobot-proxmox Git repository",
+    "set ANSWER_SERVICE_VERSION",
+    "to a tag carrying it",
+    "up -d --build answer-service",
+    "did not answer GET /info",
+    # profile / feature preflight, reworded for the pull model
+    "predates the profile list in GET /info",
+    "has no install profile",
+    "does not support profile feature(s)",
+    "does not render the host_baseline firstboot input(s)",
+]
+
+
+def _flatten(text):
+    """Joined f-string pieces / wrapped lines -> one comparable string."""
+    text = re.sub(r'"\s*\n\s*f?"', "", text)  # adjacent string literals across lines
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+class DocsCoverMessages(unittest.TestCase):
+    def test_every_message_is_in_the_code_and_the_runbook(self):
+        code = _flatten(MODULE.read_text())
+        docs = _flatten((REPO / "docs" / "baremetal-install.md").read_text())
+        missing_code = [m for m in MESSAGE_FRAGMENTS if m not in code]
+        missing_docs = [m for m in MESSAGE_FRAGMENTS if m not in docs]
+        self.assertEqual(missing_code, [], "fragments no longer in the code")
+        self.assertEqual(missing_docs, [], "fragments missing from docs/baremetal-install.md troubleshooting")
+        self.assertNotIn("rebuild it from the current main", code)
+        self.assertNotIn("from the current main", code)
 
 
 if __name__ == "__main__":

@@ -88,7 +88,7 @@ storage blocks VM autostart when one node dies).
 | **Proxmox VE** | 9.x (validated on 9.2). Requires the `import` storage content type and API-token auth. Hosts are **standalone** (no cluster). |
 | **Firmware/image server** | Any HTTP(S) server the Proxmox nodes can reach at stable `/images/<file>` URLs. The [nautobot-composer](https://github.com/bforejt/nautobot-composer) project's `firmware` profile provides one (nginx + Filebrowser). |
 | **Git host** | Anywhere Nautobot can sync this repo from (GitHub today; any git remote works). |
-| **Network paths** | Nautobot worker → Proxmox API (`:8006`); Proxmox nodes → firmware server; Nautobot → git host. Nothing else. |
+| **Network paths** | VM track: Nautobot worker → Proxmox API (`:8006`); Proxmox nodes → firmware server; Nautobot → git host. The bare-metal install loop adds installing nodes → the answer service (HTTPS `:8800`), the worker → BMCs (Redfish) and nodes (SSH), and the worker → the service's `/info` (the version handshake) — [platform-contract.md item 7](docs/platform-contract.md#7-network-paths). |
 | **Hypervisor hardware** | Any x86 Proxmox host for the VM track (developed against a small NUC). Edge-platform material (BIOS policy, Redfish/XCC, wiring, install profiles for the SE350 and the SE455 V3) applies to the edge-hardware track only. |
 | **Guest images** | Ubuntu 24.04 cloud image (fetched at template build). Vendor VNF images (PAN-OS, IOS-XE) are entitlement-gated downloads you supply. |
 
@@ -141,6 +141,7 @@ The minimum loop to prove it in a new lab:
 | [sot-data-contract.md](docs/sot-data-contract.md) | Exactly which Nautobot records the jobs read and write (§4c: the host-baseline interface model, config context `host_baseline`, Secrets, `provisioning_state`) |
 | [baremetal-install.md](docs/baremetal-install.md) | How a blank server becomes a registered, baselined Proxmox node — answer service, media forge, nested/PXE/vmedia delivery, runbooks (incl. the Host Baseline), troubleshooting |
 | [deployment-onboarding.md](docs/deployment-onboarding.md) | What's portable vs. what's still manual — the gap register |
+| [platform-contract.md](docs/platform-contract.md) | What ANY deployment of the install loop must provide (Nautobot + the service token's permissions, the shared secrets directory, TLS identity, root hash, firmware, network paths, the image version pin + handshake) and how the composer satisfies each item — the portability boundary (#45, #56) |
 | [host-baseline.md](docs/host-baseline.md) | The L1/L2 host baseline: what the hand-built post-deploy steps became (firstboot inputs vs. the Host Baseline job), the SoT bond/bridge model, fleet conventions (#54), implementation notes, deviations and the `[lab-verify]` list (#55) |
 | [image-lifecycle.md](docs/image-lifecycle.md) | How golden images are built, versioned, promoted, rolled back (notes which steps are scripted vs. jobs) |
 
@@ -184,10 +185,19 @@ tests/           Loader harness (validates job discovery pre-push) + stdlib unit
 
 Changes go through a branch + pull request; after merge, re-sync the Git
 Repository in Nautobot and re-run `Bootstrap NFV Data Model` (idempotent — it
-adds only what's new). Before pushing, run the loader harness — it drives this
-repo through Nautobot's *real* job-loading code without needing a Nautobot
-install, and catches the classic silent failure (a directory missing
-`__init__.py` loads zero jobs):
+adds only what's new). A release is one git tag `vX.Y.Z`: the
+`publish-answer-service` workflow builds and pushes
+`ghcr.io/bforejt/nautobot-proxmox-answer-service:vX.Y.Z` from it and fails
+unless `bmc/answer_service/VERSION` and `JOBS_VERSION` in
+`jobs/lib/version.py` both equal the tag's version (the tag minus its leading
+`v`: tag `v0.1.0` ↔ `VERSION` `0.1.0` ↔ `JOBS_VERSION = "0.1.0"`) — bump both
+(one repo version) before tagging; the composer pins the tag with
+`ANSWER_SERVICE_VERSION` and the jobs refuse a service older than they
+require ([docs/platform-contract.md](docs/platform-contract.md) item 9).
+Before pushing, run the loader harness — it drives this repo through
+Nautobot's *real* job-loading code without needing a Nautobot install, and
+catches the classic silent failure (a directory missing `__init__.py` loads
+zero jobs):
 
 ```bash
 python3 tests/loader_harness.py
@@ -196,7 +206,11 @@ for t in tests/test_*.py; do python3 "$t"; done   # stdlib unit tests
 
 The host-baseline applier and job-simulation tests drive real bash ≥ 4 on
 Linux (they skip on macOS's bash 3.2); run the suite in the answer-service
-image to include them, plus the template renders and `validate-answer`:
+image to include them, plus the template renders and `validate-answer`
+(the image is `nautobot-composer-answer-service` on a stack built before the
+image pin, or `ghcr.io/bforejt/nautobot-proxmox-answer-service:<tag>` on one
+that pulls or builds the pinned image — `docker image ls | grep
+answer-service` shows which; substitute the name you have):
 
 ```bash
 docker run --rm -v "$PWD:/repo:ro" -w /repo -e PROFILE_DIR=/repo/bmc/profiles \

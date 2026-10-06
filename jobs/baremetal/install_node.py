@@ -145,15 +145,20 @@ class InstallProxmoxNode(Job):
 
     def _preflight_answer_service(self, device, profile):
         """Refuse before touching a BMC when the answer service demonstrably
-        cannot answer this node: its baked-in profile list (GET /info) lacks
-        the DeviceType's profile, or its build predates a feature the profile
-        uses. Found through the `nfv-answer-service` ExternalIntegration (the
-        media forge's plumbing); no integration or an unreachable service is a
+        cannot answer this node. The version handshake comes first (decision
+        #56): a service older than these jobs' MIN_ANSWER_SERVICE_VERSION, one
+        reporting no usable version, or one whose min_jobs_version is above
+        JOBS_VERSION is refused with the fix (pull the pinned image, or sync
+        the jobs). Then the profile preflight: its baked-in profile list
+        (GET /info) lacks the DeviceType's profile, or its build predates a
+        feature the profile uses. Both arrive through evaluate_profile_preflight.
+        Found through the `nfv-answer-service` ExternalIntegration (the media
+        forge's plumbing); no integration or an unreachable service is a
         warning, not a refusal — the node, not this worker, must reach it."""
         integration = ExternalIntegration.objects.filter(name=INTEGRATION_NAME).first()
         if integration is None:
             self.logger.warning(
-                "No ExternalIntegration %r — skipping the answer-service profile preflight",
+                "No ExternalIntegration %r — skipping the answer-service version handshake and profile preflight",
                 INTEGRATION_NAME,
             )
             return
