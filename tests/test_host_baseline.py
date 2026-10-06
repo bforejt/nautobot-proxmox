@@ -970,6 +970,10 @@ def flag(key, value=None):
     if value is None:
         return open(path).read() if os.path.exists(path) else ""
     open(path, "w").write(value)
+if name == "apt-cache":
+    for p in [a for a in args[1:] if not a.startswith("-")]:
+        print(f"{p}:\n  Installed: (none)\n  Candidate: " + ("(none)" if flag(f"no-candidate:{p}") == "yes" else "1.2-3"))
+    sys.exit(0)
 if name == "systemctl":
     verb = args[0]
     unit = args[-1]
@@ -1013,7 +1017,7 @@ class Applier(unittest.TestCase):
         self.state = os.path.join(self.tmp, "state")
         os.makedirs(self.bin)
         os.makedirs(self.state)
-        for name in ("systemctl", "pveum", "pvesh", "ifup", "ifreload", "systemd-run", "apt-get"):
+        for name in ("systemctl", "pveum", "pvesh", "ifup", "ifreload", "systemd-run", "apt-get", "apt-cache"):
             path = os.path.join(self.bin, name)
             with open(path, "w") as fh:
                 fh.write(FAKE)

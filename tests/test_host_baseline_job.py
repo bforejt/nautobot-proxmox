@@ -122,7 +122,15 @@ if name == "dpkg-query":
             if p in state["installed"]: print(f"{p} ii ")
         sys.exit(0 if all(p in state["installed"] for p in pkgs) else 1)
     print("ii " if pkgs[-1] in state["installed"] else "un ", end=""); sys.exit(0)
+if name == "apt-cache":
+    for p in [a for a in args[1:] if not a.startswith("-")]:
+        cand = "(none)" if p in state.get("no_candidate", []) else "1.2-3"
+        print(f"{p}:\n  Installed: (none)\n  Candidate: {cand}")
+    sys.exit(0)
 if name == "apt-get":
+    if "update" in args and state.get("apt_update_rc"):
+        print("E: Failed to fetch http://deb.debian.org/debian/dists/trixie/InRelease  Could not resolve 'deb.debian.org'")
+        sys.exit(state["apt_update_rc"])
     if args and args[0] == "install":
         state["installed"] += [a for a in args[1:] if not a.startswith("-") and "Dpkg" not in a]; save()
     sys.exit(0)
@@ -367,7 +375,7 @@ class JobSimulation(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         t = pathlib.Path(self.tmp)
         (t / "bin").mkdir()
-        for name in ("hostname", "pveversion", "ip", "dpkg-query", "apt-get", "systemctl", "ifup", "ifreload",
+        for name in ("hostname", "pveversion", "ip", "dpkg-query", "apt-get", "apt-cache", "systemctl", "ifup", "ifreload",
                      "systemd-run", "pvesh", "pveum"):
             (t / "bin" / name).write_text(FAKE_NODE)
             (t / "bin" / name).chmod(0o755)
@@ -442,6 +450,36 @@ class JobSimulation(unittest.TestCase):
         self.assertFalse((pathlib.Path(self.tmp) / "realm").exists())
         self.assertEqual(self.stored, {})
         self.assert_no_secret_leaked(job)
+
+    def set_node(self, **fields):
+        node = self.node()
+        node.update(fields)
+        self.state.write_text(json.dumps(node))
+
+    def test_packages_without_an_apt_candidate_fail_before_any_install(self):
+        """The tester's node (2026-10-05): apt-get update 'succeeds' with no Debian index, so apt-get
+        install died with 'Unable to locate package'. Now the candidates are checked first, the
+        update's real error is surfaced, and nothing is installed."""
+        self.set_node(no_candidate=["lldpd", "snmpd"], apt_update_rc=100)
+        job = self.job()
+        with self.assertRaises(self.mod.StepFailed) as ctx:
+            job.run(fake_device(), dry_run=False, confirm=True)
+        self.assertIn("Packages failed on the node", str(ctx.exception))
+        logged = "\n".join(line for _, line in job.logger.lines)
+        self.assertIn("[3/8] packages: failed — apt has no installable candidate for: lldpd (none) snmpd (none)", logged)
+        self.assertIn("Could not resolve 'deb.debian.org'", logged)
+        self.assertIn("APT::Update::Error-Mode=any", logged)
+        self.assertEqual(self.node()["installed"], [])
+        self.assertEqual(self.node()["realms"].keys(), {"pam", "pve"})  # later steps did not run
+
+    def test_dry_run_warns_when_apt_cannot_install_the_packages(self):
+        self.set_node(no_candidate=["snmpd"])
+        job = self.job()
+        job.run(fake_device(), dry_run=True, confirm=False)
+        logged = "\n".join(line for _, line in job.logger.lines)
+        self.assertIn("[3/8] apt: warning — apt has no installable candidate for: snmpd (none)", logged)
+        self.assertIn("[3/8] packages: would_change — would install: lldpd snmpd", logged)
+        self.assertEqual(self.node()["installed"], [])
 
     def run_apply(self, device=None, drop_on=None):
         device = device or fake_device()
