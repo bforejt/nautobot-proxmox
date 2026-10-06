@@ -4,9 +4,13 @@ Tests for the bootstrap job's Secret RECORDS (decision #56): the pure rules
 in jobs/lib/secret_records.py — loaded straight from its file path, no
 Nautobot — and source-level gates on jobs/design/bootstrap_schema.py: the
 three inputs exist and are optional, the defaults are the composer layout,
-validation runs before any write, and all three Secret sites create through
-the one helper (get_or_create defaults only — never an update of an existing
-record).
+validation runs before any write (every record name planned up front, so a
+name the provider cannot spell or two names that resolve from one variable
+or file refuse before the first write), and all three Secret sites create
+through the one helper (get_or_create defaults only — never an update of an
+existing record). DocsCoverMessages pins every refusal text to
+docs/getting-started.md §1 the way tests/test_host_baseline.py pins the
+baseline's to the runbook.
 
 Run:  python3 tests/test_bootstrap_schema.py
 """
@@ -84,11 +88,30 @@ class Refusals(unittest.TestCase):
                 sr.normalize_secret_record_inputs(TEXT_FILE, prefix)
             self.assertIn("must be an absolute path", str(ctx.exception))
 
+    def test_dot_dot_in_path_prefix(self):
+        """Nautobot's text-file provider form refuses '..' anywhere in the
+        path (substring, not segment); get_or_create bypasses the form."""
+        for prefix in ("/opt/../secrets", "/opt/nautobot/..", "/opt/na..utobot"):
+            with self.assertRaises(sr.SecretRecordError) as ctx:
+                sr.normalize_secret_record_inputs(TEXT_FILE, prefix)
+            self.assertIn("must not contain '..'", str(ctx.exception))
+        self.assertEqual(sr.normalize_secret_record_inputs(TEXT_FILE, "/opt/n.autobot/.secrets")[1],
+                         "/opt/n.autobot/.secrets")
+
+    def test_control_character_in_path_prefix(self):
+        # strip() takes a trailing newline; an embedded one (API input) must refuse
+        for prefix in ("/opt/na\nutobot", "/opt/nautobot\t/secrets", "/opt/\x00"):
+            with self.assertRaises(sr.SecretRecordError) as ctx:
+                sr.normalize_secret_record_inputs(TEXT_FILE, prefix)
+            self.assertIn("contains a control character (newline, tab, ...) — not allowed", str(ctx.exception))
+
     def test_malformed_env_prefix(self):
         for prefix in ("nfv_", "1NFV_", "NFV-", "NF V", "NFV.", "nfv", "NFV_$"):
             with self.assertRaises(sr.SecretRecordError) as ctx:
                 sr.normalize_secret_record_inputs(ENV_VAR, None, prefix)
             self.assertIn("or be empty", str(ctx.exception))
+        with self.assertRaises(sr.SecretRecordError):  # an embedded newline survives strip()
+            sr.normalize_secret_record_inputs(ENV_VAR, None, "NFV\n_")
 
     def test_inputs_are_validated_regardless_of_provider(self):
         """A junk prefix for the provider NOT in use is still refused — one
@@ -99,11 +122,20 @@ class Refusals(unittest.TestCase):
             sr.normalize_secret_record_inputs(TEXT_FILE, "/x", "bad prefix")
 
     def test_record_names(self):
-        for name in ("", None, "a/b", "/abs"):
-            with self.assertRaises(sr.SecretRecordError):
+        for name in ("", None, "a/b", "/abs", "a..b", "..", "foo\n", "a\tb"):
+            with self.assertRaises(sr.SecretRecordError) as ctx:
                 sr.secret_record_defaults(name)
+            self.assertIn("must be non-empty and contain no '/', '..' or control character", str(ctx.exception))
         with self.assertRaises(sr.SecretRecordError):
             sr.secret_record_defaults("ok", file_name="nodes/x")
+        with self.assertRaises(sr.SecretRecordError):
+            sr.secret_record_defaults("ok", file_name="x..y")
+        # hb's _SECRET_NAME_RE ('$', not fullmatch) lets 'foo\n' arrive from a
+        # config context — the env-var mapping must not emit 'FOO\n' either
+        with self.assertRaises(sr.SecretRecordError):
+            sr.variable_name("foo\n")
+        with self.assertRaises(sr.SecretRecordError):
+            sr.secret_record_defaults("foo\n", ENV_VAR)
 
     def test_env_var_refuses_a_name_it_cannot_spell(self):
         # hb's _SECRET_NAME_RE lets a config context name a secret with '.'
@@ -113,6 +145,12 @@ class Refusals(unittest.TestCase):
                 sr.secret_record_defaults(name, ENV_VAR)
             self.assertIn(repr(name), str(ctx.exception))
             self.assertIn("use the text-file provider", str(ctx.exception))
+            # every character of 9LIVES is in the allowed set — the message
+            # must say the leading digit is the problem and that a prefix fixes it
+            self.assertIn("must not start with a digit — a name prefix such as NFV_ fixes that case",
+                          str(ctx.exception))
+        self.assertEqual(sr.secret_record_defaults("9lives", ENV_VAR, None, "NFV_")["parameters"]["variable"],
+                         "NFV_9LIVES")
         # ...while text-file carries them exactly as before
         self.assertEqual(sr.secret_record_defaults("snmpv3_ops.user_auth", TEXT_FILE)["parameters"]["path"],
                          "/opt/nautobot/secrets/snmpv3_ops.user_auth")
@@ -180,6 +218,47 @@ class EnvironmentVariableRecords(unittest.TestCase):
             self.assertRegex(variable, r"^NFV_[A-Z0-9_]+$")
             seen.add(variable)
         self.assertEqual(len(seen), len(STANDARD_SECRET_NAMES), "variable-name collision")
+
+
+class Plan(unittest.TestCase):
+    FORGE = ("answer-service-admin-token", "answer_service_admin_token")
+
+    def test_plan_is_every_record_s_defaults(self):
+        plan = sr.plan_secret_records([self.FORGE, ("xcc_password", None), ("xcc_password", None)])
+        self.assertEqual(list(plan), ["answer-service-admin-token", "xcc_password"])
+        self.assertEqual(plan["answer-service-admin-token"]["parameters"]["path"],
+                         "/opt/nautobot/secrets/answer_service_admin_token")
+        self.assertEqual(plan["xcc_password"], sr.secret_record_defaults("xcc_password"))
+        plan = sr.plan_secret_records([self.FORGE, ("xcc_password", None)], ENV_VAR, None, "NFV_")
+        self.assertEqual([d["parameters"]["variable"] for d in plan.values()],
+                         ["NFV_ANSWER_SERVICE_ADMIN_TOKEN", "NFV_XCC_PASSWORD"])
+
+    def test_env_var_refuses_two_names_that_spell_one_variable(self):
+        for names in (("snmpv3_ops_auth", "snmpv3_ops-auth"), ("xcc_password", "XCC_PASSWORD"),
+                      ("a-b", "a_b")):
+            records = [(name, None) for name in names]
+            with self.assertRaises(sr.SecretRecordError) as ctx:
+                sr.plan_secret_records(records, ENV_VAR)
+            message = str(ctx.exception)
+            self.assertIn(repr(names[0]), message)
+            self.assertIn(repr(names[1]), message)
+            self.assertIn("both resolve from the same variable", message)
+            self.assertIn("or use the text-file provider", message)
+            # ...and text-file carries both (distinct files)
+            self.assertEqual(len(sr.plan_secret_records(records, TEXT_FILE)), 2)
+
+    def test_text_file_refuses_a_record_on_the_forge_token_s_file(self):
+        with self.assertRaises(sr.SecretRecordError) as ctx:
+            sr.plan_secret_records([self.FORGE, ("answer_service_admin_token", None)])
+        self.assertIn("both resolve from the same file '/opt/nautobot/secrets/answer_service_admin_token'",
+                      str(ctx.exception))
+        self.assertNotIn("text-file provider", str(ctx.exception))
+
+    def test_plan_refuses_like_the_normalizer(self):
+        with self.assertRaises(sr.SecretRecordError):
+            sr.plan_secret_records([("x", None)], "vault")
+        with self.assertRaises(sr.SecretRecordError):
+            sr.plan_secret_records([("snmpv3_ops.user_auth", None)], ENV_VAR)
 
 
 class LogLine(unittest.TestCase):
@@ -253,7 +332,17 @@ class JobInputs(unittest.TestCase):
         names = {alias.name for alias in imp.names}
         self.assertTrue({"DEFAULT_PROVIDER", "DEFAULT_PATH_PREFIX", "DEFAULT_ENV_PREFIX", "TEXT_FILE",
                          "ENVIRONMENT_VARIABLE", "SecretRecordError", "normalize_secret_record_inputs",
-                         "secret_record_defaults", "describe_secret_records"} <= names, names)
+                         "plan_secret_records", "secret_record_defaults", "describe_secret_records"} <= names, names)
+
+    def test_prefix_descriptions_do_not_say_ignored(self):
+        """Both prefixes are validated whichever provider is chosen, so the
+        form must not promise that the unused one is ignored."""
+        inputs = _class_inputs()
+        for name, expected in (("secrets_path_prefix", "Used only for text-file records (always validated)."),
+                               ("secrets_env_prefix", "Used only for environment-variable records (always validated).")):
+            description = ast.literal_eval(_kw(inputs[name], "description"))
+            self.assertIn(expected, description, name)
+            self.assertNotIn("Ignored", description, name)
 
     def test_run_signature_carries_the_three_inputs(self):
         self.assertIn("    def run(self, secrets_provider=None, secrets_path_prefix=None, secrets_env_prefix=None):",
@@ -322,10 +411,54 @@ class JobFailsClosedBeforeAnyWrite(unittest.TestCase):
     def test_every_record_name_is_checked_up_front(self):
         """The env-var provider cannot spell some context-referenced names;
         the job finds out before the first write, not mid-run."""
-        run = JOB_SRC[JOB_SRC.index("    def run(self"):JOB_SRC.index("        device_ct = ContentType")]
-        self.assertIn("self._secret_defaults(FORGE_ADMIN_TOKEN_SECRET, file_name=FORGE_ADMIN_TOKEN_FILE)", run)
-        self.assertIn("for secret_name in (*STANDARD_SECRET_NAMES, *self._baseline_secret_names()):", run)
+        run = re.sub(r"\s+", " ", JOB_SRC[JOB_SRC.index("    def run(self"):JOB_SRC.index("        device_ct = ContentType")])
+        self.assertIn("plan_secret_records( [(FORGE_ADMIN_TOKEN_SECRET, FORGE_ADMIN_TOKEN_FILE), "
+                      "*((name, None) for name in (*STANDARD_SECRET_NAMES, *self._baseline_secret_names()))], "
+                      "*self._secret_inputs, )", run)
         self.assertEqual(JOB_SRC.count("self._baseline_secret_names()"), 2, "preflight + the host-baseline site")
+
+
+MESSAGE_FRAGMENTS = [
+    # the inputs (normalize_secret_record_inputs)
+    "is not supported — choose text-file or environment-variable",
+    "must be an absolute path (start with /)",
+    "must not contain '..' — Nautobot's text-file provider refuses such a path",
+    "contains a control character (newline, tab, ...) — not allowed",
+    "(upper-case letters, digits and '_', not starting with a digit) or be empty",
+    # the record names (variable_name, secret_record_defaults, plan_secret_records)
+    "cannot be an environment-variable record",
+    "(only letters, digits, '_' and '-' map, and the variable must not start with a digit "
+    "— a name prefix such as NFV_ fixes that case)",
+    "rename it where the config context references it, or use the text-file provider",
+    "must be non-empty and contain no '/', '..' or control character",
+    "both resolve from the same variable",
+    "both resolve from the same file",
+    "rename one where the config context references it, or use the text-file provider",
+]
+
+
+def _flatten(text):
+    """Joined f-string pieces / wrapped lines -> one comparable string."""
+    text = re.sub(r'"\s*\n\s*f?"', "", text)  # adjacent string literals across lines
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+class DocsCoverMessages(unittest.TestCase):
+    def test_every_refusal_is_in_the_code_and_getting_started(self):
+        """Spec §0: every refusal text is quoted in a doc. The bootstrap's
+        belong to docs/getting-started.md §1 (the runbook's table is the
+        install jobs'); the integrator may mirror them there."""
+        code = _flatten(MODULE.read_text())
+        code = code.replace("{TEXT_FILE}", "text-file").replace("{ENVIRONMENT_VARIABLE}", "environment-variable")
+        code = code.replace("{ENV_PREFIX_RE.pattern}", sr.ENV_PREFIX_RE.pattern)
+        code = code.replace("the same {what} ", "the same variable ").replace("it{hint}", "it, or use the text-file provider")
+        code += " both resolve from the same file"  # {what} is 'file' under text-file
+        docs = _flatten(DOCS.read_text())
+        missing_code = [m for m in MESSAGE_FRAGMENTS if m not in code]
+        missing_docs = [m for m in MESSAGE_FRAGMENTS if m not in docs]
+        self.assertEqual(missing_code, [], "fragments no longer in jobs/lib/secret_records.py")
+        self.assertEqual(missing_docs, [], "fragments missing from docs/getting-started.md §1")
 
 
 class DocsCoverTheInputs(unittest.TestCase):

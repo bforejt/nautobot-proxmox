@@ -64,6 +64,7 @@ from ..lib.secret_records import (
     SecretRecordError,
     describe_secret_records,
     normalize_secret_record_inputs,
+    plan_secret_records,
     secret_record_defaults,
 )
 
@@ -134,7 +135,8 @@ class BootstrapNfvSchema(Job):
         required=False,
         default=DEFAULT_PATH_PREFIX,
         description="text-file records point at <prefix>/<name> (the composer mounts "
-                    "./secrets there). Must be absolute. Ignored for environment-variable.",
+                    "./secrets there). Must be absolute. Used only for text-file records "
+                    "(always validated).",
     )
     secrets_env_prefix = StringVar(
         label="environment-variable name prefix",
@@ -142,7 +144,7 @@ class BootstrapNfvSchema(Job):
         default=DEFAULT_ENV_PREFIX,
         description="environment-variable records name <prefix><NAME>, NAME = the secret name "
                     "upper-cased with '-' -> '_' (e.g. NFV_ + xcc_password -> NFV_XCC_PASSWORD). "
-                    "Ignored for text-file.",
+                    "Used only for environment-variable records (always validated).",
     )
 
     def _log_result(self, kind, name, created):
@@ -166,16 +168,20 @@ class BootstrapNfvSchema(Job):
 
     def run(self, secrets_provider=None, secrets_path_prefix=None, secrets_env_prefix=None):
         # Fail closed BEFORE any write: refuse an unknown provider, a relative
-        # path prefix or a malformed variable prefix, and a record name the
+        # path prefix or a malformed variable prefix, a record name the
         # provider cannot carry (a '.' or ' ' from a config context has no
-        # environment-variable spelling) — nothing below has run yet.
+        # environment-variable spelling) and two records that would resolve
+        # from one variable or file ('a-b' and 'a_b' both spell A_B) —
+        # nothing below has run yet.
         try:
             self._secret_inputs = normalize_secret_record_inputs(
                 secrets_provider, secrets_path_prefix, secrets_env_prefix
             )
-            self._secret_defaults(FORGE_ADMIN_TOKEN_SECRET, file_name=FORGE_ADMIN_TOKEN_FILE)
-            for secret_name in (*STANDARD_SECRET_NAMES, *self._baseline_secret_names()):
-                self._secret_defaults(secret_name)
+            plan_secret_records(
+                [(FORGE_ADMIN_TOKEN_SECRET, FORGE_ADMIN_TOKEN_FILE),
+                 *((name, None) for name in (*STANDARD_SECRET_NAMES, *self._baseline_secret_names()))],
+                *self._secret_inputs,
+            )
         except SecretRecordError as exc:
             raise ValueError(str(exc)) from exc
         self.logger.info("%s", describe_secret_records(*self._secret_inputs))

@@ -31,16 +31,52 @@ The bootstrap's three inputs decide where its Secret records point (decision
 `/opt/nautobot/secrets`: records point at `<prefix>/<name>`), and
 **environment-variable name prefix** (records name `<PREFIX><NAME>`, the
 secret name upper-cased with `-` → `_`: `NFV_` + `xcc_password` →
-`NFV_XCC_PASSWORD`). The defaults reproduce the composer layout exactly
-(`./setup.sh --with-nfv-jobs` runs the job with them), so on composer there
-is nothing to choose. Not on composer? Pick the environment-variable
-provider, or the prefix your deployment mounts the secrets at, on the FIRST
-run: the job is create-only, so a record that already exists — repointed by
-you or not — is never touched, and a re-run with other inputs changes
-nothing already there. The job refuses an unknown provider, a relative
-prefix or a malformed variable prefix before it writes anything.
-What any deployment must provide beyond the jobs, and how the composer
-provides each item: [platform-contract.md](platform-contract.md).
+`NFV_XCC_PASSWORD`). One record is the exception to `<prefix>/<name>`: the
+forge admin token record `answer-service-admin-token` points at
+`<prefix>/answer_service_admin_token`, the composer's `./add-secret.sh` file
+name (its variable is `ANSWER_SERVICE_ADMIN_TOKEN`). The defaults reproduce
+the composer layout exactly (`./setup.sh --with-nfv-jobs` runs the job with
+them), so on composer there is nothing to choose. Not on composer? Pick the
+environment-variable provider, or the prefix your deployment mounts the
+secrets at, on the FIRST run: the job is create-only, so a record that
+already exists — repointed by you or not — is never touched, and a re-run
+with other inputs changes nothing already there. The job refuses an unknown
+provider, a relative prefix or a malformed variable prefix (both prefixes
+are checked whichever provider is chosen) — and, under environment-variable,
+a config-context secret name it cannot spell as a variable (one with `.` or
+` `): rename it in the context or keep text-file — before it writes
+anything. What any deployment must provide beyond the jobs, and how the
+composer provides each item: [platform-contract.md](platform-contract.md).
+
+If the bootstrap refuses, nothing was written — fix the input or the config
+context it names and re-run:
+
+- `Secrets provider '…' is not supported — choose text-file or environment-variable`
+  / `text-file path prefix '…' must be an absolute path (start with /)` /
+  `text-file path prefix '…' must not contain '..' — Nautobot's text-file
+  provider refuses such a path` / `text-file path prefix '…' contains a
+  control character (newline, tab, ...) — not allowed` /
+  `environment-variable name prefix '…' must match ^[A-Z_][A-Z0-9_]*$
+  (upper-case letters, digits and '_', not starting with a digit) or be empty`
+  — a job input (the UI form, or the API run's `data`) is unusable; both
+  prefixes are checked whichever provider is chosen.
+- `Secret '…' cannot be an environment-variable record: '…' is not a valid
+  variable name (only letters, digits, '_' and '-' map, and the variable must
+  not start with a digit — a name prefix such as NFV_ fixes that case) —
+  rename it where the config context references it, or use the text-file
+  provider` — a `host_baseline` config context names a secret with `.` or
+  ` ` (its schema allows them) or with a leading digit: rename it in the
+  context, set a name prefix for the leading digit, or keep text-file.
+- `Secret record name '…' must be non-empty and contain no '/', '..' or
+  control character` — a config-context secret name Nautobot's text-file
+  provider could not take as a path; rename it in the context.
+- `Secret records '…' and '…' both resolve from the same variable '…' —
+  rename one where the config context references it, or use the text-file
+  provider` (text-file: `… both resolve from the same file '…' — rename one
+  …`) — two names spell one variable (`a-b` and `a_b`, or a case
+  difference) or point at one file (a context record named
+  `answer_service_admin_token` beside the forge token); rename one in the
+  context.
 
 ## 2. Firmware/image server
 
