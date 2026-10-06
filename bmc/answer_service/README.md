@@ -101,8 +101,10 @@ of step.
 
 The handshake (`version_handshake` in `jobs/lib/answer_service.py`, run by
 the install job's preflight and by Prepare Installer Media before any POST):
-`version` missing or not a plain `X.Y.Z` (`-dev`, `+build`, `latest` do not
-count) → refuse, the service predates the handshake; `version` below
+`version` missing or not a plain `X.Y.Z` (an optional leading `v` is
+tolerated; `-dev`, `+build`, `latest` do not count) → refuse, the service
+predates the handshake — a build so old that `/info` itself is a 404 lands
+on the same refusal; `version` below
 `MIN_ANSWER_SERVICE_VERSION` → refuse, naming both versions and the fix (set
 `ANSWER_SERVICE_VERSION` to the required tag or newer, pull, `up -d`; a
 checkout rebuilds with `up -d --build`); `min_jobs_version` present and

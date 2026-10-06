@@ -20,8 +20,10 @@ MIN_ANSWER_SERVICE_VERSION = "0.1.0"   # oldest service these jobs accept
 
 # Strict on purpose: an optional leading `v`, three integers, nothing else.
 # `-dev` / `+build` suffixes are NOT versions here — unparseable means too
-# old (fail closed), never "probably fine".
-VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
+# old (fail closed), never "probably fine". `\Z`, not `$`: `$` also matches
+# before a trailing newline, which would let "0.1.0\n" through (and into the
+# log line) — same anchor as app.py's own VERSION check.
+VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)\Z")
 
 
 def parse_version(text):

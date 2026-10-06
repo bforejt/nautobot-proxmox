@@ -88,8 +88,9 @@ def composer_fix(version=None):
     """The one sentence every stale-service message ends with: how a deployed
     service moves forward. The composer pulls a published image pinned by
     ANSWER_SERVICE_VERSION (decision #56), so "rebuild from main" is wrong
-    advice there; a checkout (ANSWER_SERVICE_BUILD_CONTEXT) still rebuilds. `version` names the tag to pin; None = whichever carries the
-    missing piece. Keep the fixed fragments verbatim — the docs test pins them."""
+    advice there; a checkout (ANSWER_SERVICE_BUILD_CONTEXT) still rebuilds.
+    `version` names the tag to pin; None = whichever carries the missing
+    piece. Keep the fixed fragments verbatim — the docs test pins them."""
     pin = f"to v{version} or newer" if version else "to a tag carrying it"
     return (
         f"on the composer, pull or rebuild the service (set ANSWER_SERVICE_VERSION {pin} in .env, "
@@ -153,16 +154,25 @@ def version_handshake(info, base_url=""):
 
 
 def fetch_info(base_url, verify=False, timeout=10):
-    """GET <base_url>/info -> dict, or None when unreachable/invalid."""
+    """GET <base_url>/info -> the JSON object, or None ONLY when no response
+    arrived (the worker cannot reach the service: the one case that is a
+    warning). Any response that is not a usable JSON object — a 404 from a
+    build older than /info itself, a proxy's error page, a bare list — comes
+    back as a dict without `version`, so version_handshake refuses it: a
+    service the worker reached but that cannot state its version is too old,
+    not unreachable. (Same line prepare_media.py draws: it .json()s the
+    response and hands whatever came back to the handshake.)"""
     import requests  # lazy: the pure helpers below must load without it
 
     try:
         response = requests.get(f"{base_url.rstrip('/')}/info", timeout=timeout, verify=verify)
-        response.raise_for_status()
-        data = response.json()
-    except (requests.RequestException, ValueError):
+    except requests.RequestException:
         return None
-    return data if isinstance(data, dict) else None
+    try:
+        data = response.json()
+    except ValueError:  # requests' JSONDecodeError is one; an HTML error page lands here
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def profile_feature_keys(profile):

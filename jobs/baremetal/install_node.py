@@ -158,7 +158,7 @@ class InstallProxmoxNode(Job):
         integration = ExternalIntegration.objects.filter(name=INTEGRATION_NAME).first()
         if integration is None:
             self.logger.warning(
-                "No ExternalIntegration %r — skipping the answer-service profile preflight",
+                "No ExternalIntegration %r — skipping the answer-service version handshake and profile preflight",
                 INTEGRATION_NAME,
             )
             return

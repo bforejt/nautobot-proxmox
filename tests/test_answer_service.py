@@ -54,11 +54,12 @@ class ParseVersion(unittest.TestCase):
         self.assertEqual(asvc.parse_version("10.2.33"), (10, 2, 33))
 
     def test_rejects_everything_else(self):
-        for bad in ("0.1", "0.1.0-dev", "1.0.0+x", "", None, "latest", "v", "0.1.0.0", 1, "0.1.0 ", " 0.1.0"):
+        for bad in ("0.1", "0.1.0-dev", "1.0.0+x", "", None, "latest", "v", "0.1.0.0", 1, "0.1.0 ", " 0.1.0",
+                    "0.1.0\n", "v0.1.0\n"):  # `$` would let a trailing newline through; `\Z` does not
             self.assertIsNone(asvc.parse_version(bad), repr(bad))
 
     def test_regex_is_the_strict_one(self):
-        self.assertEqual(asvc.VERSION_RE.pattern, r"^v?(\d+)\.(\d+)\.(\d+)$")
+        self.assertEqual(asvc.VERSION_RE.pattern, r"^v?(\d+)\.(\d+)\.(\d+)\Z")
 
 
 class VersionHandshake(unittest.TestCase):
@@ -184,6 +185,84 @@ class Preflight(unittest.TestCase):
     def test_profile_without_features_needs_no_feature_list(self):
         info = svc_info(profiles=["nuc"])
         self.assertEqual(asvc.evaluate_profile_preflight(info, "nuc", [], URL)[0], "ok")
+
+
+class FetchInfo(unittest.TestCase):
+    """fetch_info draws the line the handshake relies on: None only when no
+    response arrived (the one warning case); any response that is not a
+    usable JSON object comes back as a dict without `version`, which the
+    handshake refuses — a reachable service that cannot state its version
+    is too old, not unreachable. Runs against a fake `requests` module."""
+
+    RequestException = type("RequestException", (IOError,), {})
+
+    class _Response:
+        def __init__(self, status_code, body=None, json_error=False):
+            self.status_code, self._body, self._json_error = status_code, body, json_error
+
+        def json(self):
+            if self._json_error:
+                raise ValueError("not JSON")
+            return self._body
+
+    def _fetch(self, get):
+        fake = types.ModuleType("requests")
+        fake.RequestException = self.RequestException
+        fake.get = get
+        saved = sys.modules.get("requests")
+        sys.modules["requests"] = fake
+        try:
+            return asvc.fetch_info(URL, verify=False, timeout=3)
+        finally:
+            if saved is None:
+                del sys.modules["requests"]
+            else:
+                sys.modules["requests"] = saved
+
+    def test_a_usable_object_comes_back_as_is(self):
+        seen = {}
+
+        def get(url, timeout, verify):
+            seen.update(url=url, timeout=timeout, verify=verify)
+            return self._Response(200, svc_info(profiles=[SLUG]))
+
+        info = self._fetch(get)
+        self.assertEqual(info["version"], asvc.JOBS_VERSION)
+        self.assertEqual(seen, {"url": f"{URL}/info", "timeout": 3, "verify": False})
+        self.assertEqual(asvc.version_handshake(info, URL)[0], "ok")
+
+    def test_no_response_is_none_and_exactly_one_warning(self):
+        def get(url, timeout, verify):
+            raise self.RequestException("connection refused")
+
+        info = self._fetch(get)
+        self.assertIsNone(info)
+        verdict, msg = asvc.evaluate_profile_preflight(info, SLUG, FEATURES, URL)
+        self.assertEqual(verdict, "warn")
+        self.assertIn("did not answer GET /info", msg)
+        self.assertEqual(msg.count("answer service at"), 1)
+
+    def test_a_build_older_than_info_itself_is_refused_not_warned(self):
+        # A 404 with FastAPI's JSON body (a service from before /info existed),
+        # a proxy's HTML error page, a bare list, a 500: a response arrived, so
+        # the handshake — not the unreachable warning — sees it, and none of
+        # them carries a version. This was the one fail-open path: folding
+        # these into None let the oldest possible service through to the BMC.
+        cases = {
+            "404 json": self._Response(404, {"detail": "Not Found"}),
+            "502 html": self._Response(502, json_error=True),
+            "200 list": self._Response(200, ["not", "an", "object"]),
+            "500 json": self._Response(500, {"detail": "boom"}),
+        }
+        for label, response in cases.items():
+            with self.subTest(label):
+                info = self._fetch(lambda url, timeout, verify, r=response: r)
+                self.assertIsInstance(info, dict)
+                self.assertNotIn("version", info)
+                verdict, msg = asvc.evaluate_profile_preflight(info, SLUG, FEATURES, URL)
+                self.assertEqual(verdict, "refuse")
+                self.assertIn("reports no usable version in GET /info", msg)
+                self.assertNotIn("did not answer", msg)
 
 
 class FeatureKeys(unittest.TestCase):
