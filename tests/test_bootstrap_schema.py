@@ -264,15 +264,15 @@ class Plan(unittest.TestCase):
 
 class LogLine(unittest.TestCase):
     def test_text_file(self):
-        self.assertEqual(sr.describe_secret_records(), "Secret records: provider text-file, path prefix /opt/nautobot/secrets")
+        self.assertEqual(sr.describe_secret_records(), "Secret-record defaults: provider text-file, path prefix /opt/nautobot/secrets")
         self.assertEqual(sr.describe_secret_records(TEXT_FILE, "/srv/nb/", None),
-                         "Secret records: provider text-file, path prefix /srv/nb")
+                         "Secret-record defaults: provider text-file, path prefix /srv/nb")
 
     def test_environment_variable(self):
         self.assertEqual(sr.describe_secret_records(ENV_VAR, None, "NFV_"),
-                         "Secret records: provider environment-variable, variable name prefix NFV_")
+                         "Secret-record defaults: provider environment-variable, variable name prefix NFV_")
         self.assertEqual(sr.describe_secret_records(ENV_VAR),
-                         "Secret records: provider environment-variable, variable name prefix (none)")
+                         "Secret-record defaults: provider environment-variable, variable name prefix (none)")
 
     def test_refuses_like_the_normalizer(self):
         with self.assertRaises(sr.SecretRecordError):
@@ -443,6 +443,35 @@ def _flatten(text):
     text = re.sub(r'"\s*\n\s*f?"', "", text)  # adjacent string literals across lines
     text = re.sub(r"\s+", " ", text)
     return text
+
+
+class LogLineSurvivesTheSanitizer(unittest.TestCase):
+    """Nautobot redacts job-log text through its SANITIZER_PATTERNS
+    (nautobot/core/settings.py, copied here from 2.4.30): the token after
+    `secret`/`secrets` + whitespace is replaced. The bootstrap's one log line
+    must come through untouched for every provider."""
+
+    SANITIZER_PATTERNS = [
+        (re.compile(r"(https?://)?\S+\s*@", re.IGNORECASE), r"\1(redacted)@"),
+        (re.compile(r"(username|password|passwd|pwd|secret|secrets)([\"']?(?:\s+is.?|:)?\s+)\S+[\"']?",
+                    re.IGNORECASE), r"\1\2(redacted)"),
+    ]
+
+    def sanitize(self, text):
+        for pattern, replacement in self.SANITIZER_PATTERNS:
+            text = pattern.sub(replacement, text)
+        return text
+
+    def test_every_variant_is_unchanged(self):
+        for line in (
+            sr.describe_secret_records(),
+            sr.describe_secret_records(sr.TEXT_FILE, "/srv/nb"),
+            sr.describe_secret_records(sr.ENVIRONMENT_VARIABLE, env_prefix="NFV_"),
+            sr.describe_secret_records(sr.ENVIRONMENT_VARIABLE),
+        ):
+            self.assertEqual(self.sanitize(line), line)
+        self.assertNotEqual(self.sanitize("Secret records: provider text-file, path prefix /x"),
+                            "Secret records: provider text-file, path prefix /x")  # the old wording was redacted
 
 
 class DocsCoverMessages(unittest.TestCase):

@@ -162,8 +162,14 @@ def plan_secret_records(records, provider=None, path_prefix=None, env_prefix=Non
 
 
 def describe_secret_records(provider=None, path_prefix=None, env_prefix=None):
-    """The one log line the job emits for its choice of provider and prefix."""
+    """The one log line the job emits for its choice of provider and prefix.
+
+    Worded around Nautobot's log sanitizer (SANITIZER_PATTERNS): the word
+    `secret`/`secrets` followed by whitespace and a token gets that token
+    redacted — "Secret records: provider …" showed up in the job log as
+    "Secret (redacted) provider …". Hyphenate, and keep the path (which ends
+    in `secrets`) last with nothing after it."""
     provider, path_prefix, env_prefix = normalize_secret_record_inputs(provider, path_prefix, env_prefix)
     if provider == TEXT_FILE:
-        return f"Secret records: provider {TEXT_FILE}, path prefix {path_prefix}"
-    return f"Secret records: provider {ENVIRONMENT_VARIABLE}, variable name prefix {env_prefix or '(none)'}"
+        return f"Secret-record defaults: provider {TEXT_FILE}, path prefix {path_prefix}"
+    return f"Secret-record defaults: provider {ENVIRONMENT_VARIABLE}, variable name prefix {env_prefix or '(none)'}"
