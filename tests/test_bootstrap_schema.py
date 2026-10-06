@@ -25,6 +25,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 MODULE = ROOT / "jobs" / "lib" / "secret_records.py"
 JOB = ROOT / "jobs" / "design" / "bootstrap_schema.py"
 DOCS = ROOT / "docs" / "getting-started.md"
+RUNBOOK = ROOT / "docs" / "baremetal-install.md"
 spec = importlib.util.spec_from_file_location("secret_records", MODULE)
 sr = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(sr)
@@ -446,19 +447,22 @@ def _flatten(text):
 
 class DocsCoverMessages(unittest.TestCase):
     def test_every_refusal_is_in_the_code_and_getting_started(self):
-        """Spec §0: every refusal text is quoted in a doc. The bootstrap's
-        belong to docs/getting-started.md §1 (the runbook's table is the
-        install jobs'); the integrator may mirror them there."""
+        """Every refusal text is quoted exactly in docs/getting-started.md §1
+        AND in the install runbook's troubleshooting table, so a reworded
+        message cannot silently orphan its rows (or the reverse)."""
         code = _flatten(MODULE.read_text())
         code = code.replace("{TEXT_FILE}", "text-file").replace("{ENVIRONMENT_VARIABLE}", "environment-variable")
         code = code.replace("{ENV_PREFIX_RE.pattern}", sr.ENV_PREFIX_RE.pattern)
         code = code.replace("the same {what} ", "the same variable ").replace("it{hint}", "it, or use the text-file provider")
         code += " both resolve from the same file"  # {what} is 'file' under text-file
         docs = _flatten(DOCS.read_text())
+        runbook = _flatten(RUNBOOK.read_text())
         missing_code = [m for m in MESSAGE_FRAGMENTS if m not in code]
         missing_docs = [m for m in MESSAGE_FRAGMENTS if m not in docs]
+        missing_runbook = [m for m in MESSAGE_FRAGMENTS if m not in runbook]
         self.assertEqual(missing_code, [], "fragments no longer in jobs/lib/secret_records.py")
         self.assertEqual(missing_docs, [], "fragments missing from docs/getting-started.md §1")
+        self.assertEqual(missing_runbook, [], "fragments missing from docs/baremetal-install.md troubleshooting")
 
 
 class DocsCoverTheInputs(unittest.TestCase):

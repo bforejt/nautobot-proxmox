@@ -228,7 +228,10 @@ Users reach the jump host at the **desktop/console, never SSH** (team,
   sudo, no stray `ubuntu`). So the username is a genuine deploy-time SoT value;
   changing it needs no template rebuild.
 - **Password**: a single fleet-wide Nautobot **Secret**
-  `jumphost_console_password` (text-file provider). The deploy job reads it and
+  `jumphost_console_password` (a record the bootstrap creates — text-file at
+  `/opt/nautobot/secrets/<name>` by default; the provider and path prefix are
+  job inputs, [getting-started.md §1](getting-started.md#1-connect-the-jobs)).
+  The deploy job reads it and
   passes it as Proxmox `cipassword`; Proxmox hashes it before storing (verified:
   `$5$` SHA-256), so plaintext only transits the TLS API call, never at rest,
   never in job logs/inputs. Deploy **refuses** (ContractViolation) if a
@@ -310,8 +313,9 @@ minimum).
 | `snmp_community` (the name `snmp.community_secret` gives) | bootstrap (the conventional name, plus any name a context references) | `rocommunity`/`rocommunity6` in `/etc/snmp/snmpd.conf` (mode 0600). 1–64 printable characters, no spaces/quotes/`#`/backslash |
 | `snmpv3_<user>_auth` / `snmpv3_<user>_priv` (or the names a v3 user gives) | bootstrap, for every v3 user named in a config context at bootstrap time | `createUser` in snmpd's persistent file with snmpd stopped; 8–128 printable characters, no double quote or backslash |
 
-All are text-file records (`/opt/nautobot/secrets/<name>`, values via
-`./add-secret.sh` on composer stacks). Values resolve with the Device as
+All are records the bootstrap creates under the provider and path prefix its
+inputs choose — by default text-file at `/opt/nautobot/secrets/<name>`, the
+composer layout (values via `./add-secret.sh` there). Values resolve with the Device as
 `obj`, so a record's path may be templated per site (e.g.
 `/opt/nautobot/secrets/{{ obj.location.name }}-snmp-community`).
 
