@@ -16,7 +16,12 @@ Created here (decision log #8, Device-only modeling):
     (+ SE350/NUC/Nested Lab Node for the server side)
   - Platforms: ubuntu-jumphost, paloalto-panos, cisco-iosxe, proxmox-ve
   - Statuses Staged/Retired (image promotion gate), forge integration
-    records, and every standard Secret RECORD (values never)
+    records, and every standard Secret RECORD (values never) — under the
+    provider the job inputs choose (decision #56): secrets_provider
+    (text-file | environment-variable), secrets_path_prefix (text-file
+    records point at <prefix>/<name>; default /opt/nautobot/secrets = the
+    composer layout), secrets_env_prefix (<PREFIX><NAME> variables).
+    Create-only: an existing record is never repointed.
   - Custom fields: platform tunables (day0_builder/machine_type/console_user)
     and dcim.device fields (provisioning_state, vmid, sizing, hypervisor
     targets incl. mgmt_bridge, secrets_group, pa_mgmt_mode)
@@ -29,7 +34,7 @@ Created here (decision log #8, Device-only modeling):
 
 from django.contrib.contenttypes.models import ContentType
 
-from nautobot.apps.jobs import Job, register_jobs
+from nautobot.apps.jobs import ChoiceVar, Job, StringVar, register_jobs
 from nautobot.dcim.models import Device, DeviceType, Manufacturer, Platform
 from nautobot.extras.choices import (
     SecretsGroupAccessTypeChoices,
@@ -50,6 +55,17 @@ from nautobot.extras.models import (
 )
 
 from ..lib import host_baseline as hb
+from ..lib.secret_records import (
+    DEFAULT_ENV_PREFIX,
+    DEFAULT_PATH_PREFIX,
+    DEFAULT_PROVIDER,
+    ENVIRONMENT_VARIABLE,
+    TEXT_FILE,
+    SecretRecordError,
+    describe_secret_records,
+    normalize_secret_record_inputs,
+    secret_record_defaults,
+)
 
 PROVISIONING_STATES = [
     "awaiting_install",
@@ -60,6 +76,31 @@ PROVISIONING_STATES = [
     "handed_off",
 ]
 
+# The forge admin bearer: record name per the ExternalIntegration convention,
+# file name per the composer's ./add-secret.sh (kept apart on purpose — an
+# existing stack's file must stay where its record points).
+FORGE_ADMIN_TOKEN_SECRET = "answer-service-admin-token"
+FORGE_ADMIN_TOKEN_FILE = "answer_service_admin_token"
+
+# Every credential the jobs resolve gets its record pre-created so
+# operators only supply VALUES (./add-secret.sh <name> on composer stacks).
+STANDARD_SECRET_NAMES = (
+    "jumphost_console_password",
+    "xcc_username",
+    "xcc_password",
+    "host_ssh_username",
+    "host_ssh_password",
+    "proxmox_token_id",
+    "proxmox_token_secret",
+    # PA-VM day-0 (pa-bootstrap builder): admin password ships as a
+    # phash in bootstrap.xml; authcode is optional BYOL; the SCM PIN
+    # pair is read only when a device sets pa_mgmt_mode=scm.
+    "pa_admin_password",
+    "pa_authcode",
+    "scm_registration_pin_id",
+    "scm_registration_pin_value",
+)
+
 
 class BootstrapNfvSchema(Job):
     class Meta:
@@ -67,14 +108,78 @@ class BootstrapNfvSchema(Job):
         description = (
             "Idempotently creates the extensibility records the NFV design uses: "
             "the Hosted On relationship, roles, virtual DeviceTypes, platforms, "
-            "and custom fields. Safe to re-run; no-ops when everything exists."
+            "custom fields and every Secret RECORD (values never) under the "
+            "Secrets provider / path prefix / variable-name prefix inputs "
+            "(defaults reproduce the composer layout; an existing record is never "
+            "touched). Safe to re-run; no-ops when everything exists."
         )
         has_sensitive_variables = False
+
+    # setup.sh --with-nfv-jobs runs this job through the API with
+    # {"data": {}}: every input is optional and run() applies the defaults
+    # itself when a value arrives empty.
+    secrets_provider = ChoiceVar(
+        label="Secrets provider",
+        required=False,
+        default=DEFAULT_PROVIDER,
+        choices=(
+            (TEXT_FILE, "text-file — one file per secret"),
+            (ENVIRONMENT_VARIABLE, "environment-variable — one variable per secret"),
+        ),
+        description="Provider of the Secret RECORDS this job creates (values never). "
+                    "Create-only: an existing record — repointed or not — is never touched.",
+    )
+    secrets_path_prefix = StringVar(
+        label="text-file path prefix",
+        required=False,
+        default=DEFAULT_PATH_PREFIX,
+        description="text-file records point at <prefix>/<name> (the composer mounts "
+                    "./secrets there). Must be absolute. Ignored for environment-variable.",
+    )
+    secrets_env_prefix = StringVar(
+        label="environment-variable name prefix",
+        required=False,
+        default=DEFAULT_ENV_PREFIX,
+        description="environment-variable records name <prefix><NAME>, NAME = the secret name "
+                    "upper-cased with '-' -> '_' (e.g. NFV_ + xcc_password -> NFV_XCC_PASSWORD). "
+                    "Ignored for text-file.",
+    )
 
     def _log_result(self, kind, name, created):
         self.logger.info("%s %r: %s", kind, name, "created" if created else "exists")
 
-    def run(self):
+    def _secret_defaults(self, name, file_name=None):
+        """Create-only defaults for ONE Secret record under the chosen
+        provider (jobs/lib/secret_records.py). Every Secret get_or_create
+        below passes this as defaults= — an existing record is never updated."""
+        provider, path_prefix, env_prefix = self._secret_inputs
+        return secret_record_defaults(name, provider, path_prefix, env_prefix, file_name=file_name)
+
+    def _baseline_secret_names(self):
+        """The two conventional names always; plus every name a config
+        context's host_baseline block references (SNMPv3 passphrases are per
+        user: snmpv3_<user>_auth / _priv unless the context names others)."""
+        names = [hb.DEFAULT_AD_BIND_SECRET, hb.DEFAULT_SNMP_COMMUNITY_SECRET]
+        for context in ConfigContext.objects.all():
+            names += hb.referenced_secret_names(context.data)
+        return list(dict.fromkeys(names))
+
+    def run(self, secrets_provider=None, secrets_path_prefix=None, secrets_env_prefix=None):
+        # Fail closed BEFORE any write: refuse an unknown provider, a relative
+        # path prefix or a malformed variable prefix, and a record name the
+        # provider cannot carry (a '.' or ' ' from a config context has no
+        # environment-variable spelling) — nothing below has run yet.
+        try:
+            self._secret_inputs = normalize_secret_record_inputs(
+                secrets_provider, secrets_path_prefix, secrets_env_prefix
+            )
+            self._secret_defaults(FORGE_ADMIN_TOKEN_SECRET, file_name=FORGE_ADMIN_TOKEN_FILE)
+            for secret_name in (*STANDARD_SECRET_NAMES, *self._baseline_secret_names()):
+                self._secret_defaults(secret_name)
+        except SecretRecordError as exc:
+            raise ValueError(str(exc)) from exc
+        self.logger.info("%s", describe_secret_records(*self._secret_inputs))
+
         device_ct = ContentType.objects.get(app_label="dcim", model="device")
 
         # ---- Relationship: Hosted On ----
@@ -170,13 +275,10 @@ class BootstrapNfvSchema(Job):
         # seeds the compose-network address (valid on composer AND nfv-helper
         # stacks); CREATE-ONLY — an admin's corrected URL is never touched.
         forge_secret, created = Secret.objects.get_or_create(
-            name="answer-service-admin-token",
-            defaults={
-                "provider": "text-file",
-                "parameters": {"path": "/opt/nautobot/secrets/answer_service_admin_token"},
-            },
+            name=FORGE_ADMIN_TOKEN_SECRET,
+            defaults=self._secret_defaults(FORGE_ADMIN_TOKEN_SECRET, file_name=FORGE_ADMIN_TOKEN_FILE),
         )
-        self._log_result("Secret", "answer-service-admin-token (record only)", created)
+        self._log_result("Secret", f"{FORGE_ADMIN_TOKEN_SECRET} (record only)", created)
         forge_group, created = SecretsGroup.objects.get_or_create(name="nfv-answer-service-admin")
         self._log_result("SecretsGroup", "nfv-answer-service-admin", created)
         # Keyed on the slot (group + access/secret type): if an admin already
@@ -199,32 +301,13 @@ class BootstrapNfvSchema(Job):
         self._log_result("ExternalIntegration", "nfv-answer-service", created)
 
         # ---- Standard operational Secret RECORDS (values never; #44 rule) ----
-        # Every credential the jobs resolve gets its record pre-created
-        # (text-file provider, standard path) so operators only supply VALUES
-        # (./add-secret.sh <name> on composer stacks). Create-only: a record
-        # an admin repointed (e.g. to the env-var provider) is never touched.
-        for secret_name in (
-            "jumphost_console_password",
-            "xcc_username",
-            "xcc_password",
-            "host_ssh_username",
-            "host_ssh_password",
-            "proxmox_token_id",
-            "proxmox_token_secret",
-            # PA-VM day-0 (pa-bootstrap builder): admin password ships as a
-            # phash in bootstrap.xml; authcode is optional BYOL; the SCM PIN
-            # pair is read only when a device sets pa_mgmt_mode=scm.
-            "pa_admin_password",
-            "pa_authcode",
-            "scm_registration_pin_id",
-            "scm_registration_pin_value",
-        ):
+        # Under the chosen provider/prefix (STANDARD_SECRET_NAMES above).
+        # Create-only: a record an admin repointed (e.g. to another
+        # provider) is never touched.
+        for secret_name in STANDARD_SECRET_NAMES:
             _, created = Secret.objects.get_or_create(
                 name=secret_name,
-                defaults={
-                    "provider": "text-file",
-                    "parameters": {"path": f"/opt/nautobot/secrets/{secret_name}"},
-                },
+                defaults=self._secret_defaults(secret_name),
             )
             self._log_result("Secret", f"{secret_name} (record only)", created)
 
@@ -366,20 +449,12 @@ class BootstrapNfvSchema(Job):
                     self._log_result("  choice", value, True)
 
         # ---- Secret RECORDS the baseline resolves (values never) ----
-        # The two conventional names always; plus every name a config
-        # context's host_baseline block references (SNMPv3 passphrases are
-        # per user: snmpv3_<user>_auth / _priv unless the context names
-        # others). Create-only, text-file provider at the standard path.
-        names = [hb.DEFAULT_AD_BIND_SECRET, hb.DEFAULT_SNMP_COMMUNITY_SECRET]
-        for context in ConfigContext.objects.all():
-            names += hb.referenced_secret_names(context.data)
-        for secret_name in dict.fromkeys(names):
+        # _baseline_secret_names(): the conventional pair plus every name a
+        # config context references. Create-only, under the chosen provider.
+        for secret_name in self._baseline_secret_names():
             _, created = Secret.objects.get_or_create(
                 name=secret_name,
-                defaults={
-                    "provider": "text-file",
-                    "parameters": {"path": f"/opt/nautobot/secrets/{secret_name}"},
-                },
+                defaults=self._secret_defaults(secret_name),
             )
             self._log_result("Secret", f"{secret_name} (record only)", created)
 
