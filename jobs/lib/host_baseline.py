@@ -111,6 +111,8 @@ _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 _PKG_RE = re.compile(r"^[a-z0-9][a-z0-9+.-]{1,62}$")
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _REALM_RE = re.compile(r"^[A-Za-z][A-Za-z0-9._-]{1,31}$")
+# attr=value pairs separated by commas (RFC 4514 shape; escaped commas allowed)
+_DN_RE = re.compile(r"^\s*[A-Za-z][A-Za-z0-9-]*=(?:[^,\\]|\\.)+(?:\s*,\s*[A-Za-z][A-Za-z0-9-]*=(?:[^,\\]|\\.)+)*\s*$")
 _HOST_RE = re.compile(r"^[A-Za-z0-9.:-]{1,253}$")
 _DOMAIN_RE = re.compile(r"^[A-Za-z0-9.-]{1,253}$")
 _PVE_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")          # roles, groups
@@ -321,6 +323,14 @@ def _validate_ad(raw, problems):
         cfg["mode"] = None
     if cfg["realm"] and cfg["realm"].lower() in ("pam", "pve"):
         problems.append(f"{path}.realm {cfg['realm']!r} is a built-in PVE realm")
+    base_dn = cfg.get("base_dn") or ""
+    if base_dn and not _DN_RE.match(base_dn):
+        problems.append(f"{path}.base_dn must be an LDAP distinguished name such as DC=example,DC=net "
+                        f"(got {base_dn!r}; server names belong in {path}.servers)")
+    group = cfg.get("admin_group") or ""
+    if cfg.get("realm") and group and not group.endswith(f"-{cfg['realm']}"):
+        problems.append(f"{path}.admin_group {group!r} is not a realm-synced group id — PVE names a synced "
+                        f"group <AD group>-<realm>, so it would be {group}-{cfg['realm']}")
     servers = raw.get("servers")
     if not isinstance(servers, list) or not 1 <= len(servers) <= 2:
         problems.append(f"{path}.servers must list one or two AD servers")
