@@ -12,7 +12,8 @@ Endpoints (see docs/baremetal-install.md for the full flow):
   GET  /firstboot              one-time-key gated per-node firstboot script
   POST /firstboot-credentials  pveum bootstrap phone-home -> Nautobot Secrets
   POST /webhook                installer post-install webhook -> state flip
-  GET  /info                   identity + baked-in profile list (jobs' preflight)
+  GET  /info                   identity, version + min_jobs_version (the jobs'
+                               handshake), baked-in profile list (jobs' preflight)
   GET  /healthz
 
 Security model (defense in depth, smallest-possible trust):
@@ -72,6 +73,31 @@ log = logging.getLogger("answer-service")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 BASE_DIR = Path(__file__).resolve().parent
+
+
+def _read_service_version() -> str:
+    """The one repo version (bmc/answer_service/VERSION, copied next to app.py
+    by the Dockerfile). A build without it is broken: fail here, at container
+    start, rather than serve version "" and let the jobs' handshake guess."""
+    path = BASE_DIR / "VERSION"
+    try:
+        text = path.read_text().strip()
+    except OSError as exc:
+        raise RuntimeError(f"{path} is missing — the image was built without VERSION ({exc})") from exc
+    if not re.match(r"^\d+\.\d+\.\d+\Z", text):
+        raise RuntimeError(f"{path} must hold one X.Y.Z version, got {text!r}")
+    return text
+
+
+# Version handshake (decision #56). The jobs (synced into Nautobot from the
+# same repo) read these from GET /info before touching a BMC or the forge:
+# a service older than their MIN_ANSWER_SERVICE_VERSION, or one whose
+# MIN_JOBS_VERSION is above their JOBS_VERSION, is refused with the fix.
+SERVICE_VERSION = _read_service_version()
+# The oldest jobs this build accepts — bump when the service starts relying
+# on something only newer jobs do (a new /answer input, a changed Secret name).
+MIN_JOBS_VERSION = "0.1.0"
+
 TEMPLATES = Environment(
     loader=FileSystemLoader(BASE_DIR / "templates"),
     undefined=StrictUndefined,
@@ -1156,6 +1182,11 @@ def info() -> dict:
         "cert_fingerprint": CERT_FINGERPRINT,
         "nfv_role": NFV_ROLE,
         "admin_enabled": ADMIN_ENABLED,
+        # Version handshake (decision #56): what this build is, and the oldest
+        # jobs it accepts. The jobs compare both against their own constants
+        # (jobs/lib/version.py) and refuse before any BMC/forge action.
+        "version": SERVICE_VERSION,
+        "min_jobs_version": MIN_JOBS_VERSION,
         # Baked-in install profiles and the profile keys this build understands.
         # The install job's preflight reads these before it touches a BMC:
         # profiles bake in at build time while the jobs arrive through the Git

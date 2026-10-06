@@ -13,6 +13,11 @@ The service is found via an **ExternalIntegration** named
 ``nfv-answer-service`` (remote URL + a SecretsGroup carrying the admin
 bearer as Generic/Token). The forge is DISABLED by default
 (ADMIN_ENABLED=false) — enable it only on the lab/build instance.
+
+Before asking the forge for anything, the job runs the version handshake
+(decision #56) on the service's ``GET /info``: a service older than these
+jobs require, or one that requires newer jobs, is refused with the fix —
+never with a POST.
 """
 
 import time
@@ -26,7 +31,7 @@ from nautobot.extras.choices import (
 )
 from nautobot.extras.models import ExternalIntegration
 
-INTEGRATION_NAME = "nfv-answer-service"
+from ..lib.answer_service import INTEGRATION_NAME, version_handshake
 
 
 class PrepareInstallerMedia(Job):
@@ -89,6 +94,12 @@ class PrepareInstallerMedia(Job):
         base, session = self._forge()
 
         info = session.get(f"{base}/info", timeout=15).json()
+        # Version handshake first (decision #56): refuse an out-of-step service
+        # before the admin check and before any POST reaches the forge.
+        verdict, message = version_handshake(info, base)
+        if verdict == "refuse":
+            raise RuntimeError(message)
+        self.logger.info("%s", message)
         self.logger.info(
             "Forge identity: answers at %s, fingerprint %s",
             info.get("public_url"), (info.get("cert_fingerprint") or "(none)")[:16],

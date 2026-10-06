@@ -17,6 +17,9 @@ WORKDIR /app
 COPY answer_service/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY answer_service/app.py .
+# One repo version for both halves (decision #56): app.py reads it at start
+# and serves it in /info; the jobs refuse a service older than they require.
+COPY answer_service/VERSION .
 COPY answer_service/templates/ templates/
 # Profiles baked at build time from bmc/profiles. Mount over /app/profiles at
 # runtime to update without rebuilding.

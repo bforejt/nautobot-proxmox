@@ -85,7 +85,15 @@ partition — per-node media, the opposite of this fleet design; unused here.)
    `ANSWER_CERT_FINGERPRINT` and `ANSWER_PUBLIC_URL`, and creates the node
    root-password hash — add `--enable-forge` on the lab/build instance to
    also enable and credential the media forge in the same run. Then
-   `docker compose --profile answer-service up -d --build`.
+   `docker compose --profile answer-service pull answer-service && docker compose --profile answer-service up -d`:
+   the service is the published image
+   `ghcr.io/bforejt/nautobot-proxmox-answer-service:<tag>`, pinned by
+   `ANSWER_SERVICE_VERSION` in `.env` (a checkout with
+   `ANSWER_SERVICE_BUILD_CONTEXT` set rebuilds it instead, with `up -d --build`).
+   The jobs refuse a service older than they require — after every sync of
+   this repo into Nautobot, move the pin to a tag the jobs accept and pull.
+   What any deployment must provide, and how the composer provides each
+   item, is the platform contract: [platform-contract.md](platform-contract.md).
 
    Running the service on some other stack is unsupported-but-possible:
    it is one container with documented requirements — every environment
@@ -336,31 +344,40 @@ still be reading it) — see Troubleshooting.
 Same chain as the SE350 runbook; the differences are the RAID adapter and
 the XCC2 checks. Pre-flight adds, on top of the SE350 list:
 
-**Before anything else: rebuild the answer service.** Install profiles bake
-into its image at build time, and the jobs arrive separately through the Git
-sync — so a service built before this profile merged still refuses the node
-with `403 ... no install profile for DeviceType 'ThinkEdge SE455 V3'` and the
-installer aborts at the answer fetch (exactly what the first tester run hit
-on 2026-09-16, after the storage step and the vmedia mount had already
-succeeded). On the composer host:
+**Before anything else: bring the answer service up to the jobs.** Install
+profiles bake into its image at build time, and the jobs arrive separately
+through the Git sync — so a service built before this profile merged still
+refuses the node with `403 ... no install profile for DeviceType 'ThinkEdge
+SE455 V3'` and the installer aborts at the answer fetch (exactly what the
+first tester run hit on 2026-09-16, after the storage step and the vmedia
+mount had already succeeded). On the composer host the service is the
+published image pinned by `ANSWER_SERVICE_VERSION` in `.env`: set the pin to
+a tag carrying the profile (the same release as the jobs you synced), then
 
 ```bash
-docker compose --profile answer-service up -d --build answer-service
+docker compose --profile answer-service pull answer-service && docker compose --profile answer-service up -d answer-service
 ```
 
-(`git pull` the checkout first if `ANSWER_SERVICE_BUILD_CONTEXT` points at a
-local one.) Then confirm the profile is inside before booting anything:
+(A checkout with `ANSWER_SERVICE_BUILD_CONTEXT` set rebuilds instead:
+`git pull` it, then `docker compose --profile answer-service up -d --build
+answer-service`.) Then confirm the profile is inside before booting anything:
 
 ```bash
 docker exec answer-service ls /app/profiles
 ```
 
-The install job now checks this itself: before it touches the BMC it reads
-the service's `GET /info` through the `nfv-answer-service`
-ExternalIntegration and refuses with `answer service at … has no install
-profile 'thinkedge-se455-v3'` (or `does not support profile feature(s) …`)
-when the image is stale. No integration or an unreachable service only logs
-a warning — the node, not the worker, is what must reach the service.
+The install job checks this itself: before it touches the BMC it reads the
+service's `GET /info` through the `nfv-answer-service` ExternalIntegration.
+The version handshake comes first (decision #56) — `answer service at … is
+version …, older than the … these jobs (version …) require`, `reports no
+usable version in GET /info` (a service from before the handshake), or
+`requires jobs version … or newer` (sync the jobs) — then the profile
+preflight refuses with `answer service at … has no install profile
+'thinkedge-se455-v3'` (or `does not support profile feature(s) …`) when the
+image is stale. Every refusal names the fix: pull the pinned image (or
+rebuild a checkout), or sync the Git repository in Nautobot. No integration
+or an unreachable service only logs a warning — the node, not the worker,
+is what must reach the service.
 
 1. **Discovery first, before any Device edits**: run `SE350 Platform Discovery`
    (it is generic — any Lenovo XCC) against the XCC2 IP with the host powered
@@ -512,7 +529,9 @@ Setup (once):
    Composer: **`./setup.sh --enable-forge`** does it all (generates the
    admin token once, mirrors it into the secrets file for the job, defaults
    the publish dir and base URL), then
-   `docker compose --profile answer-service up -d --build`. Manual
+   `docker compose --profile answer-service up -d answer-service` (the pinned
+   image, pulled already; `--build` only on a checkout with
+   `ANSWER_SERVICE_BUILD_CONTEXT`). Manual
    equivalent: the forge variables in
    [the service README's media-forge table](../bmc/answer_service/README.md)
    (`ANSWER_`-prefixed in composer's `env.example`). Field-deployed
@@ -769,8 +788,11 @@ install.
 | Symptom | Look at |
 |---|---|
 | Installer sits at answer fetch | Answer service log (`docker compose logs answer-service`): `REFUSED` lines say exactly why (unknown serial, wrong state, missing DefaultGW, no profile). **No `POST /answer` line at all** = the machine never reached the service (wrong media/URL, network, or the service host asleep/down) — nothing to fix in Nautobot |
-| Install job refuses: `answer service at … has no install profile '…'` / `does not support profile feature(s) …` | The preflight caught the stale-image case before booting: rebuild the answer service from the current main (`docker compose --profile answer-service up -d --build answer-service`) and re-run. A `did not answer GET /info` *warning* instead means the worker cannot reach the service; the install proceeds — check the node's own reachability if the fetch then fails |
-| Installer: `Fetching answer file via HTTP failed: http error: 403 Forbidden: {"detail":"no install profile for DeviceType '...'"}` | The answer service image predates the DeviceType's profile (profiles bake in at build; the jobs update independently via Git sync). Rebuild it from the current main — `docker compose --profile answer-service up -d --build answer-service` — verify with `docker exec answer-service ls /app/profiles`, then re-run the install job: the storage step adopts the volumes it already made and the media is re-mounted |
+| Install job / Prepare Installer Media refuses: `answer service at … is version …, older than the … these jobs (version …) require — on the composer, pull or rebuild the service (set ANSWER_SERVICE_VERSION to v… or newer in .env, then docker compose --profile answer-service pull answer-service && docker compose --profile answer-service up -d answer-service; a checkout rebuilds it with docker compose --profile answer-service up -d --build answer-service) and re-run` | The version handshake (decision #56) ran before any BMC or forge action: the deployed service is older than the jobs synced into Nautobot accept. Do what the message says — on the composer, move `ANSWER_SERVICE_VERSION` in `.env` to that tag (or newer) and pull; a checkout rebuilds instead — then re-run. Nothing was booted or prepared |
+| Install job / Prepare Installer Media refuses: `answer service at … reports no usable version in GET /info (…) — it predates the version handshake; these jobs (version …) require answer service … or newer — on the composer, pull or rebuild the service (set ANSWER_SERVICE_VERSION to v… or newer in .env, then docker compose --profile answer-service pull answer-service && docker compose --profile answer-service up -d answer-service; a checkout rebuilds it with docker compose --profile answer-service up -d --build answer-service) and re-run` / `answer service at … (version …) reports no usable min_jobs_version in GET /info (…) — these jobs (version …) cannot tell whether it accepts them — on the composer, pull or rebuild the service (set ANSWER_SERVICE_VERSION to v… or newer in .env, then docker compose --profile answer-service pull answer-service && docker compose --profile answer-service up -d answer-service; a checkout rebuilds it with docker compose --profile answer-service up -d --build answer-service) and re-run` | `/info` carries no `version` (a service built before decision #56), or a `version` / `min_jobs_version` that is not a plain `X.Y.Z` — the jobs fail closed on anything they cannot compare. Pull the service at a release tag (or rebuild a checkout at one) and re-run |
+| Install job / Prepare Installer Media refuses: `answer service at … (version …) requires jobs version … or newer, but these jobs are version … — in Nautobot, sync the nautobot-proxmox Git repository (Extensibility → Git Repositories → Sync) and re-run` | The other direction: the service was pulled to a newer tag than the jobs in Nautobot. Sync the Git repository (the jobs' `JOBS_VERSION` follows the repo) and re-run; nothing on the composer needs to change |
+| Install job refuses: `answer service at … has no install profile '…' (it carries […]) — profiles bake into the service image at build; on the composer, pull or rebuild the service (set ANSWER_SERVICE_VERSION to a tag carrying it in .env, then docker compose --profile answer-service pull answer-service && docker compose --profile answer-service up -d answer-service; a checkout rebuilds it with docker compose --profile answer-service up -d --build answer-service) and re-run` / `does not support profile feature(s) […] used by '…' — it would install a degraded layout; on the composer, pull or rebuild the service (set ANSWER_SERVICE_VERSION to a tag carrying it in .env, then docker compose --profile answer-service pull answer-service && docker compose --profile answer-service up -d answer-service; a checkout rebuilds it with docker compose --profile answer-service up -d --build answer-service) and re-run` | The preflight caught the stale-image case before booting: the service passed the version handshake but its build predates the DeviceType's profile or a profile key it uses. Pull the service at a tag carrying it (or rebuild a checkout) and re-run. A `did not answer GET /info` *warning* instead means the worker cannot reach the service; the install proceeds — check the node's own reachability if the fetch then fails. A `predates the profile list in GET /info` *warning* is the same stale-image case on a build too old to list its profiles |
+| Installer: `Fetching answer file via HTTP failed: http error: 403 Forbidden: {"detail":"no install profile for DeviceType '...'"}` | The answer service image predates the DeviceType's profile (profiles bake in at build; the jobs update independently via Git sync) and the install job's preflight did not run (no `nfv-answer-service` integration, or the worker could not reach the service). Pull the service at a tag carrying the profile — set `ANSWER_SERVICE_VERSION` in `.env`, then `docker compose --profile answer-service pull answer-service && docker compose --profile answer-service up -d answer-service` (a checkout: `up -d --build answer-service`) — verify with `docker exec answer-service ls /app/profiles`, then re-run the install job: the storage step adopts the volumes it already made and the media is re-mounted |
 | Installer: `filter did not match any device` / `... any devices` | The answer was issued, but its NIC filter (`ID_NET_NAME_MAC` from the pinned mgmt MAC) or the profile's disk filter matched nothing on this box. From the installer shell: `proxmox-auto-install-assistant device-info -t disk` / `-t network`, then `device-match disk KEY='glob'` until it lists exactly the intended disk(s); fix the profile (or the pinned MAC) and rebuild the answer service |
 | Need a shell on the installer | Every mode runs a root shell on **tty3** (`Ctrl+Alt+F3`; tty2 = installer stderr). A failed automated install drops to a debug shell on tty1 (our answers set `reboot-on-error = false`). To pause *before* anything runs, add `proxmox-debug` to the kernel line (press `e` in GRUB on the automated entry, or use the `debug` iPXE entry). Logs: `/tmp/fetch_answer.log`, `/tmp/auto_installer.log`, `/tmp/install-low-level.log` |
 | `Storage layout refused: ... JBOD` / `only N free` | The RAID adapter's drives are not `Unconfigured good` (JBOD, hot spare, or already in a volume of the wrong shape). Convert JBOD drives once in the XCC storage page or UEFI; a volume the step cannot adopt (wrong RAID level or drive set) must be deleted by hand — the step never deletes |
@@ -819,7 +841,7 @@ install.
 | Log `REFUSED: … installs static (…) but its install NIC … (via …) has no MAC — record the port's MAC on its Nautobot interface` (installer: `409 static install needs the install port's MAC (derived through the management bridge/LAG) recorded in Nautobot (contract §4)`) | The derivation reached a port without `mac_address`. Record the port's MAC (installer shell: `proxmox-auto-install-assistant device-info -t network`) |
 | Log `REFUSED: …: host_baseline.… (config context)` (installer: `409 config context: …`) — e.g. `host_baseline.serial_console.speed must be one of [9600, 19200, 38400, 57600, 115200] (got …)`, `…parity must be no, odd or even`, `host_baseline.serial_console has unknown key(s) […]`, `host_baseline.zfs_arc_max_bytes must be an integer >= 67108864 (64 MiB; got …)`, `host_baseline.remove_subscription_nag must be true or false (got …)`, `host_baseline.packages: '…' is not a valid Debian package name`, `host_baseline.packages must be a list of Debian package names`, `host_baseline.serial_console must be a mapping like {speed: 115200}`, `host_baseline.serial_console.word must be 5-8 (got …)`, `host_baseline.serial_console.stop must be 1 or 2 (got …)`, `config context host_baseline must be a mapping` | A firstboot input in the Device's rendered config context is malformed; it is refused at answer time, before the installer runs. Fix the config context (the `nfv-host-baseline` ConfigContextSchema catches most of these when you edit it) and re-run the install. *Missing* inputs are not refused — firstboot logs and skips them |
 | `500 profile install.serial_console must be a mapping like {unit: 0}` / ``… accepts only `unit` (got […]) — speed and framing come from the config context host_baseline.serial_console`` / `….unit must be an integer 0-7 (ttyS<unit>)` | The DeviceType profile's serial-port declaration is invalid; it is checked at answer time. Fix the profile and rebuild the answer service |
-| Install job warning: `answer service at … does not render the host_baseline firstboot input(s) […] set in this Device's config context — the node would install without them …` | The answer-service image predates decision #55: it answers but silently skips packages / serial console / ARC / nag hook. Rebuild it from the current main (`docker compose --profile answer-service up -d --build answer-service`). The Host Baseline job still ensures the packages |
+| Install job warning: `answer service at … does not render the host_baseline firstboot input(s) […] set in this Device's config context — the node would install without them (the Host Baseline job still ensures the packages); on the composer, pull or rebuild the service (set ANSWER_SERVICE_VERSION to a tag carrying it in .env, then docker compose --profile answer-service pull answer-service && docker compose --profile answer-service up -d answer-service; a checkout rebuilds it with docker compose --profile answer-service up -d --build answer-service)` | The answer-service image predates decision #55: it answers but silently skips packages / serial console / ARC / nag hook. Pull the service at a tag carrying them (or rebuild a checkout). The Host Baseline job still ensures the packages |
 | Firstboot log `serial console: the DeviceType profile declares ttyS0 but the SoT has no host_baseline.serial_console (speed) — serial console NOT configured` / `serial console: the SoT sets host_baseline.serial_console but the DeviceType profile declares no serial port (install.serial_console) — skipped` | Informational, never a refusal (decision #55): both halves are needed — the port from the profile, the speed from the config context. Set the missing half; a reinstall picks it up (the Host Baseline job does not configure the console) |
 | Firstboot log `packages: apt-get install … FAILED — the Host Baseline job retries it` / `serial console: update-grub FAILED` / `serial console: proxmox-boot-tool refresh FAILED` / `could not enable serial-getty@…` / `zfs arc: update-initramfs FAILED — the limit applies only once the initramfs is rebuilt` / `… step incomplete — continuing` | Firstboot's host-baseline steps never stop the script (they run after the credentials phone-home). Check `journalctl -u proxmox-first-boot` for the command's error; packages come back with the Host Baseline job, the others need the command re-run by hand (or a reinstall) |
 | Journal `nfv-remove-subscription-nag: pattern not found in /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js (proxmox-widget-toolkit …) - the UI keeps the subscription dialog; this toolkit version needs a new pattern` (or `patching … FAILED`) | The toolkit's subscription check changed shape in this release; apt is unaffected (the hook always exits 0). Update the pattern in the firstboot template (`firstboot.sh.j2`, `nfv_subscription_nag`) and redeploy the script, or leave the dialog |

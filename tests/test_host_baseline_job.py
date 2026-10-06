@@ -16,7 +16,9 @@ rollback-timer dance with a reconnect (also when the session drops); a
 re-run is a no-op; an identity mismatch writes nothing; no secret is ever on
 an argv of any fake command or in any log line.
 
-Needs bash >= 4 and python3 on Linux — runs in the answer-service image:
+Needs bash >= 4 and python3 on Linux — runs in the answer-service image
+(locally `nautobot-composer-answer-service` on stacks that build it, or
+`ghcr.io/bforejt/nautobot-proxmox-answer-service:<tag>`):
   docker run --rm -v "$PWD:/repo:ro" -w /repo nautobot-composer-answer-service \
       python3 tests/test_host_baseline_job.py
 """
