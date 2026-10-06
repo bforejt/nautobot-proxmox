@@ -23,6 +23,16 @@ and the honest gap register for what doesn't.
   step reproducible; every artifact self-describing (manifest + seed alongside).
 - **The SoT data contract** ([sot-data-contract.md](sot-data-contract.md)): the
   fixed interface between the adopter's layout process and these jobs.
+- **The platform contract** ([platform-contract.md](platform-contract.md),
+  decision #56): what any deployment of the install loop must provide — the
+  answer service's deployment contract is the portability boundary, item by
+  item with how the composer satisfies each — and the **version handshake**
+  between the jobs and the service (`GET /info` `version` /
+  `min_jobs_version` against the jobs' `JOBS_VERSION` /
+  `MIN_ANSWER_SERVICE_VERSION`): a named refusal before any BMC or node is
+  touched when the two halves are out of step, instead of a wasted boot
+  cycle. The composer pins the published service image
+  (`ANSWER_SERVICE_VERSION`) and syncs this repo — never the reverse.
 
 ## Onboarding sequence (what works today)
 
@@ -36,7 +46,10 @@ and the honest gap register for what doesn't.
    at stable `/images/<file>` URLs (the composer `firmware` profile, or any
    equivalent nginx). `[gap: not automated]`
 3. **Supply Secret VALUES** — the records themselves are pre-created by
-   `BootstrapNfvSchema` (text-file provider, `/opt/nautobot/secrets/<name>`).
+   `BootstrapNfvSchema` (by default the text-file provider at
+   `/opt/nautobot/secrets/<name>`; its `secrets_provider` /
+   `secrets_path_prefix` inputs change that — decision #56,
+   [platform-contract.md](platform-contract.md) item 3).
    On a composer stack: `./add-secret.sh <name>` per credential, or
    `./setup.sh --nfv-secrets` for all of them in one pass; elsewhere, write the
    files the records' paths name, or repoint records at your backend.
@@ -84,7 +97,7 @@ and the honest gap register for what doesn't.
 | **Image registration** *(closed — job-driven)* | `Register Image from Published Set` reads a published version set (either track) and creates the Staged records — checksum/size come from the set, never hand-typed. Manual entry from the scripts' printed recipes remains the fallback | Remaining manual: publish-copy to the firmware server; the build itself (see the build-template row) |
 | **Layout engine has no reference implementation** | Each adopter must author their Design Builder design from the contract; the getting-started worked example demonstrates the shape by hand | Adopter responsibility; a reference design would help |
 | **Real-pair validation incomplete** | SE350 discovery, vmedia checks, disk identity, and host verification are green on a real unit — but LACP bonds, VLAN trunks, jumbo, serial/OpenGear, the first real SE350 install, and the first automated SE455 V3 install remain unproven | The SE350 lab checklist + scheduling the first installs |
-| **Setup mostly automated, not fully** | Composer's `setup.sh` flags cover stack, jobs, bootstrap, secrets values, and the forge; remaining manual: per-node service accounts on pre-built hosts, image publish-copy, site intent | Firstboot covers new installs; a build-template job; the layout engine |
+| **Setup mostly automated, not fully** | Composer's `setup.sh` flags cover stack, jobs, bootstrap, secrets values, the forge and the service image pin (`--answer-service-version` → `ANSWER_SERVICE_VERSION`, pulled from `ghcr.io/bforejt/nautobot-proxmox-answer-service`; after a repo sync the pin moves to a tag the jobs accept — the handshake refuses otherwise); every item a deployment must provide is written down in [platform-contract.md](platform-contract.md). Remaining manual: per-node service accounts on pre-built hosts, image publish-copy, site intent; a non-composer deployment follows the contract item by item but is unsupported until one has been tested (#45) | Firstboot covers new installs; a build-template job; the layout engine |
 
 ## Verdict
 
