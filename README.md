@@ -88,7 +88,7 @@ storage blocks VM autostart when one node dies).
 | **Proxmox VE** | 9.x (validated on 9.2). Requires the `import` storage content type and API-token auth. Hosts are **standalone** (no cluster). |
 | **Firmware/image server** | Any HTTP(S) server the Proxmox nodes can reach at stable `/images/<file>` URLs. The [nautobot-composer](https://github.com/bforejt/nautobot-composer) project's `firmware` profile provides one (nginx + Filebrowser). |
 | **Git host** | Anywhere Nautobot can sync this repo from (GitHub today; any git remote works). |
-| **Network paths** | Nautobot worker → Proxmox API (`:8006`); Proxmox nodes → firmware server; Nautobot → git host. Nothing else. |
+| **Network paths** | VM track: Nautobot worker → Proxmox API (`:8006`); Proxmox nodes → firmware server; Nautobot → git host. The bare-metal install loop adds installing nodes → the answer service (HTTPS `:8800`), the worker → BMCs (Redfish) and nodes (SSH), and the worker → the service's `/info` (the version handshake) — [platform-contract.md item 7](docs/platform-contract.md#7-network-paths). |
 | **Hypervisor hardware** | Any x86 Proxmox host for the VM track (developed against a small NUC). Edge-platform material (BIOS policy, Redfish/XCC, wiring, install profiles for the SE350 and the SE455 V3) applies to the edge-hardware track only. |
 | **Guest images** | Ubuntu 24.04 cloud image (fetched at template build). Vendor VNF images (PAN-OS, IOS-XE) are entitlement-gated downloads you supply. |
 
@@ -189,14 +189,15 @@ adds only what's new). A release is one git tag `vX.Y.Z`: the
 `publish-answer-service` workflow builds and pushes
 `ghcr.io/bforejt/nautobot-proxmox-answer-service:vX.Y.Z` from it and fails
 unless `bmc/answer_service/VERSION` and `JOBS_VERSION` in
-`jobs/lib/version.py` both equal the tag — bump both (one repo version)
-before tagging; the composer pins the tag with `ANSWER_SERVICE_VERSION` and
-the jobs refuse a service older than they require
-([docs/platform-contract.md](docs/platform-contract.md) item 9). Before
-pushing, run the loader harness — it drives this
-repo through Nautobot's *real* job-loading code without needing a Nautobot
-install, and catches the classic silent failure (a directory missing
-`__init__.py` loads zero jobs):
+`jobs/lib/version.py` both equal the tag's version (the tag minus its leading
+`v`: tag `v0.1.0` ↔ `VERSION` `0.1.0` ↔ `JOBS_VERSION = "0.1.0"`) — bump both
+(one repo version) before tagging; the composer pins the tag with
+`ANSWER_SERVICE_VERSION` and the jobs refuse a service older than they
+require ([docs/platform-contract.md](docs/platform-contract.md) item 9).
+Before pushing, run the loader harness — it drives this repo through
+Nautobot's *real* job-loading code without needing a Nautobot install, and
+catches the classic silent failure (a directory missing `__init__.py` loads
+zero jobs):
 
 ```bash
 python3 tests/loader_harness.py
@@ -206,10 +207,10 @@ for t in tests/test_*.py; do python3 "$t"; done   # stdlib unit tests
 The host-baseline applier and job-simulation tests drive real bash ≥ 4 on
 Linux (they skip on macOS's bash 3.2); run the suite in the answer-service
 image to include them, plus the template renders and `validate-answer`
-(the image is `nautobot-composer-answer-service` on a stack that builds it
-locally, or the pulled
-`ghcr.io/bforejt/nautobot-proxmox-answer-service:<tag>` — substitute the
-name you have):
+(the image is `nautobot-composer-answer-service` on a stack built before the
+image pin, or `ghcr.io/bforejt/nautobot-proxmox-answer-service:<tag>` on one
+that pulls or builds the pinned image — `docker image ls | grep
+answer-service` shows which; substitute the name you have):
 
 ```bash
 docker run --rm -v "$PWD:/repo:ro" -w /repo -e PROFILE_DIR=/repo/bmc/profiles \

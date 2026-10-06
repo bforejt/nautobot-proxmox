@@ -104,13 +104,18 @@ refuses when it cannot. The bootstrap's own records (`xcc_username`,
 `proxmox_token_id`/`_secret`, `answer_service_admin_token`, the host-baseline
 names …) are created once with the provider and prefix the job is given —
 `secrets_provider` (`text-file`, the default, or `environment-variable`),
-`secrets_path_prefix` (default `/opt/nautobot/secrets`; records point at
-`<prefix>/<name>`), `secrets_env_prefix` — and the per-node token records
-always stay text-file under `<prefix>/nodes`. **All three must agree**: the
-bootstrap's `secrets_path_prefix` + `/nodes` = `NAUTOBOT_SECRETS_PATH` =
-`NFV_NODE_SECRETS_DIR`, or the records point at files nobody wrote. Values
-are never created by the bootstrap: the operator writes the files (or sets
-the variables) the records name.
+`secrets_path_prefix` (default `/opt/nautobot/secrets`; text-file records
+point at `<prefix>/<name>`; ignored for `environment-variable`),
+`secrets_env_prefix`. The per-node token records are never the bootstrap's:
+the service creates them at `NAUTOBOT_SECRETS_PATH/<file>` and the Host
+Baseline job at `NFV_NODE_SECRETS_DIR/<file>`, always text-file, whatever
+provider the bootstrap used. **All three must agree** with the text-file
+provider: the bootstrap's `secrets_path_prefix` + `/nodes` =
+`NAUTOBOT_SECRETS_PATH` = `NFV_NODE_SECRETS_DIR`, or the records point at
+files nobody wrote; with `environment-variable` the prefix drops out and the
+latter two must still agree — and the directory must still be mounted there
+in every Nautobot container. Values are never created by the bootstrap: the
+operator writes the files (or sets the variables) the records name.
 
 **Composer.** `./secrets` → `/opt/nautobot/secrets:ro` in the `nautobot` and
 `celery_beat` containers (the shared `x-nautobot-volumes` anchor); the
@@ -139,8 +144,9 @@ The media forge reads both values from `/info` so media can only ever be
 prepared against the running identity (decision #44). The consequence is the
 one operational rule here: **never casually regenerate the certificate** — a
 new fingerprint invalidates every prepared artifact, and the fix is to
-re-prepare each one (one `Prepare Installer Media` run per version, which is
-what #44 bought). Back the keypair up; it is not a repopulatable cache.
+re-prepare each one (one `Prepare Installer Media (Media Forge)` run per
+version, which is what #44 bought). Back the keypair up; it is not a
+repopulatable cache.
 
 **Composer.** `answer-service/certs/answer-service.crt` + `.key`, mounted at
 `/tls`, generated once by `./setup.sh --with-answer-service` and left
@@ -226,15 +232,27 @@ and purpose is the service README —
 deliberately not duplicated here: items 2–6 name the variables that *are*
 the contract; the rest (`DOMAIN`, `TIMEZONE`, `NFV_ROLE`,
 `ANSWER_AUTH_TOKEN`, `ROOT_SSH_KEYS_FILE`, `VERIFY_PHONE_HOME_SOURCE`, the
-key TTLs, the `pveum` bootstrap names …) tune behaviour without changing what
-the deployment must provide.
+key TTLs …) tune behaviour without changing what the deployment must
+provide. The `pveum` bootstrap names (`PVE_SERVICE_USER`, `PVE_TOKEN_NAME`,
+`PVE_ROLE_NAME`, `PVE_ROLE_PRIVS`) are documented as variables but the jobs
+assume their defaults (`svc-nfv@pve` is a reserved account in the Host
+Baseline; the Proxmox client names the `NFVAutomation` role in its privilege
+diagnostics) — leave them.
 
 **Composer.** The container has no `env_file` (the stack `.env` holds
-database credentials it must not see); every documented knob is an explicit
+database credentials it must not see). The contract variables of items 2–6
+are either fixed by the stack layout (`NAUTOBOT_URL`,
+`SSL_CERTFILE`/`SSL_KEYFILE`, `ROOT_PASSWORD_HASH_FILE`, `SECRETS_DIR`,
+`NAUTOBOT_SECRETS_PATH` — the compose network and mounts) or carried from
+their `ANSWER_*` value. Every documented tuning knob is an explicit
 `ANSWER_*` passthrough in `docker-compose.yml` (nautobot-composer#65) —
 `ANSWER_<NAME>` → `<NAME>`, e.g. `ANSWER_NFV_ROLE` → `NFV_ROLE` — and an unset
-one keeps the service default. `env.example` documents each with its
-default.
+one keeps the service default, **except** the ones the composer fixes on
+purpose and never reads from `.env`: the `pveum` names above (must match what
+the jobs expect), `NAUTOBOT_FS_UID`/`_GID` (the Nautobot image's uid/gid) and
+`PROFILE_DIR`/`DATA_DIR` (the image and volume layout) — setting
+`ANSWER_PVE_SERVICE_USER` or the like in `.env` is a silent no-op.
+`env.example` documents each passthrough with its default.
 
 ## 9. The image version pin and the handshake
 
@@ -244,21 +262,24 @@ version** (`bmc/answer_service/VERSION`, copied into the image, and
 **image** is published as
 `ghcr.io/bforejt/nautobot-proxmox-answer-service:vX.Y.Z` (and `latest`) by
 `.github/workflows/publish-answer-service.yml` on every `v*.*.*` tag, which
-fails unless `VERSION` and `JOBS_VERSION` both equal the tag; the package is
-made public once in GitHub's package settings. First tag: **`v0.1.0`**. A
-deployment runs a *pinned* image (or builds the same tag's `bmc/` context).
+fails unless `VERSION` and `JOBS_VERSION` both equal the tag's version — the
+tag minus its leading `v`: tag `v0.1.0` ↔ `VERSION` `0.1.0` ↔
+`JOBS_VERSION = "0.1.0"`; the package is made public once in GitHub's
+package settings. First tag: **`v0.1.0`**. A deployment runs a *pinned*
+image (or builds the same tag's `bmc/` context).
 
 The **handshake**: `GET /info` reports `version` (the running service) and
 `min_jobs_version` (the oldest jobs it accepts); the jobs carry
 `JOBS_VERSION` and `MIN_ANSWER_SERVICE_VERSION` (the oldest service they
 accept). Versions are strict `X.Y.Z` with an optional leading `v`; anything
 else (`-dev`, `+build`, `latest`, empty) is unparseable and treated as too
-old — fail closed. `Install Proxmox Node` (its answer-service preflight,
-before any BMC action) and `Prepare Installer Media` (right after `/info`,
-before any `POST`) **refuse** when the service's `version` is older than
-`MIN_ANSWER_SERVICE_VERSION`, when `/info` carries no usable `version` (the
-service predates the handshake), or when its `min_jobs_version` is newer than
-`JOBS_VERSION` (or unparseable). An unreachable `/info` stays a warning — the
+old — fail closed. `Install Proxmox Node (SoT-driven)` (its answer-service
+preflight, before any BMC action) and `Prepare Installer Media (Media Forge)`
+(right after `/info`, before any `POST`) **refuse** when the service's
+`version` is older than `MIN_ANSWER_SERVICE_VERSION`, when `/info` carries no
+usable `version` (the service predates the handshake), or when its
+`min_jobs_version` is newer than `JOBS_VERSION` (or unparseable). An
+unreachable `/info` stays a warning — the
 installing node, not the worker, must reach the service. Each refusal names
 both versions and the fix; the exact texts are troubleshooting rows in
 [baremetal-install.md](baremetal-install.md#troubleshooting). The
@@ -271,8 +292,9 @@ depending on newer jobs; the repo version moves on every release.
 **Composer.** `ANSWER_SERVICE_VERSION=v0.1.0` in `.env` (set with
 `./setup.sh --answer-service-version vX.Y.Z` or by editing it): the
 `answer-service` service is
-`image: ghcr.io/bforejt/nautobot-proxmox-answer-service:${ANSWER_SERVICE_VERSION}`
-with `pull_policy: missing` and a build context tracking the same tag, so
+`image: ghcr.io/bforejt/nautobot-proxmox-answer-service:${ANSWER_SERVICE_VERSION:-v0.1.0}`
+(an unset pin still resolves to `v0.1.0`) with `pull_policy: missing` and a
+build context tracking the same tag, so
 `docker compose --profile answer-service pull answer-service && docker compose --profile answer-service up -d answer-service`
 moves the pin, a checkout-less `docker compose build` reproduces it, and only
 an explicit `ANSWER_SERVICE_BUILD_CONTEXT` (a local `bmc/` checkout, for
