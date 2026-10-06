@@ -189,8 +189,41 @@ nfv_service_enabled() {  # nfv_service_enabled STEP UNIT — enabled and active
   return 1
 }
 
+nfv_apt_candidates() {  # PKG... -> lines "pkg <version|none|unknown>" from apt-cache policy; never fails
+  local p cand
+  for p in "$@"; do
+    cand=""
+    if command -v apt-cache >/dev/null 2>&1; then
+      cand=$(apt-cache policy "$p" 2>/dev/null </dev/null | awk '/^  Candidate:/ {print $2; exit}')
+    fi
+    case "$cand" in "") cand=unknown ;; "(none)") cand=none ;; esac
+    printf '%s %s\n' "$p" "$cand"
+  done
+}
+
+nfv_apt_sources_summary() {  # one bounded line: the node's configured apt sources
+  { grep -hs '^deb ' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null
+    grep -hs -E '^(URIs|Suites):' /etc/apt/sources.list.d/*.sources 2>/dev/null
+  } | tr -s ' \n' ' ' | cut -c1-300
+}
+
+nfv_apt_uninstallable() {  # PKG... -> "pkg (none) pkg2 (unknown)" for the ones apt cannot install
+  local p cand
+  local -a bad=()
+  while read -r p cand; do
+    case "$cand" in unknown|none) bad+=("$p ($cand)") ;; esac
+  done < <(nfv_apt_candidates "$@")
+  printf '%s' "${bad[*]:-}"
+}
+
+# apt-get update reports fetch failures (no DNS, no egress, a dead mirror) as
+# W: lines and exits 0 unless Error-Mode=any — so a node with no Debian index
+# used to fail only at install time with "Unable to locate package". Now the
+# candidates are checked first and the step says what is actually wrong.
+NFV_APT_HINT="the node's package index is missing or its sources lack Debian 'main' — check DNS/egress from the node and /etc/apt/sources.list.d/, then: apt-get -o APT::Update::Error-Mode=any update"
+
 nfv_step_packages() {  # inputs: PKGS (array)
-  local p status out rc
+  local p status out rc bad upd_note=""
   local -a missing=()
   for p in "${PKGS[@]}"; do
     status=$(dpkg-query -W -f='${db:Status-Abbrev}' "$p" 2>/dev/null)
@@ -199,11 +232,23 @@ nfv_step_packages() {  # inputs: PKGS (array)
   if [ "${#missing[@]}" -eq 0 ]; then
     nfv_emit packages packages ok "present: ${PKGS[*]}"
   elif nfv_dry; then
+    bad=$(nfv_apt_uninstallable "${missing[@]}")
+    if [ -n "$bad" ]; then
+      nfv_emit packages apt warning "apt has no installable candidate for: $bad — $NFV_APT_HINT; sources: $(nfv_apt_sources_summary)"
+    fi
     nfv_emit packages packages would_change "would install: ${missing[*]}"
   else
-    out=$(DEBIAN_FRONTEND=noninteractive apt-get update -q 2>&1 </dev/null)
+    out=$(DEBIAN_FRONTEND=noninteractive apt-get -q -o APT::Update::Error-Mode=any update 2>&1 </dev/null)
     rc=$?
-    [ "$rc" -eq 0 ] || nfv_emit packages apt-update warning "apt-get update rc=$rc (trying the install anyway): $(nfv_tail "$out")"
+    if [ "$rc" -ne 0 ]; then
+      upd_note="apt-get update rc=$rc: $(nfv_tail "$out")"
+      nfv_emit packages apt-update warning "$upd_note (trying the install anyway)"
+    fi
+    bad=$(nfv_apt_uninstallable "${missing[@]}")
+    if [ -n "$bad" ]; then
+      nfv_emit packages packages failed "apt has no installable candidate for: $bad — $NFV_APT_HINT${upd_note:+ ($upd_note)}; sources: $(nfv_apt_sources_summary)"
+      return 1
+    fi
     out=$(DEBIAN_FRONTEND=noninteractive apt-get install -y -q -o Dpkg::Options::=--force-confdef \
           -o Dpkg::Options::=--force-confold "${missing[@]}" 2>&1 </dev/null)
     rc=$?
