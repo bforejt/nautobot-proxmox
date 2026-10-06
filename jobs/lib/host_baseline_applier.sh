@@ -544,9 +544,17 @@ nfv_step_network_apply() {  # inputs: NEW_IFACES ROLLBACK_SECONDS NET_TS
   out=$(ifup -a -s -i "$new" 2>&1 </dev/null)
   rc=$?
   if [ "$rc" -ne 0 ]; then
-    rm -f -- "$new"
-    nfv_emit network syntax failed "ifupdown2 rejected the rendered file (rc=$rc): $(nfv_tail "$out") — nothing applied"
-    return 1
+    # ifupdown2 exits 1 for warnings as well as errors. Since 3.3 it flags
+    # `bridge-fd 0` ("valid attribute range: 2-255") — the stanza PVE itself
+    # writes on every bridge and the one already in the node's file — so only
+    # its own "error:" lines reject the render; warning-only output is
+    # reported and the apply goes ahead. No recognizable line at all fails closed.
+    if printf '%s\n' "$out" | grep -qiE '^error[: ]' || ! printf '%s\n' "$out" | grep -qiE '^warning[: ]'; then
+      rm -f -- "$new"
+      nfv_emit network syntax failed "ifupdown2 rejected the rendered file (rc=$rc): $(nfv_tail "$out") — nothing applied"
+      return 1
+    fi
+    nfv_emit network syntax warning "ifupdown2 warned about the rendered file (rc=$rc) but reported no error — continuing (ifupdown2 >= 3.3 flags PVE's own bridge-fd 0): $(nfv_tail "$out")"
   fi
   if ! cp -a -- "$cur" "$bak"; then
     rm -f -- "$new"

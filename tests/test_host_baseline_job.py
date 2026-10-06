@@ -149,6 +149,8 @@ if name == "systemctl":
         if "--now" in args: s["active"] = True
     save(); sys.exit(0)
 if name == "ifup":
+    if "-s" in args and state.get("ifup_syntax"):
+        print(state["ifup_syntax"]); sys.exit(1)
     sys.exit(0)
 if name == "ifreload":
     sys.exit(0)
@@ -482,6 +484,25 @@ class JobSimulation(unittest.TestCase):
         self.assertIn("[3/8] apt: warning — apt has no installable candidate for: snmpd (none)", logged)
         self.assertIn("[3/8] packages: would_change — would install: lldpd snmpd", logged)
         self.assertEqual(self.node()["installed"], [])
+
+    def test_network_applies_despite_ifupdown2_warnings(self):
+        """ifupdown2 >= 3.3 exits 1 on PVE's own `bridge-fd 0` (the tester's node, 2026-10-06);
+        a warning-only check must not block the apply."""
+        self.set_node(ifup_syntax='warning: vmbr0: bridge-fd: value of out range "0": valid attribute range: 2-255')
+        job, device, result = self.run_apply()
+        self.assertIn("host baseline applied", result)
+        logged = "\n".join(line for _, line in job.logger.lines)
+        self.assertIn("[7/8] syntax: warning — ifupdown2 warned about the rendered file", logged)
+        self.assertNotEqual((pathlib.Path(self.tmp) / "interfaces").read_text(), INSTALLER_INTERFACES)
+
+    def test_network_refuses_ifupdown2_errors(self):
+        self.set_node(ifup_syntax="error: vmbr0: bridge-ports: nic9 does not exist")
+        job = self.job()
+        with self.assertRaises(self.mod.StepFailed):
+            job.run(fake_device(), dry_run=False, confirm=True)
+        logged = "\n".join(line for _, line in job.logger.lines)
+        self.assertIn("ifupdown2 rejected the rendered file", logged)
+        self.assertEqual((pathlib.Path(self.tmp) / "interfaces").read_text(), INSTALLER_INTERFACES)
 
     def run_apply(self, device=None, drop_on=None):
         device = device or fake_device()
