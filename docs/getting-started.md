@@ -29,9 +29,9 @@ The sync and the bootstrap are Celery tasks, so on composer they need a
 running worker, not just the healthy web container `--wait` checks. A
 `--build --start` run recreates the worker, which takes another 30-60 s to
 register; until then Nautobot answers the sync with `503 Service Unavailable`
-("No celery workers running"). Current composer waits up to 5 minutes for
-the worker and otherwise stops with `REFUSED (no Celery worker)`; an older
-composer instead dies with a Python traceback ending in
+("No celery workers running"). Composer at or after nautobot-composer#68
+waits up to 5 minutes for the worker and otherwise stops with
+`REFUSED (no Celery worker)`; an older composer instead dies with a Python traceback ending in
 `urllib.error.HTTPError: HTTP Error 503: Service Unavailable`, after the
 `repo: reusing …` line. Either way nothing was synced: once
 `docker compose ps celery_worker` shows `healthy`, re-run only the bring-up,
