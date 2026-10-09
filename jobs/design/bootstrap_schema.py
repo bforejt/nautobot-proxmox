@@ -68,6 +68,9 @@ from ..lib.secret_records import (
     secret_record_defaults,
 )
 
+# Nautobot groups jobs by this module attribute; every job in this repo shares one section.
+name = "Proxmox Automation"
+
 PROVISIONING_STATES = [
     "awaiting_install",
     "bm_installed",

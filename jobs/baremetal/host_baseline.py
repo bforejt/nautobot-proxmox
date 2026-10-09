@@ -36,6 +36,9 @@ from ..lib import host_baseline as hb
 from ..lib.answer_service import NFV_ROLE, nfv_role_refusal
 from ..lib.nautobot_helpers import NODE_SECRETS_DIR, store_node_token, stored_node_token
 
+# Nautobot groups jobs by this module attribute; every job in this repo shares one section.
+name = "Proxmox Automation"
+
 STEPS = (
     "Gates (SoT facts)",
     "Identity (hostname + DMI serial)",

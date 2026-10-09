@@ -16,6 +16,9 @@ from nautobot.extras.models import RelationshipAssociation, Status
 from ..lib.nautobot_helpers import resolve_proxmox_credentials
 from ..lib.proxmox_client import ProxmoxClient, ProxmoxError
 
+# Nautobot groups jobs by this module attribute; every job in this repo shares one section.
+name = "Proxmox Automation"
+
 
 class DecommissionVnfDevice(Job):
     class Meta:

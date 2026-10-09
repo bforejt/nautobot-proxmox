@@ -42,6 +42,9 @@ from nautobot.extras.models import Secret
 
 from ..lib.install_delivery import DeliveryError, load_profile
 
+# Nautobot groups jobs by this module attribute; every job in this repo shares one section.
+name = "Proxmox Automation"
+
 def _human(num_bytes):
     value = float(num_bytes or 0)
     for unit in ("B", "K", "M", "G", "T"):

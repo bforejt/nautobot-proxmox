@@ -56,6 +56,9 @@ from ..lib.proxmox_client import ImageIntegrityError, ProxmoxClient, require_ima
 from ..lib.redfish_discovery import RedfishDiscovery
 from ..lib.storage_layout import StorageLayoutError, apply_storage_layout, parse_storage_spec
 
+# Nautobot groups jobs by this module attribute; every job in this repo shares one section.
+name = "Proxmox Automation"
+
 
 class ContractViolation(Exception):
     """The SoT record is missing something the contract requires — refuse

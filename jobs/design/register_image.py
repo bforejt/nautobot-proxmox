@@ -34,6 +34,9 @@ from ..lib.published_set import (
     resolve_field,
 )
 
+# Nautobot groups jobs by this module attribute; every job in this repo shares one section.
+name = "Proxmox Automation"
+
 HTTP_TIMEOUT = 30
 HASH_CHUNK = 4 * 1024 * 1024
 
