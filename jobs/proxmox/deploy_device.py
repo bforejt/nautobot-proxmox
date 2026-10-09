@@ -56,6 +56,9 @@ from ..lib.proxmox_client import (
     rollback_vm_decision,
 )
 
+# Nautobot groups jobs by this module attribute; every job in this repo shares one section.
+name = "Proxmox Automation"
+
 # Fleet-wide console password for cloud-init guests (users log in at the
 # desktop/console, never SSH). Proxmox hashes it before storing; the plaintext
 # only transits the TLS API call. Rotation = update this Secret + a converge

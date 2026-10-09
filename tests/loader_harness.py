@@ -16,7 +16,7 @@ them locally, pre-push, by running the repo through Nautobot's REAL loader:
      ltm-2.4, stdlib-only; cached in tests/.cache/, override with the
      NAUTOBOT_MODULE_LOADING env var for offline runs) and drives it the way
      the sync does;
-  4. asserts every expected job class registered.
+  4. asserts every expected job class registered, all under one grouping.
 
 Run:  python3 tests/loader_harness.py
 Add a job? Add its class name to EXPECTED_JOBS below.
@@ -52,7 +52,12 @@ EXPECTED_JOBS = {
     "HostBaseline",
 }
 
+# Nautobot's Job.grouping is the job module's `name` attribute; every job in
+# this repo shares one section in the Jobs list.
+EXPECTED_GROUPING = "Proxmox Automation"
+
 REGISTRY = []
+GROUPINGS = {}
 
 
 # ---- import-surface stubs ---------------------------------------------------
@@ -66,12 +71,20 @@ def _placeholder(name):
     return type(name, (), {"__init__": lambda self, *a, **k: None})
 
 
+def _register_jobs(*classes):
+    # Record the caller's module-level `name` the way Job.grouping reads it.
+    grouping = sys._getframe(1).f_globals.get("name")
+    for cls in classes:
+        REGISTRY.append(cls)
+        GROUPINGS[cls.__name__] = grouping
+
+
 def _make_stub_module(fullname):
     mod = types.ModuleType(fullname)
     mod.__path__ = []  # behaves as a package so submodule imports resolve here too
     if fullname == "nautobot.apps.jobs":
         mod.Job = type("Job", (), {})
-        mod.register_jobs = lambda *classes: REGISTRY.extend(classes)
+        mod.register_jobs = _register_jobs
     cache = {}
 
     def _getattr(name, _cache=cache, _fullname=fullname):
@@ -145,9 +158,15 @@ def main():
         print("(most common cause: a directory missing __init__.py — "
               "pkgutil.walk_packages skips it silently)")
         return 1
+    ungrouped = {job: g for job, g in GROUPINGS.items() if g != EXPECTED_GROUPING}
+    if ungrouped:
+        print(f"FAIL: jobs outside the {EXPECTED_GROUPING!r} grouping: {ungrouped}")
+        print(f'(add `name = "{EXPECTED_GROUPING}"` at module level in the job file)')
+        return 1
     if extra:
         print(f"note: unlisted jobs registered (add to EXPECTED_JOBS): {sorted(extra)}")
-    print("OK: all expected jobs registered via Nautobot's real loader")
+    print("OK: all expected jobs registered via Nautobot's real loader, "
+          f"grouped under {EXPECTED_GROUPING!r}")
     return 0
 
 

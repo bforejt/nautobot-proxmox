@@ -23,6 +23,9 @@ from nautobot.extras.models import Secret
 
 from ..lib.redfish_discovery import RedfishDiscovery
 
+# Nautobot groups jobs by this module attribute; every job in this repo shares one section.
+name = "Proxmox Automation"
+
 XCC_USERNAME_SECRET_NAME = "xcc_username"
 XCC_PASSWORD_SECRET_NAME = "xcc_password"
 

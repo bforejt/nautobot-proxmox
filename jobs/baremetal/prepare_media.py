@@ -33,6 +33,9 @@ from nautobot.extras.models import ExternalIntegration
 
 from ..lib.answer_service import INTEGRATION_NAME, version_handshake
 
+# Nautobot groups jobs by this module attribute; every job in this repo shares one section.
+name = "Proxmox Automation"
+
 
 class PrepareInstallerMedia(Job):
     class Meta:
